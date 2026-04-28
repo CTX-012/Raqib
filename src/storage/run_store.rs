@@ -137,6 +137,18 @@ pub struct RunMetrics {
     pub tokens_per_sec_avg: Option<f32>,
     pub tokens_per_sec_peak: Option<f32>,
     pub kv_cache_peak_pct: Option<f32>,
+    /// Tier 3.3 — time-averaged KV cache occupancy across all telemetry
+    /// samples for this run. None when no sampler ever reported a KV
+    /// reading. Useful for "this server ran hot the whole time" vs
+    /// "spiked once" — peak alone can't distinguish them.
+    pub kv_cache_avg_pct: Option<f32>,
+    /// Tier 3.3 — count of KV-cache evictions / request preemptions
+    /// observed during the run. Computed as the delta between the
+    /// runtime's monotonic counter at the first and last sample, so
+    /// counter resets (process restart with PID reuse) read as zero
+    /// rather than negative. None when no sampler exposed an eviction
+    /// counter for this PID.
+    pub kv_cache_evictions_total: Option<u64>,
     pub concurrent_requests_peak: Option<u32>,
 
     /// Tier 3.2 — same `tokens_per_sec_avg` arithmetic but restricted

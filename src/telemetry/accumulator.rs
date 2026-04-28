@@ -37,7 +37,20 @@ pub struct PerPidStats {
 
     // KV cache.
     kv_pct_peak: f32,
+    /// Counts samples where a *new* peak was set. Kept for backward
+    /// compatibility with the original peak-presence flag; the proper
+    /// sample count for averaging lives in `kv_pct_count` below.
     kv_pct_samples: u32,
+    /// Tier 3.3 — sum + count of every finite kv_cache_pct reading,
+    /// for `kv_cache_avg_pct`. Distinct from `kv_pct_samples` (which
+    /// only ticks on new peaks).
+    kv_pct_sum: f32,
+    kv_pct_count: u32,
+    /// Tier 3.3 — first and last KV-eviction counter values observed
+    /// for this PID. Delta `last - first` = evictions during the run.
+    /// `None` when no sampler ever reported a counter.
+    kv_evictions_first: Option<u64>,
+    kv_evictions_last: Option<u64>,
 
     // Concurrent requests.
     concurrent_peak: u32,
@@ -122,10 +135,25 @@ impl PerPidStats {
         }
         if let Some(kv) = f.kv_cache_pct
             && kv.is_finite()
-            && kv > self.kv_pct_peak
+            && (0.0..=100.0).contains(&kv)
         {
-            self.kv_pct_peak = kv;
-            self.kv_pct_samples += 1;
+            self.kv_pct_sum += kv;
+            self.kv_pct_count = self.kv_pct_count.saturating_add(1);
+            if kv > self.kv_pct_peak {
+                self.kv_pct_peak = kv;
+                self.kv_pct_samples += 1;
+            }
+        }
+        // Eviction counter: monotonic from the runtime. Latch first-
+        // and last-seen values; counter regression (PID reuse, runtime
+        // bug) snaps `first` forward so the delta never goes negative.
+        if let Some(ev) = f.kv_cache_evictions {
+            self.kv_evictions_last = Some(ev);
+            match self.kv_evictions_first {
+                None => self.kv_evictions_first = Some(ev),
+                Some(prev) if ev < prev => self.kv_evictions_first = Some(ev),
+                _ => {}
+            }
         }
         if let Some(c) = f.concurrent_requests
             && c > self.concurrent_peak
@@ -201,6 +229,11 @@ impl PerPidStats {
             tokens_per_sec_peak: opt_finite(self.tps_peak, self.tps_samples > 0),
 
             kv_cache_peak_pct: opt_finite(self.kv_pct_peak, self.kv_pct_samples > 0),
+            kv_cache_avg_pct: avg(self.kv_pct_sum, self.kv_pct_count),
+            kv_cache_evictions_total: match (self.kv_evictions_first, self.kv_evictions_last) {
+                (Some(first), Some(last)) => Some(last.saturating_sub(first)),
+                _ => None,
+            },
             concurrent_requests_peak: if self.concurrent_peak > 0 {
                 Some(self.concurrent_peak)
             } else {
@@ -433,6 +466,95 @@ mod tests {
         });
         // No second sample → no integration → no joules.
         assert!(acc.snapshot(1).unwrap().energy_joules_total.is_none());
+    }
+
+    /// Tier 3.3 — average kv_cache_pct across all samples, distinct
+    /// from peak. A run that hovered at 90% is materially different
+    /// from one that touched 90% once.
+    #[test]
+    fn kv_cache_avg_pct_tracks_all_samples() {
+        let mut acc = TelemetryAccumulator::new();
+        for kv in [10.0, 50.0, 90.0_f32] {
+            acc.record(TelemetryFrame {
+                pid: 1,
+                kv_cache_pct: Some(kv),
+                ..TelemetryFrame::new(1)
+            });
+        }
+        let m = acc.snapshot(1).unwrap();
+        assert!((m.kv_cache_avg_pct.unwrap() - 50.0).abs() < 1e-3);
+        assert!((m.kv_cache_peak_pct.unwrap() - 90.0).abs() < 1e-3);
+    }
+
+    /// Out-of-range KV percentages (negative, >100, NaN) are dropped —
+    /// must not contribute to the average or peak.
+    #[test]
+    fn kv_cache_pct_out_of_range_rejected() {
+        let mut acc = TelemetryAccumulator::new();
+        for kv in [-1.0, 101.0, f32::NAN] {
+            acc.record(TelemetryFrame {
+                pid: 1,
+                kv_cache_pct: Some(kv),
+                ..TelemetryFrame::new(1)
+            });
+        }
+        let m = acc.snapshot(1).unwrap();
+        assert!(m.kv_cache_avg_pct.is_none());
+        assert!(m.kv_cache_peak_pct.is_none());
+    }
+
+    /// Tier 3.3 — eviction delta is `last - first`. Counters are
+    /// monotonic per-process so the difference is the run total.
+    #[test]
+    fn kv_cache_evictions_total_is_delta() {
+        let mut acc = TelemetryAccumulator::new();
+        for ev in [5u64, 7, 12, 30] {
+            acc.record(TelemetryFrame {
+                pid: 1,
+                kv_cache_evictions: Some(ev),
+                ..TelemetryFrame::new(1)
+            });
+        }
+        let m = acc.snapshot(1).unwrap();
+        assert_eq!(m.kv_cache_evictions_total, Some(25)); // 30 - 5
+    }
+
+    /// A counter that decreases (PID reuse, restart) snaps `first`
+    /// forward so the delta never goes negative.
+    #[test]
+    fn kv_cache_evictions_handles_counter_reset() {
+        let mut acc = TelemetryAccumulator::new();
+        acc.record(TelemetryFrame {
+            pid: 1,
+            kv_cache_evictions: Some(100),
+            ..TelemetryFrame::new(1)
+        });
+        // counter resets to a small value (process restart, PID reuse)
+        acc.record(TelemetryFrame {
+            pid: 1,
+            kv_cache_evictions: Some(2),
+            ..TelemetryFrame::new(1)
+        });
+        acc.record(TelemetryFrame {
+            pid: 1,
+            kv_cache_evictions: Some(7),
+            ..TelemetryFrame::new(1)
+        });
+        let m = acc.snapshot(1).unwrap();
+        assert_eq!(m.kv_cache_evictions_total, Some(5)); // 7 - 2
+    }
+
+    /// No eviction samples → field is None, not Some(0).
+    #[test]
+    fn kv_cache_evictions_none_without_samples() {
+        let mut acc = TelemetryAccumulator::new();
+        acc.record(TelemetryFrame {
+            pid: 1,
+            kv_cache_pct: Some(50.0),
+            ..TelemetryFrame::new(1)
+        });
+        let m = acc.snapshot(1).unwrap();
+        assert_eq!(m.kv_cache_evictions_total, None);
     }
 
     /// Authoritative model name from Ollama is stamped onto stats.

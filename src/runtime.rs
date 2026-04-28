@@ -69,9 +69,26 @@ pub struct RuntimeState {
     /// Recent regression alerts (Tier 1.3). Bounded by
     /// `runtime.audit_history` so it doesn't grow unbounded.
     pub regressions: VecDeque<crate::analysis::RegressionEvent>,
+    /// Tier 3.3 — per-PID live telemetry for the registry panel. Refreshed
+    /// each tick from the dispatcher's accumulator. Keyed by PID; entries
+    /// only present for AI processes the dispatcher has sampled at least
+    /// once. Empty when telemetry is disabled.
+    pub live_telemetry: HashMap<u32, LiveTelemetry>,
     pub dry_run: bool,
     pub tick_count: u64,
     pub last_tick: Option<Instant>,
+}
+
+/// Tier 3.3 — what the UI knows *right now* about a single PID's
+/// telemetry. Computed each tick from the dispatcher; not persisted.
+/// Kept narrow on purpose — full `RunMetrics` is ~20 fields and most
+/// of them aren't useful in a live panel.
+#[derive(Debug, Clone, Default)]
+pub struct LiveTelemetry {
+    /// Peak KV-cache occupancy seen so far this run, percent (0..=100).
+    pub kv_cache_peak_pct: Option<f32>,
+    /// Eviction-counter delta so far this run.
+    pub kv_cache_evictions_total: Option<u64>,
 }
 
 impl RuntimeState {
@@ -453,6 +470,28 @@ impl Runtime {
                 KillAction::Skipped => format!("skipped:{}", reason),
             };
             *self.kills_by_reason.entry(key).or_insert(0) += 1;
+        }
+
+        // Tier 3.3 — refresh per-PID live telemetry the registry panel
+        // reads. Pulls from the dispatcher's accumulator (already
+        // updated above by `d.tick(...)`). Empty when telemetry is
+        // off or the accumulator has no samples for that PID.
+        self.state.live_telemetry.clear();
+        if let Some(d) = &self.telemetry {
+            for p in &annotated {
+                if p.category == AICategory::NotAi {
+                    continue;
+                }
+                if let Some(m) = d.metrics_for(p.pid) {
+                    self.state.live_telemetry.insert(
+                        p.pid,
+                        LiveTelemetry {
+                            kv_cache_peak_pct: m.kv_cache_peak_pct,
+                            kv_cache_evictions_total: m.kv_cache_evictions_total,
+                        },
+                    );
+                }
+            }
         }
 
         self.state.annotated = annotated;

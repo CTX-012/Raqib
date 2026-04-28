@@ -1,12 +1,20 @@
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span};
 use ratatui::widgets::{List, ListItem, ListState};
 
 use crate::runtime::RuntimeState;
 
 use super::super::app::{App, FocusedPanel};
 use super::panel_block;
+
+/// Tier 3.3 — KV-cache pressure threshold. At or above this, the
+/// registry row colours the `KV ..%` segment red. Below, it stays
+/// cyan with the rest of the line. The number is the same warning
+/// line vLLM operators draw at, and it's what `latest.md` 3.3 calls
+/// out explicitly.
+const KV_HOT_PCT: f32 = 80.0;
 
 pub fn render(f: &mut Frame, area: Rect, state: &RuntimeState, app: &App) {
     let focused = app.focus() == FocusedPanel::Registry;
@@ -29,7 +37,7 @@ pub fn render(f: &mut Frame, area: Rect, state: &RuntimeState, app: &App) {
                 .vram_bytes
                 .map(|b| format!("{:>4}M", b / (1024 * 1024)))
                 .unwrap_or_else(|| "   -".into());
-            let label = format!(
+            let head = format!(
                 "{:>6} {:<9?} {:>5.1}% {:>5}M {} {:<18} {}",
                 p.pid,
                 p.category,
@@ -39,7 +47,28 @@ pub fn render(f: &mut Frame, area: Rect, state: &RuntimeState, app: &App) {
                 truncate(&p.name, 18),
                 model,
             );
-            ListItem::new(label).style(Style::default().fg(Color::Cyan))
+            let cyan = Style::default().fg(Color::Cyan);
+            let mut spans: Vec<Span> = vec![Span::styled(head, cyan)];
+
+            // Tier 3.3 — append `  KV NN%` when the dispatcher has a
+            // reading. Red when >=80%, cyan otherwise. Skipped entirely
+            // for processes with no KV reading so non-LLM workloads
+            // don't carry a misleading "KV -%" column.
+            if let Some(live) = state.live_telemetry.get(&p.pid)
+                && let Some(kv) = live.kv_cache_peak_pct
+            {
+                let kv_text = format!("  KV {:>4.0}%", kv);
+                let style = if kv >= KV_HOT_PCT {
+                    Style::default()
+                        .fg(Color::Red)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    cyan
+                };
+                spans.push(Span::styled(kv_text, style));
+            }
+
+            ListItem::new(Line::from(spans))
         })
         .collect();
 

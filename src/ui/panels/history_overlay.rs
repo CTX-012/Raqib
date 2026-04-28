@@ -14,6 +14,12 @@ use crate::history::format_exit_short;
 
 use super::super::app::{App, HistoryOverlay};
 
+/// Tier 3.3 — peak KV-cache occupancy at or above this is flagged as
+/// a saturation event in the history view. Slightly under 100 to
+/// absorb float roundoff from `gpu_cache_usage_perc * 100` in the
+/// vLLM sampler.
+const KV_SATURATION_PCT: f32 = 99.5;
+
 /// Render the overlay (panel + dim background outside it). No-op when
 /// the app reports no overlay open — the caller invokes us
 /// unconditionally at the end of the frame.
@@ -82,7 +88,7 @@ fn body_list(overlay: &HistoryOverlay) -> List<'_> {
                 "governor" => Color::Yellow,
                 _ => Color::Red,
             };
-            ListItem::new(format!(
+            let row = format!(
                 " {:>3}  {}  {:>4}s  {:>5.0}%  {:>5}MB  {:>6}MB  {}",
                 idx,
                 r.summary.exit_time.format("%m-%d %H:%M"),
@@ -91,8 +97,24 @@ fn body_list(overlay: &HistoryOverlay) -> List<'_> {
                 r.summary.peak_rss_mb,
                 r.summary.peak_vram_mb,
                 exit,
-            ))
-            .style(Style::default().fg(color))
+            );
+            let mut spans: Vec<Span<'_>> =
+                vec![Span::styled(row, Style::default().fg(color))];
+
+            // Tier 3.3 — saturation badge. Independent of exit colour
+            // so a clean-exit run that maxed KV still gets flagged.
+            if let Some(peak) = r.metrics.kv_cache_peak_pct
+                && peak >= KV_SATURATION_PCT
+            {
+                spans.push(Span::styled(
+                    "  KV!",
+                    Style::default()
+                        .fg(Color::Red)
+                        .add_modifier(Modifier::BOLD),
+                ));
+            }
+
+            ListItem::new(Line::from(spans))
         })
         .collect();
     List::new(items).block(Block::default())

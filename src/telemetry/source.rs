@@ -36,6 +36,12 @@ pub struct TelemetryFrame {
     pub fps: Option<f32>,
     pub latency_ms: Option<f32>,
     pub kv_cache_pct: Option<f32>,
+    /// Tier 3.3 — runtime-reported cumulative count of KV-cache
+    /// evictions / request preemptions. The accumulator turns the
+    /// per-sample stream into a per-run delta. Counter, not gauge —
+    /// samplers must pass through whatever value the runtime exposes
+    /// and not pre-difference it.
+    pub kv_cache_evictions: Option<u64>,
     pub concurrent_requests: Option<u32>,
 
     /// Power & thermal (Tier 2.1). Watts at instant. Accumulator turns

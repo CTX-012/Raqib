@@ -194,6 +194,17 @@ pub fn frame_from_metrics(pid: u32, m: &HashMap<String, f64>) -> TelemetryFrame 
     if let Some(v) = m.get("vllm:num_requests_running") {
         frame.concurrent_requests = Some(*v as u32);
     }
+    // Tier 3.3 — vLLM exposes `vllm:num_preemptions_total`, a monotonic
+    // counter of requests preempted because the KV cache filled. We
+    // surface it as the run's eviction count. Negative or non-finite
+    // values are dropped (counter must be >= 0); the accumulator does
+    // a separate non-negative-delta check across samples.
+    if let Some(v) = m.get("vllm:num_preemptions_total")
+        && v.is_finite()
+        && *v >= 0.0
+    {
+        frame.kv_cache_evictions = Some(*v as u64);
+    }
     if let Some(v) = m.get("vllm:e2e_request_latency_seconds_sum") {
         // Sum-only is not directly latency; expose as an extra so a
         // future histogram-aware extractor can use it.
@@ -310,11 +321,23 @@ not_a_metric# garbage
         m.insert("vllm:avg_generation_throughput_toks_per_s".into(), 37.4);
         m.insert("vllm:gpu_cache_usage_perc".into(), 0.85);
         m.insert("vllm:num_requests_running".into(), 8.0);
+        m.insert("vllm:num_preemptions_total".into(), 12.0);
         let f = frame_from_metrics(123, &m);
         assert_eq!(f.pid, 123);
         assert!((f.tokens_per_sec.unwrap() - 37.4).abs() < 1e-3);
         assert!((f.kv_cache_pct.unwrap() - 85.0).abs() < 1e-3);
         assert_eq!(f.concurrent_requests, Some(8));
+        assert_eq!(f.kv_cache_evictions, Some(12));
+    }
+
+    /// Negative preemption counter is non-physical — drop it rather
+    /// than store noise that the accumulator would have to filter.
+    #[test]
+    fn frame_from_metrics_rejects_negative_preemptions() {
+        let mut m: HashMap<String, f64> = HashMap::new();
+        m.insert("vllm:num_preemptions_total".into(), -1.0);
+        let f = frame_from_metrics(1, &m);
+        assert_eq!(f.kv_cache_evictions, None);
     }
 
     /// HTTP path: spin up a tokio listener serving canned bytes, point

@@ -9,6 +9,19 @@ once `v1.0.0` is tagged. Until then, minor versions may include breaking changes
 ## [Unreleased]
 
 ### Added
+- **Tier 1.2b — llama.cpp server scraper**
+  (`src/telemetry/samplers/llama_cpp_server.rs`). Detects `llama-server`
+  on cmdline, scrapes `http://127.0.0.1:<port>/metrics` (default port
+  8080). Reuses the `parse_metrics` Prom parser from 1.2a. When a
+  direct tokens/sec gauge is missing, derives the rate from the
+  monotonic `llama_server_n_decode_total` counter using a per-PID
+  rolling `LastSample` (counter value + monotonic instant). Maps
+  `llama_server_n_busy_slots` → `concurrent_requests`,
+  `llama_server_kv_cache_usage` (0..1) → `kv_cache_pct` (×100).
+- 9 unit tests including counter-delta rate derivation, idle-counter
+  edge case (dn=0 → 0 tps), missing prior sample (None), and an
+  end-to-end scrape against a tokio TcpListener.
+
 - **Tier 1.2a — vLLM Prometheus scraper**
   (`src/telemetry/samplers/vllm_prometheus.rs`). Detects vLLM
   processes by cmdline (`vllm serve`, `vllm.entrypoints.*`,
@@ -168,12 +181,10 @@ once `v1.0.0` is tagged. Until then, minor versions may include breaking changes
 ### Notes
 - Developed on WSL Ubuntu; NVML returns `None` gracefully without GPU
   passthrough. Real target (Jetson AGX Orin) not yet validated end-to-end.
-- 224 unit + 5 history-CLI integration + 3 pipeline integration + 2
-  proptest tests pass (was 168; +13 A/C foundations, +6 history unit,
-  +4 config edge cases, +5 history-CLI integration, +4 regression
-  plumbing, +3 regression config, +8 telemetry foundation B,
-  +8 stdout parser, +10 vLLM scraper, +1 misc). `cargo clippy
-  --all-targets -- -D warnings` clean.
+- 233 unit + 5 history-CLI integration + 3 pipeline integration + 2
+  proptest tests pass (was 168; +65 across foundations + history +
+  regression + telemetry + samplers). `cargo clippy --all-targets --
+  -D warnings` clean.
 - No release artifact yet. `v0.1.0` will be tagged once Phase 1 launch
   checklist (CI, demo GIF, `.deb`, crates.io name reservation) is complete.
 

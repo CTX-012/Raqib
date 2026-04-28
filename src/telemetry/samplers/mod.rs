@@ -8,11 +8,12 @@
 //!   the network. Public surface: [`stdout_parser::parse_line`].
 //!
 //! * [`vllm_prometheus`] — vLLM `/metrics` scrape (1.2a).
+//! * [`llama_cpp_server`] — llama.cpp server `/metrics` scrape (1.2b).
 //!
 //! Future sub-modules:
 //!
-//! * `llama_cpp_server` — same shape, llama.cpp metrics names (1.2b).
 //! * `ollama_api` — `/api/ps` for model identification (1.2c).
 
+pub mod llama_cpp_server;
 pub mod stdout_parser;
 pub mod vllm_prometheus;

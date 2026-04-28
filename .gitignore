@@ -1,1 +1,42 @@
 /target
+
+# Rust
+**/*.rs.bk
+Cargo.lock.bak
+
+# Python fixtures used for local hardware smoke tests
+__pycache__/
+*.pyc
+*.pyo
+
+# Model weights and demo artifacts — too large for git, reproducible from upstream
+*.pt
+*.onnx
+*.gguf
+*.engine
+*.safetensors
+*.bin
+*.tflite
+
+# Local demo inputs captured during recording
+*.mp4
+*.gif
+# Exception: demo assets under docs/ are intentional
+!docs/**/*.gif
+!docs/**/*.mp4
+
+# Editor / OS noise
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Runtime state — audit logs and any locally-generated config
+edge_monitor.toml
+audit.log
+
+# Local hardware fixtures at repo root (not meant to be committed or packaged)
+/bus.jpg
+/q.py
+/yolo_loop.py

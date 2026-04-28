@@ -6,22 +6,58 @@ authors = ["Mohaaxa"]
 license = "MIT OR Apache-2.0"
 description = "Model-aware resource monitor and governor for edge AI workloads"
 readme = "README.md"
+homepage = "https://github.com/Mohaaxa/edge_monitor"
+repository = "https://github.com/Mohaaxa/edge_monitor"
+keywords = ["monitoring", "governor", "ai", "jetson", "edge"]
+categories = ["command-line-utilities", "os::linux-apis"]
 
 [dependencies]
 sysinfo = "0.38"
 nvml-wrapper = "0.12"
+libc = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-chrono = { version = "0.4", default-features = false, features = ["clock"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 thiserror = "2"
 anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+clap = { version = "4", features = ["derive"] }
+toml = "0.8"
+ratatui = "0.29"
+crossterm = "0.28"
+ctrlc = "3"
 
 [dev-dependencies]
 pretty_assertions = "1"
+tempfile = "3"
+proptest = "1"
 
 [profile.release]
 lto = "thin"
 codegen-units = 1
 strip = true
+
+# cargo-deb metadata. `cargo deb` picks this up and produces
+# target/debian/edge_monitor_<version>_<arch>.deb.
+[package.metadata.deb]
+maintainer = "Mohaaxa"
+copyright = "2026, Mohaaxa"
+license-file = ["LICENSE-MIT", "4"]
+extended-description = """\
+edge_monitor is a model-aware resource monitor and governor for edge AI
+workloads on Linux. It sees which model each Python process is running
+and kills the offender before the kernel OOM-killer takes the whole
+robot stack down. Ships with a safe dry-run default, allowlist-first
+policy, and a 3-kills-per-60s rate limit."""
+depends = "$auto"
+section = "utils"
+priority = "optional"
+assets = [
+    ["target/release/edge_monitor", "usr/bin/", "755"],
+    ["README.md", "usr/share/doc/edge_monitor/README.md", "644"],
+    ["CHANGELOG.md", "usr/share/doc/edge_monitor/CHANGELOG.md", "644"],
+    ["LICENSE-MIT", "usr/share/doc/edge_monitor/LICENSE-MIT", "644"],
+    ["LICENSE-APACHE", "usr/share/doc/edge_monitor/LICENSE-APACHE", "644"],
+    ["edge_monitor.toml.example", "usr/share/doc/edge_monitor/edge_monitor.toml.example", "644"],
+]

@@ -1,0 +1,422 @@
+use crate::governor::{GovernorError, GovernorPolicy, GovernorResult, KillAction, PendingKill};
+use crate::lifecycle::{LifecycleSnapshot, ProcessLifecycle};
+use crate::model::AICategory;
+use chrono::{DateTime, Duration, Utc};
+use std::collections::{HashMap, VecDeque};
+
+/// Executes governor decisions: sends signals and tracks kills.
+pub struct GovernorExecutor {
+    policy: GovernorPolicy,
+    pending_kills: HashMap<u32, PendingKill>,
+    /// Timestamps of kills issued in the current rate-limit window. Trimmed
+    /// on each evaluate() call so the deque length equals the number of
+    /// kills still inside `policy.rate_limit_window_secs`.
+    recent_kills: VecDeque<DateTime<Utc>>,
+}
+
+impl GovernorExecutor {
+    /// Create new executor with policy.
+    pub fn new(policy: GovernorPolicy) -> Self {
+        Self {
+            policy,
+            pending_kills: HashMap::new(),
+            recent_kills: VecDeque::new(),
+        }
+    }
+
+    /// Evaluate all processes and determine actions. Mutable because the
+    /// rate limiter records each kill intent against the sliding window.
+    /// Dry-run decisions do NOT consume the budget; only real kills do.
+    pub fn evaluate(
+        &mut self,
+        lifecycle_snapshot: &LifecycleSnapshot,
+    ) -> Vec<(u32, KillAction, String)> {
+        self.trim_rate_limit_window();
+        let mut decisions = Vec::with_capacity(lifecycle_snapshot.processes.len());
+        for (pid, lifecycle) in &lifecycle_snapshot.processes {
+            let (action, reason) = self.evaluate_process(lifecycle);
+            // Record enforced kills against the window so subsequent
+            // candidates in the same tick see the budget drop.
+            if matches!(action, KillAction::SignalTermSent) {
+                self.recent_kills.push_back(Utc::now());
+            }
+            decisions.push((*pid, action, reason));
+        }
+        decisions
+    }
+
+    /// Evaluate a single process. Mutable for symmetry with `evaluate`, but
+    /// callers at the single-process layer usually want the sliding window
+    /// frozen at a known state — call `trim_rate_limit_window` first.
+    fn evaluate_process(&self, lifecycle: &ProcessLifecycle) -> (KillAction, String) {
+        // Already exited: nothing to do
+        if lifecycle.is_exited() {
+            return (
+                KillAction::AlreadyExited,
+                "process already exited".to_string(),
+            );
+        }
+
+        // Check policy
+        let category = lifecycle.category;
+        let action = self.policy.evaluate(&lifecycle.name, category);
+
+        match action {
+            crate::governor::policy::PolicyAction::Allow => (
+                KillAction::Whitelisted,
+                format!("allowed by policy ({})", lifecycle.name),
+            ),
+            crate::governor::policy::PolicyAction::Kill => {
+                if self.policy.enforce {
+                    if self.rate_limit_exceeded() {
+                        (
+                            KillAction::RateLimited,
+                            format!(
+                                "rate limit: {} kills in {}s window — deferring {}",
+                                self.policy.rate_limit_max_kills,
+                                self.policy.rate_limit_window_secs,
+                                lifecycle.name,
+                            ),
+                        )
+                    } else {
+                        (
+                            KillAction::SignalTermSent,
+                            format!(
+                                "AI process marked for kill: {:?}",
+                                category.unwrap_or(AICategory::NotAi)
+                            ),
+                        )
+                    }
+                } else {
+                    (
+                        KillAction::DryRunTermWould,
+                        format!(
+                            "DRY-RUN: would send SIGTERM to AI process: {:?}",
+                            category.unwrap_or(AICategory::NotAi)
+                        ),
+                    )
+                }
+            }
+        }
+    }
+
+    /// Drops kill timestamps that have aged out of the rate-limit window.
+    fn trim_rate_limit_window(&mut self) {
+        let window = Duration::seconds(self.policy.rate_limit_window_secs as i64);
+        let cutoff = Utc::now() - window;
+        while let Some(front) = self.recent_kills.front() {
+            if *front < cutoff {
+                self.recent_kills.pop_front();
+            } else {
+                break;
+            }
+        }
+    }
+
+    /// Current rate-limit usage. True when the next kill would exceed the
+    /// per-window budget. Disabled (always false) if max is 0.
+    fn rate_limit_exceeded(&self) -> bool {
+        let max = self.policy.rate_limit_max_kills;
+        if max == 0 {
+            return false;
+        }
+        self.recent_kills.len() as u32 >= max
+    }
+
+    /// Exposes the kill-budget remaining in the current window. Meant for
+    /// UI surface ("3/3 kills left") and tests.
+    pub fn kills_remaining_in_window(&mut self) -> u32 {
+        self.trim_rate_limit_window();
+        let used = self.recent_kills.len() as u32;
+        self.policy.rate_limit_max_kills.saturating_sub(used)
+    }
+
+    /// Send SIGTERM to process. Does nothing in dry-run mode.
+    pub fn send_sigterm(
+        &mut self,
+        pid: u32,
+        name: String,
+        category: AICategory,
+    ) -> GovernorResult<()> {
+        if !self.policy.enforce {
+            tracing::info!("DRY-RUN: SIGTERM would be sent to PID {}: {}", pid, name);
+            return Ok(());
+        }
+
+        tracing::info!("sending SIGTERM to PID {}: {}", pid, name);
+
+        // Send SIGTERM
+        unsafe {
+            if libc::kill(pid as i32, libc::SIGTERM) != 0 {
+                return Err(GovernorError::SignalError(format!(
+                    "SIGTERM failed for PID {}: errno={}",
+                    pid,
+                    std::io::Error::last_os_error()
+                )));
+            }
+        }
+
+        // Track this kill
+        self.pending_kills
+            .insert(pid, PendingKill::new(pid, name, category));
+
+        Ok(())
+    }
+
+    /// Send SIGKILL to process. Does nothing in dry-run mode.
+    pub fn send_sigkill(&mut self, pid: u32, name: &str) -> GovernorResult<()> {
+        if !self.policy.enforce {
+            tracing::info!("DRY-RUN: SIGKILL would be sent to PID {}: {}", pid, name);
+            return Ok(());
+        }
+
+        tracing::info!("sending SIGKILL to PID {}: {}", pid, name);
+
+        // Send SIGKILL
+        unsafe {
+            if libc::kill(pid as i32, libc::SIGKILL) != 0 {
+                return Err(GovernorError::SignalError(format!(
+                    "SIGKILL failed for PID {}: errno={}",
+                    pid,
+                    std::io::Error::last_os_error()
+                )));
+            }
+        }
+
+        // Mark as kill sent
+        if let Some(pending) = self.pending_kills.get_mut(&pid) {
+            pending.sigkill_time = Some(chrono::Utc::now());
+        }
+
+        Ok(())
+    }
+
+    /// Check which pending processes need SIGKILL (grace period expired).
+    pub fn check_grace_period_expired(&self) -> Vec<u32> {
+        let grace_period = Duration::seconds(self.policy.sigterm_grace_period_secs as i64);
+        self.pending_kills
+            .iter()
+            .filter(|(_, pending)| pending.should_send_kill(grace_period))
+            .map(|(pid, _)| *pid)
+            .collect()
+    }
+
+    /// Get count of pending kills waiting for grace period.
+    pub fn pending_kills_count(&self) -> usize {
+        self.pending_kills.len()
+    }
+
+    /// Get pending kills (for testing/auditing).
+    pub fn get_pending_kills(&self) -> Vec<PendingKill> {
+        self.pending_kills.values().cloned().collect()
+    }
+
+    /// Clear a pending kill (process exited on its own).
+    pub fn clear_pending(&mut self, pid: u32) {
+        self.pending_kills.remove(&pid);
+    }
+
+    /// Get policy reference.
+    pub fn policy(&self) -> &GovernorPolicy {
+        &self.policy
+    }
+
+    /// Get mutable policy reference.
+    pub fn policy_mut(&mut self) -> &mut GovernorPolicy {
+        &mut self.policy
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn make_lifecycle(
+        pid: u32,
+        name: &str,
+        category: Option<AICategory>,
+        exited: bool,
+    ) -> ProcessLifecycle {
+        let sample = crate::model::ProcessSample {
+            pid,
+            ppid: Some(1),
+            name: name.to_string(),
+            cmdline: vec![name.to_string()],
+            environ: HashMap::new(),
+            cwd: None,
+            ..Default::default()
+        };
+
+        let mut lc = ProcessLifecycle::new(&sample, category);
+        if exited {
+            lc.mark_exit(Some(0), None);
+        }
+        lc
+    }
+
+    #[test]
+    fn executor_new() {
+        let policy = GovernorPolicy::safe_default();
+        let executor = GovernorExecutor::new(policy);
+        assert_eq!(executor.pending_kills_count(), 0);
+    }
+
+    #[test]
+    fn executor_evaluate_whitelisted() {
+        let policy = GovernorPolicy::safe_default();
+        let mut executor = GovernorExecutor::new(policy);
+
+        let mut snapshot = crate::lifecycle::LifecycleSnapshot::new();
+        snapshot
+            .processes
+            .insert(100, make_lifecycle(100, "bash", None, false));
+
+        let decisions = executor.evaluate(&snapshot);
+        assert_eq!(decisions.len(), 1);
+        assert_eq!(decisions[0].1, KillAction::Whitelisted);
+    }
+
+    #[test]
+    fn executor_evaluate_exited() {
+        let policy = GovernorPolicy::safe_default();
+        let mut executor = GovernorExecutor::new(policy);
+
+        let mut snapshot = crate::lifecycle::LifecycleSnapshot::new();
+        snapshot.processes.insert(
+            101,
+            make_lifecycle(101, "ai_proc", Some(AICategory::Inference), true),
+        );
+
+        let decisions = executor.evaluate(&snapshot);
+        assert_eq!(decisions.len(), 1);
+        assert_eq!(decisions[0].1, KillAction::AlreadyExited);
+    }
+
+    #[test]
+    fn executor_evaluate_dry_run() {
+        let policy = GovernorPolicy::safe_default();
+        let mut executor = GovernorExecutor::new(policy);
+
+        let mut snapshot = crate::lifecycle::LifecycleSnapshot::new();
+        snapshot.processes.insert(
+            102,
+            make_lifecycle(102, "unknown_ai", Some(AICategory::Training), false),
+        );
+
+        let decisions = executor.evaluate(&snapshot);
+        assert_eq!(decisions.len(), 1);
+        assert_eq!(decisions[0].1, KillAction::DryRunTermWould);
+    }
+
+    #[test]
+    fn executor_pending_kills_count() {
+        let policy = GovernorPolicy::safe_default();
+        let mut executor = GovernorExecutor::new(policy);
+
+        let pending = PendingKill::new(100, "test".to_string(), AICategory::Inference);
+        executor.pending_kills.insert(100, pending);
+
+        assert_eq!(executor.pending_kills_count(), 1);
+    }
+
+    #[test]
+    fn executor_rate_limits_enforced_kills() {
+        // 10 kill-eligible processes, budget 3 — only 3 get SignalTermSent,
+        // the rest are RateLimited. Matches HANDOFF Module 5 acceptance test.
+        let mut policy = GovernorPolicy::safe_default();
+        policy.enforce = true;
+        policy.rate_limit_max_kills = 3;
+        policy.rate_limit_window_secs = 60;
+        let mut executor = GovernorExecutor::new(policy);
+
+        let mut snapshot = crate::lifecycle::LifecycleSnapshot::new();
+        for pid in 200..210u32 {
+            snapshot.processes.insert(
+                pid,
+                make_lifecycle(
+                    pid,
+                    &format!("worker{pid}"),
+                    Some(AICategory::Inference),
+                    false,
+                ),
+            );
+        }
+
+        let decisions = executor.evaluate(&snapshot);
+        let killed = decisions
+            .iter()
+            .filter(|(_, a, _)| *a == KillAction::SignalTermSent)
+            .count();
+        let limited = decisions
+            .iter()
+            .filter(|(_, a, _)| *a == KillAction::RateLimited)
+            .count();
+        assert_eq!(killed, 3, "must not exceed rate limit");
+        assert_eq!(limited, 7, "remaining candidates must be rate-limited");
+    }
+
+    #[test]
+    fn executor_rate_limit_not_consumed_in_dry_run() {
+        // Dry-run decisions must not burn through the kill budget — otherwise
+        // operators who leave the tool in dry-run for a minute lose their
+        // ability to ever enforce later. Safety rule 5 only applies to real
+        // kills.
+        let mut policy = GovernorPolicy::safe_default();
+        policy.enforce = false;
+        policy.rate_limit_max_kills = 3;
+        let mut executor = GovernorExecutor::new(policy);
+
+        let mut snapshot = crate::lifecycle::LifecycleSnapshot::new();
+        for pid in 300..310u32 {
+            snapshot.processes.insert(
+                pid,
+                make_lifecycle(pid, &format!("w{pid}"), Some(AICategory::Inference), false),
+            );
+        }
+
+        let decisions = executor.evaluate(&snapshot);
+        assert_eq!(decisions.len(), 10);
+        assert!(
+            decisions
+                .iter()
+                .all(|(_, a, _)| *a == KillAction::DryRunTermWould)
+        );
+        assert_eq!(executor.kills_remaining_in_window(), 3);
+    }
+
+    #[test]
+    fn executor_rate_limit_disabled_when_max_is_zero() {
+        let mut policy = GovernorPolicy::safe_default();
+        policy.enforce = true;
+        policy.rate_limit_max_kills = 0;
+        let mut executor = GovernorExecutor::new(policy);
+
+        let mut snapshot = crate::lifecycle::LifecycleSnapshot::new();
+        for pid in 400..410u32 {
+            snapshot.processes.insert(
+                pid,
+                make_lifecycle(pid, &format!("w{pid}"), Some(AICategory::Inference), false),
+            );
+        }
+        let decisions = executor.evaluate(&snapshot);
+        let killed = decisions
+            .iter()
+            .filter(|(_, a, _)| *a == KillAction::SignalTermSent)
+            .count();
+        assert_eq!(killed, 10, "max_kills=0 means unlimited");
+    }
+
+    #[test]
+    fn executor_clear_pending() {
+        let policy = GovernorPolicy::safe_default();
+        let mut executor = GovernorExecutor::new(policy);
+
+        let pending = PendingKill::new(100, "test".to_string(), AICategory::Training);
+        executor.pending_kills.insert(100, pending);
+        assert_eq!(executor.pending_kills_count(), 1);
+
+        executor.clear_pending(100);
+        assert_eq!(executor.pending_kills_count(), 0);
+    }
+}

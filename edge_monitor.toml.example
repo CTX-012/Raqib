@@ -1,0 +1,43 @@
+# edge_monitor configuration
+#
+# Defaults bias toward safety: dry-run is on, the allowlist covers shells
+# and init, the SIGTERM grace period is 5s. Uncomment and edit only the
+# fields you want to override.
+
+[runtime]
+# How often to sample /proc, classify, and let the governor decide.
+tick_interval_ms = 1000
+# UI redraw rate. Renders cached state between samples.
+render_interval_ms = 100
+# In-memory ring buffers for the Completed and Audit panels.
+completed_history = 50
+audit_history = 100
+
+[policy]
+# Process names that are NEVER killed by the automated governor.
+# Manual kills still respect this list (UI prompts for explicit confirm).
+allowlist = [
+    "systemd",
+    "init",
+    "sshd",
+    "bash",
+    "zsh",
+    "sh",
+    "kworker",
+    "kthreadd",
+]
+
+# Process names that the governor always treats as kill candidates.
+blocklist = []
+
+# Default action for AI-classified processes that match neither list.
+# "Allow" or "Kill". Kill is recommended; the dry-run flag below is the
+# real safety knob.
+default_ai_action = "Kill"
+
+# Seconds between SIGTERM and SIGKILL for any single process. Minimum 1s.
+sigterm_grace_secs = 5
+
+# false = dry-run (log only). true = actually send signals. Override at the
+# command line with --dry-run for an extra safety belt.
+enforce = false

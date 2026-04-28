@@ -254,6 +254,12 @@ impl TelemetryAccumulator {
     pub fn pids(&self) -> impl Iterator<Item = u32> + '_ {
         self.by_pid.keys().copied()
     }
+
+    /// Authoritative model name from a runtime API for `pid`, or
+    /// `None` when no API source ever reported one. Tier 1.2c.
+    pub fn model_name_hint_for(&self, pid: u32) -> Option<&str> {
+        self.by_pid.get(&pid).and_then(|s| s.model_name_hint())
+    }
 }
 
 #[cfg(test)]

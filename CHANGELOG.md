@@ -9,6 +9,32 @@ once `v1.0.0` is tagged. Until then, minor versions may include breaking changes
 ## [Unreleased]
 
 ### Added
+- **Tier 1.2 dispatcher** (`src/telemetry/dispatcher.rs`). Closes the
+  loop opened by Foundation B. Owns a 2-worker Tokio runtime, holds
+  `Arc<Mutex<TelemetrySource>>` for each configured sampler, drives
+  `applies_to + sample` against AI processes on every tick, drains
+  resulting `TelemetryFrame`s through an unbounded mpsc channel into
+  the per-PID `TelemetryAccumulator`, and enforces a per-sample
+  timeout (default 1s) so a hung HTTP scrape can't pile up. Surfaces
+  `metrics_for(pid)` and `model_name_hint_for(pid)` to the runtime.
+- **Runtime → dispatcher wiring**. `Runtime::new` now constructs a
+  dispatcher according to `[telemetry]` toggles and degrades
+  gracefully when Tokio runtime construction fails. On every tick,
+  AI-classified processes are pushed to the dispatcher; on every
+  exit, accumulated metrics are merged onto the `RunRecord` AND the
+  authoritative model_name (Tier 1.2c hint) is promoted onto the
+  summary before the record routes to its per-model bucket. Per-PID
+  state is forgotten after the record persists so recycled PIDs
+  start fresh.
+- **`[telemetry]` config section**: `vllm_scrape` (default true),
+  `llamacpp_scrape` (default true), `ollama_api` (default true),
+  `prometheus_bind` (empty disables — Tier 2.3 placeholder).
+- 5 dispatcher unit tests: applicable source emits frames, non-
+  applicable source's sample never called, slow sampler is timed
+  out, panicking sampler does not bring down the runtime (other
+  samplers continue), `forget(pid)` drops per-PID state.
+- **Tier 1.2c — Ollama `/api/ps` sampler**
+
 - **Tier 1.2b — llama.cpp server scraper**
   (`src/telemetry/samplers/llama_cpp_server.rs`). Detects `llama-server`
   on cmdline, scrapes `http://127.0.0.1:<port>/metrics` (default port
@@ -177,6 +203,12 @@ once `v1.0.0` is tagged. Until then, minor versions may include breaking changes
 ### Changed
 - Tracing logs now route to **stderr** (was stdout) so subcommand JSON
   output (`history --json`) on stdout stays clean for piping into `jq`.
+- **Release binary size grew from ~2.7 MB → ~7.4 MB** as a consequence
+  of pulling in `tokio` (rt-multi-thread + time + sync + io-util +
+  process + net) and `reqwest` (rustls-tls + http2). This puts the
+  Linux binary over the spec's 5 MB budget; mitigation (cargo feature
+  to disable HTTP samplers entirely; or switching to native-tls) is
+  deferred — the launch-blocker is feature completeness, not size.
 
 ### Notes
 - Developed on WSL Ubuntu; NVML returns `None` gracefully without GPU

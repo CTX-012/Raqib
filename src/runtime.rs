@@ -13,6 +13,12 @@ use crate::lifecycle::{LifecycleSnapshot, LifecycleSummary};
 use crate::model::{AICategory, ClassificationResult};
 use crate::platform::{self, GpuSnapshot, PlatformError, PlatformSnapshot};
 use crate::storage::{LogStore, RunRecord, RunStore};
+use crate::telemetry::samplers::{
+    llama_cpp_server::LlamaCppServerSource, ollama_api::OllamaApiSource,
+    vllm_prometheus::VllmPrometheusSource,
+};
+use crate::telemetry::source::ProcessSnapshot as TelemetryProcessSnapshot;
+use crate::telemetry::{Dispatcher, TelemetrySource};
 
 /// Errors emitted by the runtime tick loop. Platform errors are fatal;
 /// per-process errors are absorbed into tracing logs and the audit trail.
@@ -99,6 +105,12 @@ pub struct Runtime {
     /// `summary_store` when both are configured, preserving Phase-1
     /// `summaries.jsonl` consumers during the transition.
     run_store: Option<RunStore>,
+    /// Tier 1.2 — telemetry dispatcher. Owns a Tokio runtime + the
+    /// vLLM / llama.cpp / Ollama scrapers and folds frames into a
+    /// per-PID accumulator. `None` when construction failed (rare —
+    /// usually a kernel thread-creation failure) so the rest of the
+    /// runtime degrades gracefully.
+    telemetry: Option<Dispatcher>,
     /// Previous tick's cumulative CPU ticks, per PID, plus the wall-clock
     /// timestamp that reading was taken at. Used to compute cpu_pct as
     /// delta_ticks / CLK_TCK / elapsed_secs × 100.
@@ -133,6 +145,7 @@ impl Runtime {
                 .inspect_err(|e| tracing::error!(error = %e, path = %p.display(), "failed to open run store; continuing without persistence"))
                 .ok()
         });
+        let telemetry = build_dispatcher(&config);
         Self {
             config,
             tracker: LifecycleTracker::new(),
@@ -142,6 +155,7 @@ impl Runtime {
             audit_writer,
             summary_store,
             run_store,
+            telemetry,
             prev_cpu: HashMap::new(),
             clk_tck: read_clk_tck(),
         }
@@ -234,6 +248,30 @@ impl Runtime {
             self.tracker.record_model_name(p.pid, p.model_name.clone());
         }
 
+        // Tier 1.2 — drive telemetry samplers against AI processes
+        // BEFORE we tally exits, so the accumulator sees one last
+        // sample window for any process that's about to exit.
+        if let Some(d) = &mut self.telemetry {
+            let live_ai: Vec<TelemetryProcessSnapshot> = snapshot
+                .processes
+                .iter()
+                .filter_map(|s| {
+                    let ann = annotated.iter().find(|a| a.pid == s.pid)?;
+                    if ann.category == AICategory::NotAi {
+                        return None;
+                    }
+                    Some(TelemetryProcessSnapshot {
+                        pid: s.pid,
+                        name: s.name.clone(),
+                        cmdline: s.cmdline.clone(),
+                        environ: s.environ.clone(),
+                        model_name: ann.model_name.clone(),
+                    })
+                })
+                .collect();
+            d.tick(&live_ai);
+        }
+
         // Record run summaries as they fire. Bounded by config to keep memory flat.
         for summary in &lifecycle.recent_exits {
             self.state.completed.push_back(summary.clone());
@@ -252,7 +290,24 @@ impl Runtime {
             if let Some(rs) = &mut self.run_store
                 && summary.category.is_some()
             {
-                let record = RunRecord::from_summary(summary.clone());
+                let mut summary_to_record = summary.clone();
+                // Tier 1.2c — promote authoritative model_name from
+                // an API source (Ollama /api/ps) over the classifier's
+                // heuristic guess. Done before constructing the record
+                // so model_or_name() routes the record to the right
+                // per-model bucket in RunStore.
+                if let Some(d) = &self.telemetry
+                    && let Some(hint) = d.model_name_hint_for(summary.pid)
+                {
+                    summary_to_record.model_name = Some(hint);
+                }
+                let mut record = RunRecord::from_summary(summary_to_record);
+                // Fold telemetry-derived metrics onto the record.
+                if let Some(d) = &self.telemetry
+                    && let Some(metrics) = d.metrics_for(summary.pid)
+                {
+                    record.metrics = metrics;
+                }
                 let model = record.model_or_name().to_string();
                 let record_clone = record.clone();
                 if let Err(e) = rs.append(record) {
@@ -272,6 +327,11 @@ impl Runtime {
                     &mut self.state.regressions,
                     self.config.runtime.audit_history,
                 );
+            }
+            // Drop accumulator state for the exited PID so a recycled
+            // PID later starts fresh. Tier 1.2.
+            if let Some(d) = &mut self.telemetry {
+                d.forget(summary.pid);
             }
         }
 
@@ -397,6 +457,33 @@ impl Runtime {
         }
         let delta_ticks = (ticks_now - ticks_prev) as f32;
         (delta_ticks / self.clk_tck as f32 / dt) * 100.0
+    }
+}
+
+/// Construct the telemetry [`Dispatcher`] from the toggles in
+/// `config.telemetry`. Returns `None` (and logs an error) if the
+/// Tokio runtime cannot be built — the rest of the runtime degrades
+/// gracefully without telemetry.
+fn build_dispatcher(config: &Config) -> Option<Dispatcher> {
+    let mut sources: Vec<Box<dyn TelemetrySource>> = Vec::new();
+    if config.telemetry.vllm_scrape {
+        sources.push(Box::new(VllmPrometheusSource::new()));
+    }
+    if config.telemetry.llamacpp_scrape {
+        sources.push(Box::new(LlamaCppServerSource::new()));
+    }
+    if config.telemetry.ollama_api {
+        sources.push(Box::new(OllamaApiSource::new()));
+    }
+    if sources.is_empty() {
+        return None;
+    }
+    match Dispatcher::new(sources) {
+        Ok(d) => Some(d),
+        Err(e) => {
+            tracing::error!(error = %e, "failed to build telemetry dispatcher; continuing without telemetry");
+            None
+        }
     }
 }
 

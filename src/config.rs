@@ -29,6 +29,34 @@ pub struct Config {
     pub policy: PolicyConfig,
     pub storage: StorageConfig,
     pub regression: RegressionConfig,
+    pub telemetry: TelemetryConfig,
+}
+
+/// Toggles for the optional [`telemetry::Dispatcher`] samplers
+/// (latest.md cross-cutting requirements + Tier 1.2). All on by
+/// default; sampling is cheap on idle (HTTP scrapers fail fast on
+/// connection refused) and the dispatcher's `applies_to` gate keeps
+/// non-AI processes from being touched.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TelemetryConfig {
+    pub vllm_scrape: bool,
+    pub llamacpp_scrape: bool,
+    pub ollama_api: bool,
+    /// Empty disables the in-process Prometheus exporter.
+    /// Format: `host:port` (e.g. `127.0.0.1:9472`). Tier 2.3.
+    pub prometheus_bind: String,
+}
+
+impl Default for TelemetryConfig {
+    fn default() -> Self {
+        Self {
+            vllm_scrape: true,
+            llamacpp_scrape: true,
+            ollama_api: true,
+            prometheus_bind: String::new(),
+        }
+    }
 }
 
 /// Knobs for the regression detector that runs at every AI process exit

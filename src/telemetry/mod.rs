@@ -22,8 +22,10 @@
 //!    via channel or mutex. No interior mutability inside the trait.
 
 pub mod accumulator;
+pub mod dispatcher;
 pub mod samplers;
 pub mod source;
 
 pub use accumulator::TelemetryAccumulator;
+pub use dispatcher::Dispatcher;
 pub use source::{ProcessSnapshot, TelemetryFrame, TelemetrySource, safe_sample};

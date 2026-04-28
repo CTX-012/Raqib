@@ -1,5 +1,6 @@
 use crate::model::AICategory;
 use crate::runtime::RuntimeState;
+use crate::storage::RunRecord;
 
 /// Which panel currently owns selection / cursor focus.
 /// Only the three list panels accept selection; vitals and audit are read-only.
@@ -54,12 +55,25 @@ pub enum Action {
     FilterBackspace,
     /// First press arms; second press confirms. Two-step for safety.
     ConfirmKill,
+    /// Open the history overlay for the focused row's model. Tier 1.1.
+    OpenHistory,
+    /// Close the history overlay (Esc).
+    CloseHistory,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     Normal,
     Filter,
+}
+
+/// Cached per-model run history shown by the overlay. Loaded on `h`
+/// keypress and cleared on Esc; not refreshed every frame to avoid
+/// hammering the `RunStore` from the render path.
+#[derive(Debug, Clone)]
+pub struct HistoryOverlay {
+    pub model: String,
+    pub records: Vec<RunRecord>,
 }
 
 /// Pure state machine for the TUI. No I/O, no rendering. Cheap to clone.
@@ -73,6 +87,10 @@ pub struct App {
     filter: String,
     /// Two-stage manual-kill: when `Some(pid)`, pressing `k` again sends.
     armed_kill: Option<u32>,
+    /// `Some(_)` while the history overlay is open. Snapshotted on key
+    /// press so subsequent ticks don't replace the records the user is
+    /// reading.
+    history: Option<HistoryOverlay>,
 }
 
 impl Default for App {
@@ -91,6 +109,7 @@ impl App {
             mode: Mode::Normal,
             filter: String::new(),
             armed_kill: None,
+            history: None,
         }
     }
 
@@ -164,6 +183,19 @@ impl App {
     }
     pub fn disarm_kill(&mut self) {
         self.armed_kill = None;
+    }
+
+    pub fn open_history(&mut self, model: String, records: Vec<RunRecord>) {
+        self.history = Some(HistoryOverlay { model, records });
+    }
+    pub fn close_history(&mut self) {
+        self.history = None;
+    }
+    pub fn history(&self) -> Option<&HistoryOverlay> {
+        self.history.as_ref()
+    }
+    pub fn is_history_open(&self) -> bool {
+        self.history.is_some()
     }
 
     pub fn select_next(&mut self, state: &RuntimeState) {

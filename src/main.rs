@@ -14,11 +14,12 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use tracing::Level;
 use tracing_subscriber::EnvFilter;
 
 use edge_monitor::config::Config;
+use edge_monitor::history;
 use edge_monitor::runtime::{Runtime, RuntimeState};
 use edge_monitor::ui;
 
@@ -48,6 +49,26 @@ struct Cli {
     /// Log level: trace, debug, info, warn, error.
     #[arg(long, default_value = "info")]
     log_level: String,
+
+    /// Subcommand. Defaults to running the monitor (TUI / headless) when
+    /// omitted, preserving the Phase-1 invocation.
+    #[command(subcommand)]
+    command: Option<Commands>,
+}
+
+#[derive(Subcommand, Debug)]
+enum Commands {
+    /// Show recent runs from the typed run store (latest.md Tier 1.1).
+    History {
+        /// Filter to runs of this model. Omit to list all known models.
+        model: Option<String>,
+        /// Maximum number of runs to show.
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+        /// Emit JSON instead of a human-readable table.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -56,6 +77,11 @@ fn main() -> anyhow::Result<()> {
 
     let config = load_config(cli.config.as_deref(), cli.dry_run)?;
     config.validate().context("config validation failed")?;
+
+    // Subcommand path: query-only, no signal handler / runtime needed.
+    if let Some(Commands::History { model, limit, json }) = cli.command {
+        return history::run_history(model, limit, json, &config);
+    }
 
     if config.policy.enforce {
         tracing::warn!(
@@ -165,11 +191,15 @@ fn init_tracing(level: &str) -> anyhow::Result<()> {
             ));
         }
     };
+    // stderr: stdout is reserved for subcommand output (e.g. JSON from
+    // `history --json`). A consumer piping `edge_monitor history --json
+    // | jq` would otherwise see the tracing log first and choke.
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(lvl.to_string())),
         )
         .with_target(false)
+        .with_writer(std::io::stderr)
         .init();
     Ok(())
 }

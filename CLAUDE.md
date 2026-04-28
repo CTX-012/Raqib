@@ -23,14 +23,32 @@ Linux-first. Target: Ubuntu 22.04+ and JetPack 6 on Jetson Orin.
 - Process run summary on termination
 - ratatui TUI (built last)
 
-## Out of scope (defer to Phase 2+)
+## Scope (post-Phase-1, follows latest.md)
 
-tegrastats, thermal zones, ROS2 node detection, Prometheus exporter,
-OOM post-mortem, Intel NPU, AMD ROCm, Hailo, web UI, Windows support,
-cgroup-based enforcement, rosbag correlation.
+The `latest.md` spec at the repo root is now the authoritative roadmap.
+Foundations A (RunStore) + C (baseline / regression) and Tier 1.1
+(history viewer) are implemented; Tier 1.2 / 1.3 / 2.x / 3.x are the
+queue. Read `latest.md` before adding or removing scope.
 
-If the user asks for these, push back: "That's Phase 2. Confirm you want
-to expand Phase 0 scope, or defer."
+## Out of scope (still deferred unless `latest.md` adds them)
+
+ROS2 node detection, Intel NPU, AMD ROCm, Hailo, web UI, Windows
+support, cgroup-based enforcement, rosbag correlation. Anti-goals at
+the bottom of `latest.md` are also still off the table:
+
+- Web UI (Prometheus + Grafana is the answer once 2.3 ships).
+- Cloud cost tracking.
+- Multi-host fleet aggregation.
+- ML-based anomaly detection.
+- Automatic regression remediation.
+
+If the user asks for an out-of-scope item, push back: "That's not in
+`latest.md`. Confirm you want to expand scope, or defer."
+
+Items previously off the list that **`latest.md` brings into scope** —
+do *not* push back on these any more, just implement them in tier
+order: tegrastats (2.1), thermal zones (2.1), Prometheus exporter
+(2.3), OOM post-mortem (3.5).
 
 ## Module build order (strict, no parallel)
 

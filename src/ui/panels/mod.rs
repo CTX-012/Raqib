@@ -6,6 +6,7 @@ mod audit;
 mod completed;
 mod culprits;
 mod help;
+mod history_overlay;
 mod registry;
 mod rogues;
 mod vitals;
@@ -46,6 +47,11 @@ pub fn render(f: &mut Frame, state: &RuntimeState, app: &App) {
     if app.show_help() {
         help::render(f, area);
     }
+
+    // History overlay last so it floats above everything (including the
+    // help panel — though the input layer prevents both from being open
+    // simultaneously).
+    history_overlay::render(f, area, app);
 }
 
 fn render_status_bar(f: &mut Frame, area: Rect, state: &RuntimeState, app: &App) {
@@ -112,7 +118,7 @@ fn render_process_row(f: &mut Frame, area: Rect, state: &RuntimeState, app: &App
 }
 
 fn render_footer(f: &mut Frame, area: Rect, _app: &App) {
-    let hints = " q quit · Tab focus · j/k select · / filter · k kill (×2) · d dry-run · ? help ";
+    let hints = " q quit · Tab focus · j/k select · / filter · k kill (×2) · h history · d dry-run · ? help ";
     let p = Paragraph::new(hints).style(Style::default().fg(Color::DarkGray));
     f.render_widget(p, area);
 }

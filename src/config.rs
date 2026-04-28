@@ -27,6 +27,7 @@ pub enum ConfigError {
 pub struct Config {
     pub runtime: RuntimeConfig,
     pub policy: PolicyConfig,
+    pub storage: StorageConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -47,6 +48,64 @@ pub struct RuntimeConfig {
     pub audit_log_path: String,
     /// Persistent run-summary log file. Same disable-with-empty semantics.
     pub summary_log_path: String,
+}
+
+/// Storage paths for the typed run store + ancillary caches.
+/// `run_store_path` defaults to `~/.local/share/edge_monitor` so the
+/// history subcommand and the regression detector "just work" without
+/// any config; set to `""` to disable persistence entirely (in-memory
+/// only, useful for tests and the headless CI smoke run).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StorageConfig {
+    pub run_store_path: String,
+    pub fingerprint_cache: String,
+    /// Hard cap per model. Pruning is implemented in Tier 1.1+; this
+    /// field reserves the config slot now so future versions don't need
+    /// a schema bump.
+    pub keep_runs_per_model: u32,
+}
+
+impl Default for StorageConfig {
+    fn default() -> Self {
+        Self {
+            run_store_path: default_run_store_path(),
+            fingerprint_cache: default_fingerprint_cache(),
+            keep_runs_per_model: 200,
+        }
+    }
+}
+
+impl StorageConfig {
+    /// Returns the configured `run_store_path` with `~/` expanded to
+    /// `$HOME`. Returns `None` when the path is empty (persistence
+    /// disabled).
+    pub fn run_store(&self) -> Option<PathBuf> {
+        if self.run_store_path.is_empty() {
+            None
+        } else {
+            Some(expand_tilde(&self.run_store_path))
+        }
+    }
+}
+
+fn default_run_store_path() -> String {
+    "~/.local/share/edge_monitor".to_string()
+}
+
+fn default_fingerprint_cache() -> String {
+    "~/.cache/edge_monitor/fingerprints.json".to_string()
+}
+
+/// Replace a leading `~/` with `$HOME/`. Returns the original path
+/// unchanged when `$HOME` is unset or the path doesn't start with `~/`.
+pub(crate) fn expand_tilde(path: &str) -> PathBuf {
+    if let Some(rest) = path.strip_prefix("~/")
+        && let Ok(home) = std::env::var("HOME")
+    {
+        return PathBuf::from(home).join(rest);
+    }
+    PathBuf::from(path)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -142,6 +201,13 @@ impl Config {
                 "policy.sigterm_grace_secs must be >= 1".into(),
             ));
         }
+        if self.storage.keep_runs_per_model == 0 {
+            return Err(ConfigError::Invalid(
+                "storage.keep_runs_per_model must be > 0 (disable persistence \
+                 by setting storage.run_store_path = \"\" instead)"
+                    .into(),
+            ));
+        }
         Ok(())
     }
 
@@ -229,5 +295,26 @@ mod tests {
         let mut f = tempfile::NamedTempFile::new().unwrap();
         writeln!(f, "[runtime]\ntick_interval_ms = 0").unwrap();
         assert!(Config::from_file(f.path()).is_err());
+    }
+
+    #[test]
+    fn storage_defaults_use_home_relative_paths() {
+        let cfg = Config::default();
+        assert!(cfg.storage.run_store_path.starts_with("~/"));
+        assert_eq!(cfg.storage.keep_runs_per_model, 200);
+    }
+
+    #[test]
+    fn storage_run_store_returns_none_when_empty() {
+        let mut cfg = Config::default();
+        cfg.storage.run_store_path.clear();
+        assert!(cfg.storage.run_store().is_none());
+    }
+
+    #[test]
+    fn storage_keep_zero_rejected() {
+        let mut cfg = Config::default();
+        cfg.storage.keep_runs_per_model = 0;
+        assert!(cfg.validate().is_err());
     }
 }

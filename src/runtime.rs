@@ -11,7 +11,7 @@ use crate::lifecycle::tracker::LifecycleTracker;
 use crate::lifecycle::{LifecycleSnapshot, LifecycleSummary};
 use crate::model::{AICategory, ClassificationResult};
 use crate::platform::{self, GpuSnapshot, PlatformError, PlatformSnapshot};
-use crate::storage::LogStore;
+use crate::storage::{LogStore, RunRecord, RunStore};
 
 /// Errors emitted by the runtime tick loop. Platform errors are fatal;
 /// per-process errors are absorbed into tracing logs and the audit trail.
@@ -90,6 +90,11 @@ pub struct Runtime {
     /// Persistent run-summary sink; separate file so operators can tail
     /// `summaries.jsonl` without drowning in audit entries.
     summary_store: Option<LogStore>,
+    /// Foundation-A typed run store. The history subcommand and the
+    /// regression detector both read from here. Writes mirror to
+    /// `summary_store` when both are configured, preserving Phase-1
+    /// `summaries.jsonl` consumers during the transition.
+    run_store: Option<RunStore>,
     /// Previous tick's cumulative CPU ticks, per PID, plus the wall-clock
     /// timestamp that reading was taken at. Used to compute cpu_pct as
     /// delta_ticks / CLK_TCK / elapsed_secs × 100.
@@ -119,6 +124,11 @@ impl Runtime {
                 .inspect_err(|e| tracing::error!(error = %e, "failed to open summary log; continuing without persistence"))
                 .ok()
         });
+        let run_store = config.storage.run_store().and_then(|p| {
+            RunStore::open(&p)
+                .inspect_err(|e| tracing::error!(error = %e, path = %p.display(), "failed to open run store; continuing without persistence"))
+                .ok()
+        });
         Self {
             config,
             tracker: LifecycleTracker::new(),
@@ -127,6 +137,7 @@ impl Runtime {
             state,
             audit_writer,
             summary_store,
+            run_store,
             prev_cpu: HashMap::new(),
             clk_tck: read_clk_tck(),
         }
@@ -142,6 +153,17 @@ impl Runtime {
 
     pub fn dry_run(&self) -> bool {
         self.state.dry_run
+    }
+
+    /// Most-recent run records for `model` from the typed run store, or
+    /// an empty vec when persistence is disabled. Used by the TUI history
+    /// overlay (`h` key) so it can populate without needing direct
+    /// access to the store.
+    pub fn history(&self, model: &str, limit: usize) -> Vec<crate::storage::RunRecord> {
+        match &self.run_store {
+            Some(rs) => rs.recent(model, limit),
+            None => Vec::new(),
+        }
     }
 
     /// Toggle the `enforce` bit in the live policy. The next tick will use
@@ -218,6 +240,18 @@ impl Runtime {
                 && let Err(e) = s.append(summary)
             {
                 tracing::warn!(error = %e, "failed to persist run summary");
+            }
+            // RunStore is query-optimized (latest.md Tier 1.1) — only
+            // AI-classified processes get a record. Non-AI exits stay in
+            // the legacy `summary_log_path` JSONL when configured, which
+            // remains the unfiltered forensic trail.
+            if let Some(rs) = &mut self.run_store
+                && summary.category.is_some()
+            {
+                let record = RunRecord::from_summary(summary.clone());
+                if let Err(e) = rs.append(record) {
+                    tracing::warn!(error = %e, "failed to persist run record");
+                }
             }
         }
 

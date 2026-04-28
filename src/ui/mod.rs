@@ -127,6 +127,26 @@ fn apply_action(action: Action, runtime: &mut Runtime, app: &mut App) {
                 }
             }
         }
+        Action::OpenHistory => {
+            // Resolve the focused row to a model name (preferring the
+            // resolved model over the bare process name so multiple
+            // PIDs of the same model cluster).
+            if let Some(pid) = app.selected_pid(runtime.state()) {
+                let state = runtime.state();
+                let proc = state.annotated.iter().find(|p| p.pid == pid);
+                let key = proc
+                    .and_then(|p| p.model_name.clone())
+                    .or_else(|| proc.map(|p| p.name.clone()))
+                    .unwrap_or_default();
+                let records = if key.is_empty() {
+                    Vec::new()
+                } else {
+                    runtime.history(&key, 20)
+                };
+                app.open_history(key, records);
+            }
+        }
+        Action::CloseHistory => app.close_history(),
         Action::None => {}
     }
 }

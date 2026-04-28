@@ -8,9 +8,19 @@ use super::app::{Action, App, Mode};
 /// Filter mode swallows printable keys into the filter buffer so the user
 /// can type process names without colliding with the navigation hotkeys.
 pub fn translate(key: KeyEvent, app: &App) -> Action {
-    // Ctrl-C is universally "quit" — works even mid-filter.
+    // Ctrl-C is universally "quit" — works even mid-filter / overlay.
     if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('c')) {
         return Action::Quit;
+    }
+
+    // History overlay swallows input until dismissed. j/k still scroll
+    // (future), Esc closes; everything else is a no-op so the user
+    // doesn't accidentally fire navigation actions on the panel beneath.
+    if app.is_history_open() {
+        return match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => Action::CloseHistory,
+            _ => Action::None,
+        };
     }
 
     match app.mode() {
@@ -26,6 +36,7 @@ pub fn translate(key: KeyEvent, app: &App) -> Action {
             KeyCode::Char('?') => Action::ToggleHelp,
             KeyCode::Char('d') => Action::ToggleDryRun,
             KeyCode::Char('k') => Action::ConfirmKill,
+            KeyCode::Char('h') => Action::OpenHistory,
             KeyCode::Char('/') => Action::StartFilter,
             KeyCode::Char('j') | KeyCode::Down => Action::SelectNext,
             KeyCode::Char('K') | KeyCode::Up => Action::SelectPrev,

@@ -9,6 +9,26 @@ once `v1.0.0` is tagged. Until then, minor versions may include breaking changes
 ## [Unreleased]
 
 ### Added
+- **Tier 1.1 — per-model run history viewer** (latest.md). Two surfaces:
+  - **CLI subcommand** `edge_monitor history [MODEL] [--limit N] [--json]`.
+    With no model, prints a table of (model, run count, last run,
+    last status). With a model, prints the recent N runs with peak
+    metrics. `--json` emits structured output (Vec<RunRecord> or
+    Vec<ModelSummary>) for scripting.
+  - **TUI overlay** triggered by `h` on a focused process row. Snapshots
+    the most recent 20 runs of the row's model into a centered floating
+    panel. Esc / q to close.
+- **`[storage]` config section**: `run_store_path` (defaults to
+  `~/.local/share/edge_monitor`), `fingerprint_cache`,
+  `keep_runs_per_model`. Tilde expansion is built-in.
+- **Runtime → RunStore wiring**: completed AI-classified runs are now
+  persisted as `RunRecord`s into the typed store on every exit.
+  Non-AI exits stay in the legacy `summary_log_path` JSONL when
+  configured; RunStore is query-optimised (latest.md), not forensic.
+- `Runtime::history(model, n)` accessor exposed for the TUI overlay.
+- Manual smoke script: `scripts/manual/history_smoke.sh` drives the
+  binary against a real yolo workload and checks both text and JSON
+  shapes end-to-end.
 - **Foundation A — `RunStore`** (`src/storage/run_store.rs`): typed
   read/write store for per-run records with a per-model index. Storage
   layout: `<root>/runs/<YYYY-MM-DD>/run-<uuid>.json` per record plus an
@@ -71,12 +91,17 @@ once `v1.0.0` is tagged. Until then, minor versions may include breaking changes
     so operators running without the TUI see the model, not just a count.
 - Dual licensing under MIT OR Apache-2.0.
 
+### Changed
+- Tracing logs now route to **stderr** (was stdout) so subcommand JSON
+  output (`history --json`) on stdout stays clean for piping into `jq`.
+
 ### Notes
 - Developed on WSL Ubuntu; NVML returns `None` gracefully without GPU
   passthrough. Real target (Jetson AGX Orin) not yet validated end-to-end.
-- 181 unit + 3 pipeline integration + 2 proptest tests pass
-  (was 168; +7 RunStore, +6 baseline/regression).
-  `cargo clippy --all-targets -- -D warnings` clean.
+- 191 unit + 5 history-CLI integration + 3 pipeline integration + 2
+  proptest tests pass (was 168; +13 foundations, +6 history unit,
+  +4 config edge cases, +5 history-CLI integration). `cargo clippy
+  --all-targets -- -D warnings` clean.
 - No release artifact yet. `v0.1.0` will be tagged once Phase 1 launch
   checklist (CI, demo GIF, `.deb`, crates.io name reservation) is complete.
 

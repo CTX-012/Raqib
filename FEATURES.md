@@ -173,10 +173,14 @@ built-in safe defaults. Schema (see
 [docs/configuration.md](docs/configuration.md)):
 
 - `[runtime]` — `tick_interval_ms`, `render_interval_ms`,
-  `completed_history`, `audit_history`
+  `completed_history`, `audit_history`, `audit_log_path`,
+  `summary_log_path`
 - `[policy]` — `allowlist`, `blocklist`, `default_ai_action`,
   `sigterm_grace_secs`, `enforce`, `rate_limit_max_kills`,
-  `rate_limit_window_secs`, `audit_log_path`, `summary_log_path`
+  `rate_limit_window_secs`
+- `[storage]` — `run_store_path` (default
+  `~/.local/share/edge_monitor`), `fingerprint_cache`,
+  `keep_runs_per_model` (default 200)
 
 `config.validate()` rejects nonsense (e.g. zero tick interval, grace
 period < 1s) before the runtime starts.
@@ -184,22 +188,58 @@ period < 1s) before the runtime starts.
 ## CLI
 
 ```
-edge_monitor [OPTIONS]
+edge_monitor [OPTIONS] [COMMAND]
   --config <PATH>     Path to TOML config (defaults to ./edge_monitor.toml)
   --dry-run           Force dry-run regardless of policy.enforce
   --no-ui             Headless mode; one line per tick to stderr
   --ticks <N>         Headless tick budget (0 = run until killed)
   --log-level <LEVEL> trace | debug | info | warn | error
   -h, --help / -V, --version
+
+Subcommands:
+  history [MODEL] [--limit N] [--json]
+                      Show recent runs from the typed run store.
+                      With no model: per-model summary table.
+                      With model: most-recent runs with peak metrics.
+                      --json emits structured output for piping.
 ```
 
 `--dry-run` is an extra safety belt on top of `policy.enforce` —
 specifying it can never make the governor more aggressive than the
-config says.
+config says. Tracing logs route to **stderr**, so `history --json` on
+stdout stays clean for `jq`.
+
+## Run history (Tier 1.1)
+
+[src/history.rs](src/history.rs) + [src/storage/run_store.rs](src/storage/run_store.rs)
+form the backbone:
+
+- **`RunStore`** persists every AI-classified completed run as a
+  `RunRecord` (a `LifecycleSummary` plus run-id, model fingerprint
+  slot, telemetry slot, exit reason, cold-start slot). On-disk:
+  `<root>/runs/<YYYY-MM-DD>/run-<uuid>.json` per record + an
+  append-only `index.jsonl` for O(N) startup scan.
+- **CLI `history`** queries the store from any shell and renders to a
+  table (default) or JSON (`--json`).
+- **TUI history overlay** opens with `h` on a focused row; loads up to
+  20 recent runs of the row's model. Esc / q dismisses.
+- Default store path: `~/.local/share/edge_monitor`. Set
+  `storage.run_store_path = ""` to disable persistence (in-memory ring
+  buffer still feeds the Completed panel).
+
+## Baseline + regression detection (Tier 1.3 ready)
+
+[src/analysis/compare.rs](src/analysis/compare.rs) computes per-metric
+mean/stddev across a configurable rolling window and flags new runs
+that exceed warn (default 10%) / critical (default 25%) thresholds.
+Refuses to flag anything with a baseline of <3 samples. Direction-
+aware — a faster `tokens_per_sec_avg` is never a regression. The exit-
+hook wiring lands in Tier 1.3.
 
 ## Test surface
 
-173 tests pass (168 unit + 3 pipeline integration + 2 proptest):
+201 tests pass (191 unit + 5 history-CLI integration + 3 pipeline
+integration + 2 proptest):
 
 - Unit tests cover every classifier strategy, lifecycle peak/avg
   arithmetic, governor decisions across allowlist/blocklist/dry-run/

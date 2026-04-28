@@ -15,6 +15,7 @@ pub mod analysis;
 pub mod classifier;
 pub mod config;
 pub mod governor;
+pub mod history;
 pub mod lifecycle;
 pub mod model;
 pub mod platform;

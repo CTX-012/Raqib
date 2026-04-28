@@ -30,6 +30,7 @@ pub fn render(f: &mut Frame, area: Rect) {
         Line::from("  d                   toggle dry-run / enforce mode"),
         Line::from("  k                   ARM manual kill on selected PID"),
         Line::from("  k (again)           CONFIRM kill on armed PID"),
+        Line::from("  h                   show run history for selected model"),
         Line::from("  q / Ctrl-C          quit"),
         Line::from(""),
         Line::from(Span::styled(

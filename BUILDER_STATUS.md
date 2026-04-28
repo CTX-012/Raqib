@@ -22,6 +22,7 @@ to history) and via reading concurrent worktrees.
     - src/telemetry/samplers/vllm_prometheus.rs (scrape vllm:num_preemptions_total)
     - src/ui/panels/registry.rs (KV column + red >80%)
     - src/ui/panels/history_overlay.rs (KV saturation icon)
+    - src/runtime.rs (publish live KV into RuntimeState for the registry panel — added 10:42Z)
   started: 2026-04-28T10:35:58Z
   branch: builder-claude/tier-3-3-kv-cache-pressure
   eta: 2 hours

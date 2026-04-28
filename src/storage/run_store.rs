@@ -139,6 +139,15 @@ pub struct RunMetrics {
     pub kv_cache_peak_pct: Option<f32>,
     pub concurrent_requests_peak: Option<u32>,
 
+    /// Tier 3.2 — same `tokens_per_sec_avg` arithmetic but restricted
+    /// to samples after cold-load completed. None when cold-load never
+    /// finished (short run, streaming workload) or no telemetry post-
+    /// cold-load. History comparison should prefer this over
+    /// `_avg` because it ignores model-load warm-up noise.
+    pub tokens_per_sec_avg_steady: Option<f32>,
+    pub fps_avg_steady: Option<f32>,
+    pub gpu_watts_avg_steady: Option<f32>,
+
     // ── Vision ───────────────────────────────────────────────────────
     pub frames_total: Option<u64>,
     pub fps_avg: Option<f32>,

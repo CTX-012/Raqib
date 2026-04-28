@@ -121,6 +121,11 @@ pub struct Runtime {
     kills_by_reason: HashMap<String, u64>,
     /// Tier 2.3 — cumulative regression count keyed by (model, metric).
     regressions_count: HashMap<(String, String), u64>,
+    /// Tier 2.3 — last observed cold-load duration per model (seconds).
+    /// Populated when the cold-load detector finalises a stats record;
+    /// stays at the most recent value until a new run for that model
+    /// completes a fresh cold-load.
+    cold_load_seconds_by_model: HashMap<String, f32>,
     /// Tier 3.1 — model fingerprint cache. Hashes head+tail of the
     /// weight file once per `(dev, inode, mtime, len)` tuple.
     fingerprinter: Fingerprinter,
@@ -190,6 +195,7 @@ impl Runtime {
             telemetry,
             kills_by_reason: HashMap::new(),
             regressions_count: HashMap::new(),
+            cold_load_seconds_by_model: HashMap::new(),
             fingerprinter,
             pid_to_model_path: HashMap::new(),
             governor_killed_pids: HashMap::new(),
@@ -360,6 +366,12 @@ impl Runtime {
                 if let Some(d) = &self.telemetry
                     && let Some(cs) = d.cold_start_for(summary.pid)
                 {
+                    // Tier 2.3 — keep the most recent cold-load duration
+                    // per model name available to the Prom exporter so
+                    // dashboards can plot warm-vs-cold start latency.
+                    let model_label = record.model_or_name().to_string();
+                    self.cold_load_seconds_by_model
+                        .insert(model_label, cs.duration_seconds);
                     record.cold_start = Some(cs);
                 }
                 // Tier 3.1 — fingerprint the weight file (cached by
@@ -467,6 +479,21 @@ impl Runtime {
         };
         let mut snap = crate::telemetry::exporter::MetricsSnapshot::new();
         snap.tick_count = self.state.tick_count;
+        // GPU temperature — NVML reports per-device. Attribute it to a
+        // PID by looking up which device holds that PID's VRAM. When
+        // multiple devices are involved we pick the first match (a
+        // multi-GPU model is rare on edge boxes; the alternative is
+        // emitting one series per pid×device which the exporter then
+        // has to label-disambiguate).
+        let gpu_temp_for_pid = |pid: u32| -> Option<f32> {
+            let snap = self.state.last_snapshot.as_ref()?;
+            for dev in &snap.gpu.devices {
+                if dev.per_process_vram.contains_key(&pid) {
+                    return dev.temp_c;
+                }
+            }
+            None
+        };
         for p in &self.state.annotated {
             let cat_label = match p.category {
                 AICategory::Inference => "inference",
@@ -479,6 +506,7 @@ impl Runtime {
                 .processes_by_category
                 .entry(cat_label.into())
                 .or_insert(0) += 1;
+            snap.ai_processes_active += 1;
             // Live per-PID gauges — for AI processes only, with the
             // dispatcher's accumulator providing tokens/fps/watts.
             let metrics = d.metrics_for(p.pid).unwrap_or_default();
@@ -491,10 +519,12 @@ impl Runtime {
                 vram_bytes: p.vram_bytes,
                 gpu_watts: metrics.gpu_watts_avg,
                 cpu_watts: metrics.cpu_watts_avg,
+                gpu_temp_celsius: gpu_temp_for_pid(p.pid),
             });
         }
         snap.kills_by_reason = self.kills_by_reason.clone();
         snap.regressions = self.regressions_count.clone();
+        snap.cold_load_seconds = self.cold_load_seconds_by_model.clone();
         d.publish_metrics(snap);
     }
 

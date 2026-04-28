@@ -252,10 +252,16 @@ impl Dispatcher {
     /// fold into the cold-load tracker. Caller passes the same
     /// `processes` slice as `tick`. Reads silently skip PIDs whose
     /// `/proc/<pid>/io` is unreadable (permission, race-with-exit).
+    ///
+    /// Tier 3.2 — when cold-load completes for a PID, also flips
+    /// the accumulator's steady-state watermark so subsequent frames
+    /// contribute to the `_steady` sub-aggregates on `RunMetrics`.
     pub fn record_disk_io(&mut self, processes: &[ProcessSnapshot]) {
         for proc in processes {
-            if let Some(read_bytes) = read_bytes_for(proc.pid) {
-                let _ = self.cold_load.record(proc.pid, read_bytes);
+            if let Some(read_bytes) = read_bytes_for(proc.pid)
+                && self.cold_load.record(proc.pid, read_bytes).is_some()
+            {
+                self.accumulator.mark_steady_state(proc.pid);
             }
         }
     }

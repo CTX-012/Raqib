@@ -49,6 +49,10 @@ pub struct LiveAiSample {
     pub vram_bytes: Option<u64>,
     pub gpu_watts: Option<f32>,
     pub cpu_watts: Option<f32>,
+    /// GPU die temperature attributed to this PID (°C). NVML reports
+    /// temperature per device, not per process; this is the temp of
+    /// the device that holds this PID's VRAM. `None` when no GPU.
+    pub gpu_temp_celsius: Option<f32>,
 }
 
 /// Everything the exporter knows about the world. Runtime overwrites
@@ -59,11 +63,18 @@ pub struct MetricsSnapshot {
     /// `category_label -> count`. Populated for every category seen
     /// at least once so Prometheus has stable label series.
     pub processes_by_category: HashMap<String, u32>,
+    /// Sum of every category bucket — exposed as a top-level gauge so
+    /// dashboards can alert on "any AI process active" without summing.
+    pub ai_processes_active: u32,
     pub live: Vec<LiveAiSample>,
     /// `reason -> count` — cumulative kill audit since process start.
     pub kills_by_reason: HashMap<String, u64>,
     /// `(model, metric) -> count` — cumulative regressions emitted.
     pub regressions: HashMap<(String, String), u64>,
+    /// `model -> last cold-load duration (seconds)`. Populated on the
+    /// tick the cold-load detector finalises a stats record. Stays at
+    /// the most recent value until overwritten.
+    pub cold_load_seconds: HashMap<String, f32>,
 }
 
 impl MetricsSnapshot {
@@ -172,6 +183,64 @@ pub fn render(snap: &MetricsSnapshot) -> String {
         }
     }
 
+    // Per-PID GPU board power, exposed without the model label so
+    // operators can write rules that fire purely off pid (matches the
+    // Tier 2.3 metric list in the test report). Duplicates run_gpu_watts
+    // intentionally: the run_* family carries model context for joined
+    // queries, the gpu_* family is the simpler pid-only view.
+    out.push_str("# HELP edge_monitor_gpu_watts Per-PID GPU board power (W).\n");
+    out.push_str("# TYPE edge_monitor_gpu_watts gauge\n");
+    for s in &live {
+        if let Some(v) = s.gpu_watts {
+            let _ = writeln!(
+                out,
+                "edge_monitor_gpu_watts{{pid=\"{}\"}} {}",
+                s.pid,
+                fmt_f32(v)
+            );
+        }
+    }
+
+    out.push_str(
+        "# HELP edge_monitor_gpu_temp_celsius GPU die temperature attributed to PID (°C).\n",
+    );
+    out.push_str("# TYPE edge_monitor_gpu_temp_celsius gauge\n");
+    for s in &live {
+        if let Some(v) = s.gpu_temp_celsius {
+            let _ = writeln!(
+                out,
+                "edge_monitor_gpu_temp_celsius{{pid=\"{}\"}} {}",
+                s.pid,
+                fmt_f32(v)
+            );
+        }
+    }
+
+    out.push_str(
+        "# HELP edge_monitor_cold_load_seconds Wall-clock duration of the model cold-load phase.\n",
+    );
+    out.push_str("# TYPE edge_monitor_cold_load_seconds gauge\n");
+    let mut cold: Vec<_> = snap.cold_load_seconds.iter().collect();
+    cold.sort_by_key(|(m, _)| m.as_str());
+    for (model, secs) in cold {
+        let _ = writeln!(
+            out,
+            "edge_monitor_cold_load_seconds{{model=\"{}\"}} {}",
+            escape_label(model),
+            fmt_f32(*secs)
+        );
+    }
+
+    out.push_str(
+        "# HELP edge_monitor_ai_processes_active Total count of live AI-classified processes.\n",
+    );
+    out.push_str("# TYPE edge_monitor_ai_processes_active gauge\n");
+    let _ = writeln!(
+        out,
+        "edge_monitor_ai_processes_active {}",
+        snap.ai_processes_active
+    );
+
     out.push_str("# HELP edge_monitor_governor_kills_total Cumulative kill decisions by reason.\n");
     out.push_str("# TYPE edge_monitor_governor_kills_total counter\n");
     let mut kills: Vec<_> = snap.kills_by_reason.iter().collect();
@@ -201,9 +270,13 @@ pub fn render(snap: &MetricsSnapshot) -> String {
         );
     }
 
-    out.push_str("# HELP edge_monitor_tick_count Number of completed tick cycles.\n");
-    out.push_str("# TYPE edge_monitor_tick_count counter\n");
-    let _ = writeln!(out, "edge_monitor_tick_count {}", snap.tick_count);
+    // Counter: tick cycles since process start. `_total` suffix matches
+    // Prometheus convention so promtool/Grafana auto-detect it as a
+    // counter. The unsuffixed `edge_monitor_tick_count` was renamed for
+    // Tier 2.3 — promtool flagged the missing suffix.
+    out.push_str("# HELP edge_monitor_tick_count_total Number of completed tick cycles.\n");
+    out.push_str("# TYPE edge_monitor_tick_count_total counter\n");
+    let _ = writeln!(out, "edge_monitor_tick_count_total {}", snap.tick_count);
 
     out
 }
@@ -354,6 +427,7 @@ mod tests {
         snap.tick_count = 4321;
         snap.processes_by_category.insert("inference".into(), 3);
         snap.processes_by_category.insert("training".into(), 0);
+        snap.ai_processes_active = 3;
         snap.live.push(LiveAiSample {
             pid: 12345,
             model: "phi3-mini".into(),
@@ -363,10 +437,12 @@ mod tests {
             vram_bytes: Some(4_101_296_128),
             gpu_watts: Some(142.3),
             cpu_watts: Some(35.0),
+            gpu_temp_celsius: Some(67.0),
         });
         snap.kills_by_reason.insert("dry_run".into(), 12);
         snap.regressions
             .insert(("phi3-mini".into(), "tokens_per_sec_avg".into()), 1);
+        snap.cold_load_seconds.insert("phi3-mini".into(), 1.75);
         snap
     }
 
@@ -380,9 +456,13 @@ mod tests {
             "edge_monitor_run_tokens_per_sec{model=\"phi3-mini\",pid=\"12345\"} 37.4000",
             "edge_monitor_run_vram_bytes{model=\"phi3-mini\",pid=\"12345\"} 4101296128",
             "edge_monitor_run_gpu_watts{model=\"phi3-mini\",pid=\"12345\"} 142.3000",
+            "edge_monitor_gpu_watts{pid=\"12345\"} 142.3000",
+            "edge_monitor_gpu_temp_celsius{pid=\"12345\"} 67.0000",
+            "edge_monitor_ai_processes_active 3",
+            "edge_monitor_cold_load_seconds{model=\"phi3-mini\"} 1.7500",
             "edge_monitor_governor_kills_total{reason=\"dry_run\"} 12",
             "edge_monitor_regressions_total{model=\"phi3-mini\",metric=\"tokens_per_sec_avg\"} 1",
-            "edge_monitor_tick_count 4321",
+            "edge_monitor_tick_count_total 4321",
         ] {
             assert!(body.contains(line), "missing line: {line}\nbody:\n{body}");
         }
@@ -392,7 +472,53 @@ mod tests {
     fn empty_snapshot_still_emits_zero_processes_series() {
         let body = render(&MetricsSnapshot::new());
         assert!(body.contains("edge_monitor_processes_total{category=\"none\"} 0"));
-        assert!(body.contains("edge_monitor_tick_count 0"));
+        assert!(body.contains("edge_monitor_tick_count_total 0"));
+        assert!(body.contains("edge_monitor_ai_processes_active 0"));
+    }
+
+    /// Lint the rendered output against the Prometheus exposition rules
+    /// promtool checks for: every metric line must be preceded by a
+    /// matching `# TYPE` directive, and every metric name has at most
+    /// one `# TYPE` declaration. Doubles as a regression guard if a new
+    /// family ever lands without the `# HELP`/`# TYPE` preamble.
+    #[test]
+    fn rendered_output_passes_prometheus_lint() {
+        let body = render(&fixture_snapshot());
+        let mut declared_types: HashMap<String, String> = HashMap::new();
+        let mut seen_metric_names: std::collections::HashSet<String> = Default::default();
+
+        for line in body.lines() {
+            if let Some(rest) = line.strip_prefix("# TYPE ") {
+                // "# TYPE <name> <kind>"
+                let mut parts = rest.split_whitespace();
+                let name = parts.next().expect("# TYPE without name");
+                let kind = parts.next().expect("# TYPE without kind");
+                assert!(
+                    declared_types
+                        .insert(name.to_string(), kind.to_string())
+                        .is_none(),
+                    "duplicate # TYPE declaration for {name}"
+                );
+                continue;
+            }
+            if line.starts_with('#') || line.is_empty() {
+                continue;
+            }
+            // metric line: <name>{labels} <value> OR <name> <value>
+            let head = line.split_whitespace().next().unwrap_or("");
+            let name = head.split('{').next().unwrap_or(head);
+            assert!(
+                declared_types.contains_key(name),
+                "metric {name} emitted without a # TYPE declaration"
+            );
+            seen_metric_names.insert(name.to_string());
+        }
+        // A declared TYPE with zero samples is legal under the
+        // exposition format (Prometheus treats it as "metric exists,
+        // currently empty"), so we don't require a sample for every
+        // family — only that every emitted sample has a matching TYPE,
+        // which the loop above already enforced.
+        let _ = seen_metric_names;
     }
 
     #[test]
@@ -437,7 +563,7 @@ mod tests {
         .await;
         let s = String::from_utf8_lossy(&response);
         assert!(s.starts_with("HTTP/1.1 200 OK"), "got: {s}");
-        assert!(s.contains("edge_monitor_tick_count 4321"), "got: {s}");
+        assert!(s.contains("edge_monitor_tick_count_total 4321"), "got: {s}");
         server.abort();
     }
 

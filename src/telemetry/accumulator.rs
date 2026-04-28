@@ -54,6 +54,18 @@ pub struct PerPidStats {
     cpu_watts_last: Option<f32>,
     energy_joules: f32,
 
+    // Tier 3.2 — steady-state sub-aggregates. Only frames recorded
+    // *after* `steady_started_at` is set contribute. The dispatcher
+    // calls `mark_steady_state(pid)` when the cold-load detector
+    // declares the model load complete.
+    steady_started_at: Option<std::time::Instant>,
+    tps_sum_steady: f32,
+    tps_samples_steady: u32,
+    fps_sum_steady: f32,
+    fps_samples_steady: u32,
+    gpu_watts_sum_steady: f32,
+    gpu_watts_samples_steady: u32,
+
     // Authoritative model name from a runtime API.
     model_name_hint: Option<String>,
 }
@@ -71,6 +83,8 @@ impl PerPidStats {
 
         // Reject negative + non-finite token rates (S3 in TEST.md F.2.6).
         // The strict policy: drop the value rather than store noise.
+        let in_steady = self.steady_started_at.is_some();
+
         if let Some(tps) = f.tokens_per_sec
             && tps.is_finite()
             && (0.0..=1.0e6).contains(&tps)
@@ -80,6 +94,10 @@ impl PerPidStats {
             if tps > self.tps_peak {
                 self.tps_peak = tps;
             }
+            if in_steady {
+                self.tps_sum_steady += tps;
+                self.tps_samples_steady += 1;
+            }
         }
         if let Some(fps) = f.fps
             && fps.is_finite()
@@ -87,6 +105,10 @@ impl PerPidStats {
         {
             self.fps_sum += fps;
             self.fps_samples += 1;
+            if in_steady {
+                self.fps_sum_steady += fps;
+                self.fps_samples_steady += 1;
+            }
         }
         if let Some(lat) = f.latency_ms
             && lat.is_finite()
@@ -128,6 +150,10 @@ impl PerPidStats {
                 self.energy_joules += 0.5 * (prev_w + w) * dt;
             }
             self.gpu_watts_last = Some(w);
+            if in_steady {
+                self.gpu_watts_sum_steady += w;
+                self.gpu_watts_samples_steady += 1;
+            }
         }
         if let Some(w) = f.cpu_watts
             && w.is_finite()
@@ -155,6 +181,14 @@ impl PerPidStats {
     /// when present.
     pub fn model_name_hint(&self) -> Option<&str> {
         self.model_name_hint.as_deref()
+    }
+
+    /// Tier 3.2 — declare steady state has begun. Idempotent: if
+    /// already marked we keep the original watermark.
+    pub fn mark_steady_state(&mut self) {
+        if self.steady_started_at.is_none() {
+            self.steady_started_at = Some(std::time::Instant::now());
+        }
     }
 
     /// Project the accumulated stats onto the `RunMetrics` slots that
@@ -187,6 +221,11 @@ impl PerPidStats {
             } else {
                 None
             },
+
+            // Tier 3.2 — steady-state sub-aggregates.
+            tokens_per_sec_avg_steady: avg(self.tps_sum_steady, self.tps_samples_steady),
+            fps_avg_steady: avg(self.fps_sum_steady, self.fps_samples_steady),
+            gpu_watts_avg_steady: avg(self.gpu_watts_sum_steady, self.gpu_watts_samples_steady),
 
             ..RunMetrics::default()
         }
@@ -259,6 +298,13 @@ impl TelemetryAccumulator {
     /// `None` when no API source ever reported one. Tier 1.2c.
     pub fn model_name_hint_for(&self, pid: u32) -> Option<&str> {
         self.by_pid.get(&pid).and_then(|s| s.model_name_hint())
+    }
+
+    /// Tier 3.2 — declare cold-load complete for `pid`. Frames
+    /// recorded after this call contribute to the `_steady`
+    /// sub-aggregates as well as the overall ones.
+    pub fn mark_steady_state(&mut self, pid: u32) {
+        self.by_pid.entry(pid).or_default().mark_steady_state();
     }
 }
 

@@ -1,2 +1,8 @@
-{"timestamp":"2026-04-28T10:14:33.632486Z","level":"INFO","message":"no config file; using built-in defaults"}
-{"timestamp":"2026-04-28T10:14:33.632560Z","level":"INFO","message":"DRY-RUN mode — no signals will be sent."}
+{"timestamp":"2026-04-28T10:24:52.908230Z","level":"INFO","message":"no config file; using built-in defaults"}
+{"timestamp":"2026-04-28T10:24:52.908319Z","level":"INFO","message":"DRY-RUN mode — no signals will be sent."}
+{"timestamp":"2026-04-28T10:24:53.208154Z","level":"INFO","message":"tick","tick":1,"ai_processes":0,"exits":0}
+{"timestamp":"2026-04-28T10:24:54.033164Z","level":"INFO","message":"tick","tick":2,"ai_processes":0,"exits":0}
+{"timestamp":"2026-04-28T10:24:55.033189Z","level":"INFO","message":"tick","tick":3,"ai_processes":0,"exits":0}
+{"timestamp":"2026-04-28T10:24:56.063895Z","level":"INFO","message":"tick","tick":4,"ai_processes":0,"exits":0}
+{"timestamp":"2026-04-28T10:24:57.070205Z","level":"INFO","message":"tick","tick":5,"ai_processes":0,"exits":3}
+{"timestamp":"2026-04-28T10:24:57.073303Z","level":"INFO","message":"tick budget reached; exiting","ticks":5}

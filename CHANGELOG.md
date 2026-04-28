@@ -9,6 +9,24 @@ once `v1.0.0` is tagged. Until then, minor versions may include breaking changes
 ## [Unreleased]
 
 ### Added
+- **Tier 1.2a — vLLM Prometheus scraper**
+  (`src/telemetry/samplers/vllm_prometheus.rs`). Detects vLLM
+  processes by cmdline (`vllm serve`, `vllm.entrypoints.*`,
+  `python -m vllm`) or any `VLLM_*` env var, discovers the serving
+  port from `--port N` / `--port=N` (default 8000), and scrapes
+  `http://127.0.0.1:<port>/metrics` with a 500 ms timeout. Endpoint
+  is cached per PID after first success. Maps standard vLLM metric
+  names onto `TelemetryFrame`: `vllm:avg_generation_throughput_toks_per_s`
+  → `tokens_per_sec`, `vllm:gpu_cache_usage_perc` → `kv_cache_pct`
+  (×100 to convert 0..1 → %), `vllm:num_requests_running` →
+  `concurrent_requests`. Parser is split from HTTP for offline
+  unit-testability.
+- New `reqwest = "0.12"` dependency (with `rustls-tls` + `http2`,
+  default features off so no openssl).
+- 10 unit tests including an end-to-end HTTP scrape against a tokio
+  TcpListener serving canned bytes, plus exhaustive `parse_metrics`
+  / `applies_to` / `discover_port` coverage.
+
 - **Tier 1.2d — stdout regex parser**
   (`src/telemetry/samplers/stdout_parser.rs`). Pure-function
   `parse_line()` extracts `tokens_per_sec`, `fps`, and `latency_ms`
@@ -150,12 +168,12 @@ once `v1.0.0` is tagged. Until then, minor versions may include breaking changes
 ### Notes
 - Developed on WSL Ubuntu; NVML returns `None` gracefully without GPU
   passthrough. Real target (Jetson AGX Orin) not yet validated end-to-end.
-- 214 unit + 5 history-CLI integration + 3 pipeline integration + 2
+- 224 unit + 5 history-CLI integration + 3 pipeline integration + 2
   proptest tests pass (was 168; +13 A/C foundations, +6 history unit,
   +4 config edge cases, +5 history-CLI integration, +4 regression
   plumbing, +3 regression config, +8 telemetry foundation B,
-  +8 stdout parser, +5 misc). `cargo clippy --all-targets --
-  -D warnings` clean.
+  +8 stdout parser, +10 vLLM scraper, +1 misc). `cargo clippy
+  --all-targets -- -D warnings` clean.
 - No release artifact yet. `v0.1.0` will be tagged once Phase 1 launch
   checklist (CI, demo GIF, `.deb`, crates.io name reservation) is complete.
 

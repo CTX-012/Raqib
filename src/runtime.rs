@@ -111,6 +111,12 @@ pub struct Runtime {
     /// usually a kernel thread-creation failure) so the rest of the
     /// runtime degrades gracefully.
     telemetry: Option<Dispatcher>,
+    /// Tier 2.3 — cumulative governor-kill counter, keyed by reason.
+    /// Surfaced as `edge_monitor_governor_kills_total{reason="..."}`
+    /// in the Prometheus exporter.
+    kills_by_reason: HashMap<String, u64>,
+    /// Tier 2.3 — cumulative regression count keyed by (model, metric).
+    regressions_count: HashMap<(String, String), u64>,
     /// Previous tick's cumulative CPU ticks, per PID, plus the wall-clock
     /// timestamp that reading was taken at. Used to compute cpu_pct as
     /// delta_ticks / CLK_TCK / elapsed_secs × 100.
@@ -145,7 +151,12 @@ impl Runtime {
                 .inspect_err(|e| tracing::error!(error = %e, path = %p.display(), "failed to open run store; continuing without persistence"))
                 .ok()
         });
-        let telemetry = build_dispatcher(&config);
+        let mut telemetry = build_dispatcher(&config);
+        if let Some(d) = telemetry.as_mut()
+            && let Err(e) = d.enable_exporter(&config.telemetry.prometheus_bind)
+        {
+            tracing::error!(error = %e, "prometheus exporter setup failed; continuing without it");
+        }
         Self {
             config,
             tracker: LifecycleTracker::new(),
@@ -156,6 +167,8 @@ impl Runtime {
             summary_store,
             run_store,
             telemetry,
+            kills_by_reason: HashMap::new(),
+            regressions_count: HashMap::new(),
             prev_cpu: HashMap::new(),
             clk_tck: read_clk_tck(),
         }
@@ -331,6 +344,7 @@ impl Runtime {
                 // baseline excludes it (rs.recent skips the in-flight
                 // record by index ordering... actually it's first now,
                 // so we must explicitly compare against the prior N).
+                let regs_before = self.state.regressions.len();
                 check_regressions(
                     rs,
                     &record_clone,
@@ -339,6 +353,13 @@ impl Runtime {
                     &mut self.state.regressions,
                     self.config.runtime.audit_history,
                 );
+                // Tier 2.3 — count regressions for the Prom counter.
+                for ev in self.state.regressions.iter().skip(regs_before) {
+                    *self
+                        .regressions_count
+                        .entry((ev.model.clone(), ev.regression.metric.clone()))
+                        .or_insert(0) += 1;
+                }
             }
             // Drop accumulator state for the exited PID so a recycled
             // PID later starts fresh. Tier 1.2.
@@ -349,6 +370,22 @@ impl Runtime {
 
         let decisions = self.governor.evaluate(&lifecycle);
 
+        // Tier 2.3 — count governor decisions by reason, for the
+        // Prometheus exporter. Done before we move `decisions` onto
+        // the runtime state.
+        for (_pid, action, reason) in &decisions {
+            let key = match action {
+                KillAction::SignalTermSent => "sigterm".to_string(),
+                KillAction::SignalKillSent => "sigkill".to_string(),
+                KillAction::DryRunTermWould | KillAction::DryRunKillWould => "dry_run".to_string(),
+                KillAction::Whitelisted => "whitelisted".to_string(),
+                KillAction::AlreadyExited => "already_exited".to_string(),
+                KillAction::RateLimited => "rate_limited".to_string(),
+                KillAction::Skipped => format!("skipped:{}", reason),
+            };
+            *self.kills_by_reason.entry(key).or_insert(0) += 1;
+        }
+
         self.state.annotated = annotated;
         self.state.decisions = decisions;
         self.state.last_snapshot = Some(snapshot);
@@ -356,7 +393,52 @@ impl Runtime {
         self.state.tick_count += 1;
         self.state.last_tick = Some(Instant::now());
 
+        // Tier 2.3 — refresh the Prometheus exporter snapshot if any
+        // operator is scraping. publish_metrics() is non-blocking;
+        // try_lock-fail just drops this update in favour of the next.
+        self.publish_metrics();
+
         Ok(&self.state)
+    }
+
+    /// Build the [`MetricsSnapshot`] the Prometheus exporter serves
+    /// and push it into the dispatcher's shared handle. No-op when
+    /// telemetry / exporter is disabled.
+    fn publish_metrics(&self) {
+        let Some(d) = &self.telemetry else {
+            return;
+        };
+        let mut snap = crate::telemetry::exporter::MetricsSnapshot::new();
+        snap.tick_count = self.state.tick_count;
+        for p in &self.state.annotated {
+            let cat_label = match p.category {
+                AICategory::Inference => "inference",
+                AICategory::Training => "training",
+                AICategory::ModelDownload => "model_download",
+                AICategory::Framework => "framework",
+                AICategory::NotAi => continue,
+            };
+            *snap
+                .processes_by_category
+                .entry(cat_label.into())
+                .or_insert(0) += 1;
+            // Live per-PID gauges — for AI processes only, with the
+            // dispatcher's accumulator providing tokens/fps/watts.
+            let metrics = d.metrics_for(p.pid).unwrap_or_default();
+            snap.live.push(crate::telemetry::exporter::LiveAiSample {
+                pid: p.pid,
+                model: p.model_name.clone().unwrap_or_else(|| p.name.clone()),
+                category: cat_label.into(),
+                tokens_per_sec: metrics.tokens_per_sec_avg,
+                fps: metrics.fps_avg,
+                vram_bytes: p.vram_bytes,
+                gpu_watts: metrics.gpu_watts_avg,
+                cpu_watts: metrics.cpu_watts_avg,
+            });
+        }
+        snap.kills_by_reason = self.kills_by_reason.clone();
+        snap.regressions = self.regressions_count.clone();
+        d.publish_metrics(snap);
     }
 
     /// Manual-kill entry point used by the TUI keybinding. Returns Err if

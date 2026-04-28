@@ -30,6 +30,7 @@ use crate::platform::GpuSnapshot;
 use crate::storage::run_store::{ColdStartStats, RunMetrics};
 use crate::telemetry::accumulator::TelemetryAccumulator;
 use crate::telemetry::cold_load::{ColdLoadTracker, read_bytes_for};
+use crate::telemetry::exporter::{self, MetricsSnapshot, SnapshotHandle};
 use crate::telemetry::rapl::RaplReader;
 use crate::telemetry::source::{ProcessSnapshot, TelemetryFrame, TelemetrySource};
 
@@ -53,6 +54,12 @@ pub struct Dispatcher {
     rapl: RaplReader,
     /// Tier 2.2 — cold-load disk I/O detector. Stateful per-PID.
     cold_load: ColdLoadTracker,
+    /// Tier 2.3 — shared snapshot the Prometheus exporter reads.
+    /// `None` when the exporter is not bound (default behaviour).
+    exporter_snapshot: Option<SnapshotHandle>,
+    /// Live exporter task handle (kept for clean shutdown). Aborted
+    /// when the dispatcher drops.
+    exporter_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl Dispatcher {
@@ -78,7 +85,38 @@ impl Dispatcher {
             sample_timeout: DEFAULT_SAMPLE_TIMEOUT,
             rapl: RaplReader::new(),
             cold_load: ColdLoadTracker::new(),
+            exporter_snapshot: None,
+            exporter_task: None,
         })
+    }
+
+    /// Tier 2.3 — start the Prometheus exporter on `bind` (e.g.
+    /// `127.0.0.1:9472`). Empty string is a no-op. Returns Ok even on
+    /// `bind` errors (the bind happens inside the spawned task and
+    /// logs to tracing if it fails); this matches the rest of the
+    /// runtime's "best-effort, never fatal" telemetry policy.
+    pub fn enable_exporter(&mut self, bind: &str) -> std::io::Result<()> {
+        if bind.is_empty() {
+            return Ok(());
+        }
+        let snapshot = Arc::new(Mutex::new(MetricsSnapshot::new()));
+        let handle = exporter::spawn(&self.runtime, bind, snapshot.clone())?;
+        self.exporter_snapshot = Some(snapshot);
+        self.exporter_task = handle;
+        Ok(())
+    }
+
+    /// Update the exporter's shared snapshot. Called by the runtime
+    /// after each tick; no-op when the exporter isn't bound.
+    pub fn publish_metrics(&self, snap: MetricsSnapshot) {
+        if let Some(handle) = &self.exporter_snapshot {
+            // try_lock first to avoid blocking the tick loop on a
+            // long-running scrape; if contended, just drop this
+            // update — the next tick replaces it.
+            if let Ok(mut guard) = handle.try_lock() {
+                *guard = snap;
+            }
+        }
     }
 
     pub fn with_sample_timeout(mut self, t: Duration) -> Self {
@@ -241,12 +279,13 @@ impl Dispatcher {
 
 impl Drop for Dispatcher {
     fn drop(&mut self) {
-        // Tokio's `Runtime::drop` already shuts down worker threads
-        // gracefully; we just close the channel sender so any
-        // in-flight task that tries to send observes the Closed error
-        // instead of leaking the frame.
-        // (Channel senders close automatically when the last clone
-        // drops; this is informational only.)
+        // Stop the exporter loop before the runtime tears down its
+        // worker threads — abort() is async-task-cancel which Tokio
+        // already cleans up on Runtime::drop, but explicit is
+        // clearer than implicit.
+        if let Some(task) = self.exporter_task.take() {
+            task.abort();
+        }
     }
 }
 

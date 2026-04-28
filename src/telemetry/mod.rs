@@ -24,6 +24,7 @@
 pub mod accumulator;
 pub mod cold_load;
 pub mod dispatcher;
+pub mod exporter;
 pub mod rapl;
 pub mod samplers;
 pub mod source;

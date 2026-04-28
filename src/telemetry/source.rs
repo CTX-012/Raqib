@@ -38,6 +38,18 @@ pub struct TelemetryFrame {
     pub kv_cache_pct: Option<f32>,
     pub concurrent_requests: Option<u32>,
 
+    /// Power & thermal (Tier 2.1). Watts at instant. Accumulator turns
+    /// per-frame readings into avg / peak; an integrator turns them
+    /// into total joules over the run lifetime.
+    pub gpu_watts: Option<f32>,
+    pub gpu_temp_c: Option<f32>,
+    pub cpu_watts: Option<f32>,
+
+    /// Authoritative model name from a runtime API (Tier 1.2c — Ollama
+    /// `/api/ps`). Beats the classifier's heuristic guess; the
+    /// dispatcher promotes it onto `RunRecord.summary.model_name`.
+    pub model_name_hint: Option<String>,
+
     /// Runtime-specific extras (vLLM cache hit rate, llama.cpp
     /// `n_decode_total`, …). Kept as `f64` so vendors can store both
     /// counters and gauges without a tagged union.

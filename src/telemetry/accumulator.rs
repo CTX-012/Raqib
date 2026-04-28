@@ -15,6 +15,10 @@ use crate::telemetry::source::TelemetryFrame;
 #[derive(Debug, Clone, Default)]
 pub struct PerPidStats {
     samples: u32,
+    /// Wall-clock instant of the first sample, used to integrate
+    /// energy from per-frame watts (energy = ∫ watts dt).
+    first_sample_at: Option<std::time::Instant>,
+    last_sample_at: Option<std::time::Instant>,
 
     // Token throughput.
     tps_sum: f32,
@@ -37,14 +41,39 @@ pub struct PerPidStats {
 
     // Concurrent requests.
     concurrent_peak: u32,
+
+    // Power & thermals (Tier 2.1). Sums for averages, peaks for the
+    // tail, and a running joules counter computed by trapezoidal
+    // integration as samples land.
+    gpu_watts_sum: f32,
+    gpu_watts_peak: f32,
+    gpu_watts_samples: u32,
+    gpu_watts_last: Option<f32>,
+    cpu_watts_sum: f32,
+    cpu_watts_samples: u32,
+    cpu_watts_last: Option<f32>,
+    energy_joules: f32,
+
+    // Authoritative model name from a runtime API.
+    model_name_hint: Option<String>,
 }
 
 impl PerPidStats {
     fn record(&mut self, f: &TelemetryFrame) {
         self.samples = self.samples.saturating_add(1);
 
+        // Track sample window for energy integration.
+        let now = std::time::Instant::now();
+        if self.first_sample_at.is_none() {
+            self.first_sample_at = Some(now);
+        }
+        let prev_at = self.last_sample_at.replace(now);
+
+        // Reject negative + non-finite token rates (S3 in TEST.md F.2.6).
+        // The strict policy: drop the value rather than store noise.
         if let Some(tps) = f.tokens_per_sec
             && tps.is_finite()
+            && (0.0..=1.0e6).contains(&tps)
         {
             self.tps_sum += tps;
             self.tps_samples += 1;
@@ -54,12 +83,14 @@ impl PerPidStats {
         }
         if let Some(fps) = f.fps
             && fps.is_finite()
+            && (0.0..=1.0e6).contains(&fps)
         {
             self.fps_sum += fps;
             self.fps_samples += 1;
         }
         if let Some(lat) = f.latency_ms
             && lat.is_finite()
+            && (0.0..=1.0e6).contains(&lat)
         {
             self.latency_sum_ms += lat;
             self.latency_samples += 1;
@@ -68,6 +99,7 @@ impl PerPidStats {
             }
         }
         if let Some(kv) = f.kv_cache_pct
+            && kv.is_finite()
             && kv > self.kv_pct_peak
         {
             self.kv_pct_peak = kv;
@@ -78,6 +110,51 @@ impl PerPidStats {
         {
             self.concurrent_peak = c;
         }
+
+        // Power: sum-of-readings + peak; integrate energy by
+        // trapezoidal rule against the previous reading (so a sudden
+        // spike between samples gets averaged, not full-counted).
+        if let Some(w) = f.gpu_watts
+            && w.is_finite()
+            && (0.0..=10_000.0).contains(&w)
+        {
+            self.gpu_watts_sum += w;
+            self.gpu_watts_samples += 1;
+            if w > self.gpu_watts_peak {
+                self.gpu_watts_peak = w;
+            }
+            if let (Some(prev_w), Some(prev_t)) = (self.gpu_watts_last, prev_at) {
+                let dt = now.saturating_duration_since(prev_t).as_secs_f32();
+                self.energy_joules += 0.5 * (prev_w + w) * dt;
+            }
+            self.gpu_watts_last = Some(w);
+        }
+        if let Some(w) = f.cpu_watts
+            && w.is_finite()
+            && (0.0..=10_000.0).contains(&w)
+        {
+            self.cpu_watts_sum += w;
+            self.cpu_watts_samples += 1;
+            if let (Some(prev_w), Some(prev_t)) = (self.cpu_watts_last, prev_at) {
+                let dt = now.saturating_duration_since(prev_t).as_secs_f32();
+                self.energy_joules += 0.5 * (prev_w + w) * dt;
+            }
+            self.cpu_watts_last = Some(w);
+        }
+
+        // Latest model-name hint wins (Ollama can switch between calls).
+        if let Some(name) = f.model_name_hint.as_ref()
+            && !name.is_empty()
+        {
+            self.model_name_hint = Some(name.clone());
+        }
+    }
+
+    /// Authoritative model name observed via a runtime API (Tier 1.2c).
+    /// Dispatcher promotes this onto `RunRecord.summary.model_name`
+    /// when present.
+    pub fn model_name_hint(&self) -> Option<&str> {
+        self.model_name_hint.as_deref()
     }
 
     /// Project the accumulated stats onto the `RunMetrics` slots that
@@ -100,6 +177,16 @@ impl PerPidStats {
             fps_avg: avg(self.fps_sum, self.fps_samples),
             inference_latency_ms_avg: avg(self.latency_sum_ms, self.latency_samples),
             inference_latency_ms_p99: percentile(&self.latency_window, 0.99),
+
+            // Power & thermals (Tier 2.1).
+            gpu_watts_avg: avg(self.gpu_watts_sum, self.gpu_watts_samples),
+            gpu_watts_peak: opt_finite(self.gpu_watts_peak, self.gpu_watts_samples > 0),
+            cpu_watts_avg: avg(self.cpu_watts_sum, self.cpu_watts_samples),
+            energy_joules_total: if self.energy_joules > 0.0 {
+                Some(self.energy_joules)
+            } else {
+                None
+            },
 
             ..RunMetrics::default()
         }
@@ -247,5 +334,65 @@ mod tests {
         // Nothing recorded → snapshot still has None for tps avg.
         let m = acc.snapshot(1).unwrap();
         assert!(m.tokens_per_sec_avg.is_none());
+    }
+
+    /// Hardening for TEST.md F.2.6 / F.2.7 — negative and absurd
+    /// values must be dropped, not pass through to RunMetrics.
+    #[test]
+    fn negative_tps_is_rejected() {
+        let mut acc = TelemetryAccumulator::new();
+        acc.record(frame(1, Some(-10.0)));
+        assert!(acc.snapshot(1).unwrap().tokens_per_sec_avg.is_none());
+    }
+
+    #[test]
+    fn impossibly_large_tps_is_rejected() {
+        let mut acc = TelemetryAccumulator::new();
+        acc.record(frame(1, Some(1.0e18)));
+        assert!(acc.snapshot(1).unwrap().tokens_per_sec_avg.is_none());
+    }
+
+    /// Power: average + peak rolled up correctly.
+    #[test]
+    fn gpu_watts_average_and_peak() {
+        let mut acc = TelemetryAccumulator::new();
+        for w in [50.0, 100.0, 75.0_f32] {
+            acc.record(TelemetryFrame {
+                pid: 1,
+                gpu_watts: Some(w),
+                ..TelemetryFrame::new(1)
+            });
+        }
+        let m = acc.snapshot(1).unwrap();
+        assert!((m.gpu_watts_avg.unwrap() - 75.0).abs() < 1e-3);
+        assert!((m.gpu_watts_peak.unwrap() - 100.0).abs() < 1e-3);
+    }
+
+    /// Energy integration: 0.5 J trapezoidal rule per pair of samples.
+    /// Frames recorded back-to-back accumulate energy proportional to
+    /// the wall-clock delay between them; a single sample produces 0 J.
+    #[test]
+    fn energy_zero_for_single_sample() {
+        let mut acc = TelemetryAccumulator::new();
+        acc.record(TelemetryFrame {
+            pid: 1,
+            gpu_watts: Some(100.0),
+            ..TelemetryFrame::new(1)
+        });
+        // No second sample → no integration → no joules.
+        assert!(acc.snapshot(1).unwrap().energy_joules_total.is_none());
+    }
+
+    /// Authoritative model name from Ollama is stamped onto stats.
+    #[test]
+    fn model_name_hint_propagates() {
+        let mut acc = TelemetryAccumulator::new();
+        acc.record(TelemetryFrame {
+            pid: 1,
+            model_name_hint: Some("llama3:8b".into()),
+            ..TelemetryFrame::new(1)
+        });
+        let stats = acc.by_pid.get(&1).unwrap();
+        assert_eq!(stats.model_name_hint(), Some("llama3:8b"));
     }
 }

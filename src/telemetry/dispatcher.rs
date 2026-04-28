@@ -26,8 +26,10 @@ use std::time::Duration;
 
 use tokio::sync::{Mutex, mpsc};
 
+use crate::platform::GpuSnapshot;
 use crate::storage::run_store::RunMetrics;
 use crate::telemetry::accumulator::TelemetryAccumulator;
+use crate::telemetry::rapl::RaplReader;
 use crate::telemetry::source::{ProcessSnapshot, TelemetryFrame, TelemetrySource};
 
 /// Default per-sample timeout. Long enough for a slow vLLM scrape
@@ -45,6 +47,9 @@ pub struct Dispatcher {
     frame_rx: mpsc::UnboundedReceiver<TelemetryFrame>,
     accumulator: TelemetryAccumulator,
     sample_timeout: Duration,
+    /// Tier 2.1 — RAPL package-power reader. Stateful across ticks
+    /// to compute Δ-based wattage.
+    rapl: RaplReader,
 }
 
 impl Dispatcher {
@@ -68,6 +73,7 @@ impl Dispatcher {
             frame_rx,
             accumulator: TelemetryAccumulator::new(),
             sample_timeout: DEFAULT_SAMPLE_TIMEOUT,
+            rapl: RaplReader::new(),
         })
     }
 
@@ -126,6 +132,59 @@ impl Dispatcher {
                     }
                 });
             }
+        }
+    }
+
+    /// Tier 2.1 — synthesize per-PID power frames from system-level
+    /// readings (NVML for GPU, RAPL for CPU package). Called once per
+    /// runtime tick after `tick(processes)` so the per-PID accumulator
+    /// gets a power reading for each AI process.
+    ///
+    /// **Attribution policy.** v1 divides total system watts by the
+    /// count of AI processes — pragmatic but not honest if multiple
+    /// AI workloads share the box. Caller decides whether to surface
+    /// this or fall back to None on shared boxes. Tier 3.x will add
+    /// VRAM-weighted attribution for GPU power.
+    pub fn record_system_power(&mut self, processes: &[ProcessSnapshot], gpu: &GpuSnapshot) {
+        if processes.is_empty() {
+            return;
+        }
+        let n = processes.len() as f32;
+
+        let gpu_watts_total: f32 = gpu
+            .devices
+            .iter()
+            .filter_map(|d| d.power_watts)
+            .filter(|w| w.is_finite() && *w > 0.0)
+            .sum();
+        let gpu_temp_max: Option<f32> = gpu
+            .devices
+            .iter()
+            .filter_map(|d| d.temp_c)
+            .fold(None, |acc, t| Some(acc.map_or(t, |a: f32| a.max(t))));
+        let cpu_watts_total = self.rapl.read_watts();
+
+        let per_proc_gpu = if gpu_watts_total > 0.0 {
+            Some(gpu_watts_total / n)
+        } else {
+            None
+        };
+        let per_proc_cpu = cpu_watts_total.map(|w| w / n);
+
+        // Skip if neither reading produced anything; saves the
+        // accumulator a no-op record per process.
+        if per_proc_gpu.is_none() && per_proc_cpu.is_none() && gpu_temp_max.is_none() {
+            return;
+        }
+
+        for proc in processes {
+            self.accumulator.record(TelemetryFrame {
+                pid: proc.pid,
+                gpu_watts: per_proc_gpu,
+                gpu_temp_c: gpu_temp_max,
+                cpu_watts: per_proc_cpu,
+                ..TelemetryFrame::new(proc.pid)
+            });
         }
     }
 

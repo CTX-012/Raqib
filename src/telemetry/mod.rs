@@ -23,6 +23,7 @@
 
 pub mod accumulator;
 pub mod dispatcher;
+pub mod rapl;
 pub mod samplers;
 pub mod source;
 

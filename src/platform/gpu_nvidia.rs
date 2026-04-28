@@ -18,6 +18,14 @@ pub struct GpuDeviceMetrics {
     pub free_vram: u64,
     /// Per-process GPU memory: pid → (process_name, memory_string)
     pub per_process_vram: HashMap<u32, (String, String)>,
+    /// Instantaneous board power draw (Watts). `None` when NVML returns
+    /// an error or the device doesn't expose it.
+    /// (Tier 2.1 — power & thermals.)
+    #[serde(default)]
+    pub power_watts: Option<f32>,
+    /// GPU die temperature (°C). `None` when unavailable.
+    #[serde(default)]
+    pub temp_c: Option<f32>,
 }
 
 impl GpuDeviceMetrics {
@@ -156,6 +164,17 @@ impl GpuCollector {
             }
         }
 
+        // Tier 2.1 — power + thermals. NVML may return Unsupported on
+        // some virtual GPUs; that's not an error, just absence.
+        let power_watts = device
+            .power_usage()
+            .ok()
+            .map(|milliwatts| milliwatts as f32 / 1000.0);
+        let temp_c = device
+            .temperature(nvml_wrapper::enum_wrappers::device::TemperatureSensor::Gpu)
+            .ok()
+            .map(|c| c as f32);
+
         Ok(GpuDeviceMetrics {
             device_id,
             device_name,
@@ -163,6 +182,8 @@ impl GpuCollector {
             used_vram,
             free_vram,
             per_process_vram,
+            power_watts,
+            temp_c,
         })
     }
 }
@@ -204,6 +225,8 @@ mod tests {
             used_vram: 40 * 1024 * 1024 * 1024,  // 40 GB
             free_vram: 40 * 1024 * 1024 * 1024,  // 40 GB
             per_process_vram: HashMap::new(),
+            power_watts: None,
+            temp_c: None,
         };
 
         assert_eq!(metrics.vram_usage_percent(), 50.0);
@@ -218,6 +241,8 @@ mod tests {
             used_vram: 0,
             free_vram: 0,
             per_process_vram: HashMap::new(),
+            power_watts: None,
+            temp_c: None,
         };
 
         assert_eq!(metrics.vram_usage_percent(), 0.0);
@@ -232,6 +257,8 @@ mod tests {
             used_vram: 40 * 1024 * 1024 * 1024,
             free_vram: 40 * 1024 * 1024 * 1024,
             per_process_vram: HashMap::new(),
+            power_watts: None,
+            temp_c: None,
         };
 
         let device2 = GpuDeviceMetrics {
@@ -241,6 +268,8 @@ mod tests {
             used_vram: 20 * 1024 * 1024 * 1024,
             free_vram: 60 * 1024 * 1024 * 1024,
             per_process_vram: HashMap::new(),
+            power_watts: Some(150.0),
+            temp_c: Some(72.0),
         };
 
         let snapshot = GpuSnapshot {

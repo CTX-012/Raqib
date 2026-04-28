@@ -251,6 +251,8 @@ impl Runtime {
         // Tier 1.2 — drive telemetry samplers against AI processes
         // BEFORE we tally exits, so the accumulator sees one last
         // sample window for any process that's about to exit.
+        // Tier 2.1 — also fold system NVML/RAPL power into per-PID
+        // frames here.
         if let Some(d) = &mut self.telemetry {
             let live_ai: Vec<TelemetryProcessSnapshot> = snapshot
                 .processes
@@ -270,6 +272,7 @@ impl Runtime {
                 })
                 .collect();
             d.tick(&live_ai);
+            d.record_system_power(&live_ai, &snapshot.gpu);
         }
 
         // Record run summaries as they fire. Bounded by config to keep memory flat.

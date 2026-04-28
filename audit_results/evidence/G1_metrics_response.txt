@@ -1,0 +1,22 @@
+# HELP edge_monitor_processes_total Live AI processes by classifier category.
+# TYPE edge_monitor_processes_total gauge
+edge_monitor_processes_total{category="none"} 0
+# HELP edge_monitor_run_tokens_per_sec Per-process token throughput.
+# TYPE edge_monitor_run_tokens_per_sec gauge
+# HELP edge_monitor_run_fps Per-process inference frames per second.
+# TYPE edge_monitor_run_fps gauge
+# HELP edge_monitor_run_vram_bytes Per-process VRAM footprint.
+# TYPE edge_monitor_run_vram_bytes gauge
+# HELP edge_monitor_run_gpu_watts Per-process GPU board power (W).
+# TYPE edge_monitor_run_gpu_watts gauge
+# HELP edge_monitor_run_cpu_watts Per-process CPU package power (W).
+# TYPE edge_monitor_run_cpu_watts gauge
+# HELP edge_monitor_governor_kills_total Cumulative kill decisions by reason.
+# TYPE edge_monitor_governor_kills_total counter
+edge_monitor_governor_kills_total{reason="already_exited"} 7
+edge_monitor_governor_kills_total{reason="whitelisted"} 338
+# HELP edge_monitor_regressions_total Cumulative regression alerts by (model, metric).
+# TYPE edge_monitor_regressions_total counter
+# HELP edge_monitor_tick_count Number of completed tick cycles.
+# TYPE edge_monitor_tick_count counter
+edge_monitor_tick_count 6

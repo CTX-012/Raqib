@@ -31,6 +31,11 @@ pub enum ManualKillAction {
     SendSigterm,
     SendSigkill,
     Cancelled,
+    /// PID-reuse guard fired: SIGKILL refused because the captured
+    /// identity (pidfd or `/proc/<pid>/stat` starttime) no longer
+    /// matches the live process at this PID. The audit trail records
+    /// the abort so operators can correlate with system logs.
+    PidReusedAborted,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -93,6 +98,7 @@ impl AuditLogEntry {
             ManualKillAction::SendSigterm => "SIGTERM",
             ManualKillAction::SendSigkill => "SIGKILL",
             ManualKillAction::Cancelled => "CANCELLED",
+            ManualKillAction::PidReusedAborted => "PidReusedAborted",
         };
         let status_str = if self.success { "OK" } else { "FAIL" };
         let source_str = match self.source {

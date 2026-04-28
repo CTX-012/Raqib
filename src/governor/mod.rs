@@ -1,11 +1,14 @@
 use crate::model::AICategory;
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
+use std::os::fd::OwnedFd;
+use std::sync::Arc;
 use thiserror::Error;
 
 pub mod audit;
 pub mod executor;
 pub mod manual;
+pub mod pid_reuse;
 pub mod policy;
 
 pub use audit::AuditWriter;
@@ -43,11 +46,29 @@ pub enum KillAction {
     /// The per-window kill budget has been exhausted; no action taken.
     /// Protects against kill-storm misfires (CLAUDE.md safety rule 5).
     RateLimited,
+    /// SIGKILL refused because the captured pidfd / starttime no longer
+    /// matches the live process at this PID. Emitted by the PID-reuse
+    /// guard (TEST.md G.1.11): the original process exited during the
+    /// grace period and either reaped (no /proc entry) or was succeeded
+    /// by an unrelated process at the recycled PID. Refusing the kill
+    /// is mandatory — see CLAUDE.md safety rule 1.
+    PidReusedAborted,
     /// Skipped for other reasons (not AI, etc.).
     Skipped,
 }
 
 /// Tracks a process pending termination.
+///
+/// Carries two PID-identity tokens captured at SIGTERM time so the
+/// SIGKILL escalation can refuse to fire on a recycled PID:
+///
+/// - `pidfd`: a Linux 5.3+ pidfd that pins this exact process instance.
+///   When present, SIGKILL is sent through `pidfd_send_signal` and the
+///   kernel guarantees no race with PID reuse.
+/// - `starttime_ticks`: kernel-clock-tick start time from
+///   `/proc/<pid>/stat` field 22. The fallback when pidfd is unavailable
+///   (kernel <5.3, restricted user namespace, etc.). Re-read at SIGKILL
+///   time and compared; mismatch → PID was recycled, abort the kill.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PendingKill {
     pub pid: u32,
@@ -55,6 +76,16 @@ pub struct PendingKill {
     pub category: AICategory,
     pub sigterm_time: DateTime<Utc>,
     pub sigkill_time: Option<DateTime<Utc>>,
+    /// Linux pidfd captured at SIGTERM. `Arc` so `PendingKill` can
+    /// derive `Clone` for the `get_pending_kills()` accessor without
+    /// dup'ing the underlying file descriptor. Skipped during
+    /// (de)serialization — pidfds are only meaningful inside the
+    /// running process that opened them.
+    #[serde(skip)]
+    pub pidfd: Option<Arc<OwnedFd>>,
+    /// `/proc/<pid>/stat` field 22 captured at SIGTERM time.
+    /// `None` if `/proc` was unreadable when the entry was created.
+    pub starttime_ticks: Option<u64>,
 }
 
 impl PendingKill {
@@ -65,6 +96,8 @@ impl PendingKill {
             category,
             sigterm_time: Utc::now(),
             sigkill_time: None,
+            pidfd: None,
+            starttime_ticks: None,
         }
     }
 

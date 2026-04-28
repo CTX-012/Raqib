@@ -1,0 +1,10 @@
+   Compiling edge_monitor v0.1.0 (/home/faisal/edge_monitor)
+    Finished `release` profile [optimized] target(s) in 34.65s
+     Running tests/governor_properties.rs (target/release/deps/governor_properties-42d917494a92447b)
+
+running 2 tests
+test allowlisted_processes_never_killed ... ok
+test rate_limit_is_a_hard_ceiling ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

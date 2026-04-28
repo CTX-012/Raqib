@@ -226,6 +226,14 @@ pub fn format_exit_short(reason: &ExitReason) -> String {
         ExitReason::CleanExit => "clean".into(),
         ExitReason::UserSignal { signal } => format!("signal({})", signal),
         ExitReason::GovernorKill { .. } => "governor".into(),
+        ExitReason::Segfault => "segfault".into(),
+        ExitReason::OutOfMemory { ram, vram } => match (ram, vram) {
+            (true, true) => "oom(ram+vram)".into(),
+            (true, false) => "oom(ram)".into(),
+            (false, true) => "oom(vram)".into(),
+            (false, false) => "oom".into(),
+        },
+        ExitReason::CudaError { .. } => "cuda_error".into(),
         ExitReason::Crash { exit_code } => format!("crash({})", exit_code),
         ExitReason::Unknown => "unknown".into(),
     }

@@ -1,0 +1,2 @@
+   Compiling edge_monitor v0.1.0 (/home/faisal/edge_monitor)
+    Finished `release` profile [optimized] target(s) in 1m 00s

@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use crate::analysis::compare::{RegressionConfig as DetectorConfig, detect_regressions_with};
 use crate::classifier;
 use crate::config::{Config, expand_tilde};
+use crate::exit_classify::{ExitContext, classify_exit, read_recent_kernel_log};
 use crate::fingerprint::Fingerprinter;
 use crate::governor::manual::{AuditLogEntry, KillSource, ManualKillAction};
 use crate::governor::{AuditWriter, GovernorExecutor, KillAction, ManualKiller};
@@ -127,6 +128,11 @@ pub struct Runtime {
     /// every classification result that includes one; consulted on
     /// exit so we know which file to fingerprint.
     pid_to_model_path: HashMap<u32, PathBuf>,
+    /// Tier 3.5 — PIDs the governor has signalled this run. Populated
+    /// by `record_governor_audit` when SIGTERM/SIGKILL fires (or
+    /// would-fire in dry-run); consulted on exit to attribute the
+    /// kill to `ExitReason::GovernorKill`.
+    governor_killed_pids: HashMap<u32, String>,
     /// Previous tick's cumulative CPU ticks, per PID, plus the wall-clock
     /// timestamp that reading was taken at. Used to compute cpu_pct as
     /// delta_ticks / CLK_TCK / elapsed_secs × 100.
@@ -186,6 +192,7 @@ impl Runtime {
             regressions_count: HashMap::new(),
             fingerprinter,
             pid_to_model_path: HashMap::new(),
+            governor_killed_pids: HashMap::new(),
             prev_cpu: HashMap::new(),
             clk_tck: read_clk_tck(),
         }
@@ -363,6 +370,24 @@ impl Runtime {
                 {
                     record.model_fingerprint = Some(fp);
                 }
+                // Tier 3.5 — richer exit-reason classification. We
+                // only spend a journalctl invocation when the signal
+                // hint suggests something dmesg might explain (SIGKILL
+                // for OOM); for clean exits / SIGTERM we skip the
+                // subprocess entirely.
+                let dmesg_lines = if summary.signal == Some(9) {
+                    read_recent_kernel_log(10)
+                } else {
+                    Vec::new()
+                };
+                let governor_reason = self.governor_killed_pids.remove(&summary.pid);
+                let ctx = ExitContext {
+                    dmesg_lines,
+                    stderr_lines: Vec::new(), // Tier 1.2d exec wrapper will populate this.
+                    killed_by_governor: governor_reason.is_some(),
+                    governor_reason,
+                };
+                record.exit_reason = classify_exit(summary, &ctx);
                 let model = record.model_or_name().to_string();
                 let record_clone = record.clone();
                 if let Err(e) = rs.append(record) {
@@ -412,6 +437,7 @@ impl Runtime {
                 KillAction::Whitelisted => "whitelisted".to_string(),
                 KillAction::AlreadyExited => "already_exited".to_string(),
                 KillAction::RateLimited => "rate_limited".to_string(),
+                KillAction::PidReusedAborted => "pid_reused_aborted".to_string(),
                 KillAction::Skipped => format!("skipped:{}", reason),
             };
             *self.kills_by_reason.entry(key).or_insert(0) += 1;
@@ -527,6 +553,13 @@ impl Runtime {
             let Some(kill_action) = kill_action else {
                 continue;
             };
+
+            // Tier 3.5 — remember governor-driven kills so the exit
+            // classifier can attribute them. Both real and dry-run
+            // signals get tracked: in dry-run the process exits on
+            // its own and we still want correct attribution if it
+            // happens to die during the same window.
+            self.governor_killed_pids.insert(*pid, reason.clone());
 
             let name = self
                 .state

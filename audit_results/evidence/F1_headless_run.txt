@@ -1,0 +1,8 @@
+[2m2026-04-28T10:02:50.891830Z[0m [32m INFO[0m no config file; using built-in defaults
+[2m2026-04-28T10:02:50.892057Z[0m [32m INFO[0m DRY-RUN mode — no signals will be sent.
+[2m2026-04-28T10:02:51.072909Z[0m [32m INFO[0m tick [3mtick[0m[2m=[0m1 [3mai_processes[0m[2m=[0m0 [3mexits[0m[2m=[0m0
+[2m2026-04-28T10:02:51.917179Z[0m [32m INFO[0m tick [3mtick[0m[2m=[0m2 [3mai_processes[0m[2m=[0m0 [3mexits[0m[2m=[0m0
+[2m2026-04-28T10:02:52.922995Z[0m [32m INFO[0m tick [3mtick[0m[2m=[0m3 [3mai_processes[0m[2m=[0m0 [3mexits[0m[2m=[0m0
+[2m2026-04-28T10:02:53.916919Z[0m [32m INFO[0m tick [3mtick[0m[2m=[0m4 [3mai_processes[0m[2m=[0m0 [3mexits[0m[2m=[0m0
+[2m2026-04-28T10:02:54.919949Z[0m [32m INFO[0m tick [3mtick[0m[2m=[0m5 [3mai_processes[0m[2m=[0m0 [3mexits[0m[2m=[0m0
+[2m2026-04-28T10:02:54.919999Z[0m [32m INFO[0m tick budget reached; exiting [3mticks[0m[2m=[0m5

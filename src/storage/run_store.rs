@@ -77,6 +77,15 @@ pub enum ExitReason {
     UserSignal { signal: i32 },
     /// The governor killed it. Reason carries the policy explanation.
     GovernorKill { reason: String },
+    /// SIGSEGV. Independent of OOM (stack overflow, null deref, …).
+    Segfault,
+    /// SIGKILL + matching dmesg OOM line, or "CUDA out of memory" in
+    /// recent stderr. `ram = true` for kernel-OOM, `vram = true` for
+    /// CUDA-OOM. Both can be true if the same run hit both.
+    OutOfMemory { ram: bool, vram: bool },
+    /// CUDA error in recent stderr (driver, illegal access, etc.).
+    /// `last_msg` is the most recent matching log line, truncated.
+    CudaError { last_msg: Option<String> },
     /// `exit_code != 0` and not signal-terminated.
     Crash { exit_code: i32 },
     /// Insufficient evidence — kept distinct from CleanExit so downstream
@@ -86,10 +95,15 @@ pub enum ExitReason {
 
 impl ExitReason {
     /// Best-effort reason from the data on a `LifecycleSummary` alone.
-    /// Tier 3.5 will provide a richer `classify_exit` that also consults
-    /// dmesg and process stderr.
+    /// Tier 3.5 (`exit_classify::classify_exit`) layers dmesg + stderr
+    /// inspection on top of this for richer categorisation.
     pub fn from_summary(summary: &LifecycleSummary) -> Self {
         if let Some(sig) = summary.signal {
+            // SIGSEGV (11) is unambiguously a segfault even without
+            // dmesg context.
+            if sig == 11 {
+                return ExitReason::Segfault;
+            }
             return ExitReason::UserSignal { signal: sig };
         }
         match summary.exit_code {

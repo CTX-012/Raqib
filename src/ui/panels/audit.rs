@@ -22,6 +22,7 @@ pub fn render(f: &mut Frame, area: Rect, state: &RuntimeState) {
             ManualKillAction::SendSigterm => "SIGTERM",
             ManualKillAction::SendSigkill => "SIGKILL",
             ManualKillAction::Cancelled => "CANCELLED",
+            ManualKillAction::PidReusedAborted => "ABORT-PID-REUSE",
         };
         let source = match e.source {
             KillSource::Manual => "manual",

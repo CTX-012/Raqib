@@ -50,6 +50,13 @@ struct Cli {
     #[arg(long, default_value = "info")]
     log_level: String,
 
+    /// Log output format: "human" (default, K=V text) or "json"
+    /// (one JSON object per line, parseable by `jq`). Use `json` for
+    /// headless / pipeline-style runs where downstream tooling expects
+    /// a stable schema (TEST.md S.2.3).
+    #[arg(long, default_value = "human", value_parser = ["human", "json"])]
+    log_format: String,
+
     /// Subcommand. Defaults to running the monitor (TUI / headless) when
     /// omitted, preserving the Phase-1 invocation.
     #[command(subcommand)]
@@ -73,7 +80,7 @@ enum Commands {
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
-    init_tracing(&cli.log_level)?;
+    init_tracing(&cli.log_level, &cli.log_format)?;
 
     let config = load_config(cli.config.as_deref(), cli.dry_run)?;
     config.validate().context("config validation failed")?;
@@ -177,7 +184,7 @@ fn log_tick_summary(state: &RuntimeState) {
     }
 }
 
-fn init_tracing(level: &str) -> anyhow::Result<()> {
+fn init_tracing(level: &str, format: &str) -> anyhow::Result<()> {
     let lvl = match level.to_ascii_lowercase().as_str() {
         "trace" => Level::TRACE,
         "debug" => Level::DEBUG,
@@ -194,13 +201,17 @@ fn init_tracing(level: &str) -> anyhow::Result<()> {
     // stderr: stdout is reserved for subcommand output (e.g. JSON from
     // `history --json`). A consumer piping `edge_monitor history --json
     // | jq` would otherwise see the tracing log first and choke.
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(lvl.to_string())),
-        )
+    let env_filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(lvl.to_string()));
+    let builder = tracing_subscriber::fmt()
+        .with_env_filter(env_filter)
         .with_target(false)
-        .with_writer(std::io::stderr)
-        .init();
+        .with_writer(std::io::stderr);
+    match format {
+        "json" => builder.json().flatten_event(true).init(),
+        // "human" or anything clap accepted (clap restricts to {human, json}).
+        _ => builder.init(),
+    }
     Ok(())
 }
 

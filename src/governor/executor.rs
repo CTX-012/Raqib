@@ -1,8 +1,11 @@
+use crate::governor::pid_reuse;
 use crate::governor::{GovernorError, GovernorPolicy, GovernorResult, KillAction, PendingKill};
 use crate::lifecycle::{LifecycleSnapshot, ProcessLifecycle};
 use crate::model::AICategory;
 use chrono::{DateTime, Duration, Utc};
 use std::collections::{HashMap, VecDeque};
+use std::os::fd::AsFd;
+use std::sync::Arc;
 
 /// Executes governor decisions: sends signals and tracks kills.
 pub struct GovernorExecutor {
@@ -132,6 +135,10 @@ impl GovernorExecutor {
     }
 
     /// Send SIGTERM to process. Does nothing in dry-run mode.
+    ///
+    /// Captures a Linux pidfd and `/proc/<pid>/stat` starttime *before*
+    /// signalling so the SIGKILL escalation can verify the PID has not
+    /// been reused during the grace period (TEST.md G.1.11).
     pub fn send_sigterm(
         &mut self,
         pid: u32,
@@ -142,6 +149,13 @@ impl GovernorExecutor {
             tracing::info!("DRY-RUN: SIGTERM would be sent to PID {}: {}", pid, name);
             return Ok(());
         }
+
+        // Capture identity tokens BEFORE the signal — between the open and
+        // the kill there is still a tiny window, but anything else (open
+        // after kill) would be useless. pidfd_open + read of /proc/.../stat
+        // are both O(1) syscalls.
+        let pidfd = pid_reuse::try_pidfd_open(pid).map(Arc::new);
+        let starttime = pid_reuse::read_starttime(pid);
 
         tracing::info!("sending SIGTERM to PID {}: {}", pid, name);
 
@@ -156,39 +170,142 @@ impl GovernorExecutor {
             }
         }
 
-        // Track this kill
-        self.pending_kills
-            .insert(pid, PendingKill::new(pid, name, category));
+        // Track this kill, carrying the captured identity for the SIGKILL
+        // escalation to verify against.
+        let mut pending = PendingKill::new(pid, name, category);
+        pending.pidfd = pidfd;
+        pending.starttime_ticks = starttime;
+        self.pending_kills.insert(pid, pending);
 
         Ok(())
     }
 
-    /// Send SIGKILL to process. Does nothing in dry-run mode.
-    pub fn send_sigkill(&mut self, pid: u32, name: &str) -> GovernorResult<()> {
+    /// Convenience wrapper used by `tests/governor_pid_reuse.rs` and any
+    /// caller that prefers the policy-aware naming. Equivalent to
+    /// `send_sigterm` (same behaviour: enforce-gated, captures identity).
+    pub fn request_kill(
+        &mut self,
+        pid: u32,
+        name: String,
+        category: AICategory,
+    ) -> GovernorResult<()> {
+        self.send_sigterm(pid, name, category)
+    }
+
+    /// Send SIGKILL to a process whose grace period has expired.
+    ///
+    /// Returns `KillAction::SignalKillSent` on a successful escalation, or
+    /// `KillAction::PidReusedAborted` when the PID-identity check fails —
+    /// meaning the original process is gone and either the PID is now
+    /// unassigned or the OS has handed it to an unrelated new process. In
+    /// the abort case **no signal is sent** (CLAUDE.md safety rule 1).
+    /// Dry-run mode short-circuits to `DryRunKillWould`.
+    pub fn send_sigkill(&mut self, pid: u32, name: &str) -> GovernorResult<KillAction> {
         if !self.policy.enforce {
             tracing::info!("DRY-RUN: SIGKILL would be sent to PID {}: {}", pid, name);
-            return Ok(());
+            return Ok(KillAction::DryRunKillWould);
+        }
+
+        // Identity verification. Two layers, in priority order:
+        //  1. pidfd captured at SIGTERM — kernel-guaranteed race-free.
+        //  2. /proc/<pid>/stat starttime re-read and compared.
+        // If neither is available the entry is suspicious enough to abort
+        // rather than send a stranger SIGKILL.
+        let pending = self.pending_kills.get(&pid).cloned();
+        let identity_ok = match &pending {
+            Some(p) if p.pidfd.is_some() => true, // pidfd path is race-free below
+            Some(p) => match (p.starttime_ticks, pid_reuse::read_starttime(pid)) {
+                (Some(then), Some(now)) => then == now,
+                // Either we couldn't capture at SIGTERM time or the process
+                // is gone now — both refuse the SIGKILL.
+                _ => false,
+            },
+            None => {
+                // No prior send_sigterm record for this PID. Without a
+                // captured identity we can't verify; refuse rather than
+                // signal blind. Callers that genuinely want a one-shot
+                // kill should call send_sigterm first.
+                false
+            }
+        };
+
+        if !identity_ok {
+            tracing::warn!(
+                pid = pid,
+                "SIGKILL aborted: PID-reuse guard fired (process exited or PID recycled \
+                 during grace period)"
+            );
+            if let Some(pk) = self.pending_kills.get_mut(&pid) {
+                pk.sigkill_time = Some(chrono::Utc::now());
+            }
+            return Ok(KillAction::PidReusedAborted);
         }
 
         tracing::info!("sending SIGKILL to PID {}: {}", pid, name);
 
-        // Send SIGKILL
-        unsafe {
-            if libc::kill(pid as i32, libc::SIGKILL) != 0 {
-                return Err(GovernorError::SignalError(format!(
-                    "SIGKILL failed for PID {}: errno={}",
-                    pid,
-                    std::io::Error::last_os_error()
-                )));
+        // Prefer pidfd_send_signal when available — race-free.
+        let send_result: Result<(), std::io::Error> =
+            match pending.as_ref().and_then(|p| p.pidfd.as_ref()).cloned() {
+                Some(fd) => pid_reuse::pidfd_send_kill(fd.as_fd(), libc::SIGKILL),
+                None => {
+                    // Fallback path: starttime check passed above, so the PID
+                    // still belongs to the same process. SAFETY: libc::kill
+                    // with a valid signal number is always sound.
+                    let r = unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+                    if r != 0 {
+                        Err(std::io::Error::last_os_error())
+                    } else {
+                        Ok(())
+                    }
+                }
+            };
+
+        if let Err(e) = send_result {
+            // ESRCH means the original process is gone (pidfd path) or
+            // the PID has been freed and not yet reused (kill path). In
+            // either case, refusing the SIGKILL is the right outcome —
+            // the kernel's already done it for us. Map to PidReusedAborted
+            // so the audit log records the abort consistently.
+            if e.raw_os_error() == Some(libc::ESRCH) {
+                tracing::warn!(pid = pid, "SIGKILL aborted: target process is gone (ESRCH)");
+                if let Some(pk) = self.pending_kills.get_mut(&pid) {
+                    pk.sigkill_time = Some(chrono::Utc::now());
+                }
+                return Ok(KillAction::PidReusedAborted);
             }
+            return Err(GovernorError::SignalError(format!(
+                "SIGKILL failed for PID {}: {}",
+                pid, e
+            )));
         }
 
-        // Mark as kill sent
         if let Some(pending) = self.pending_kills.get_mut(&pid) {
             pending.sigkill_time = Some(chrono::Utc::now());
         }
 
-        Ok(())
+        Ok(KillAction::SignalKillSent)
+    }
+
+    /// Iterate every pending kill whose grace period has expired and
+    /// dispatch SIGKILL via `send_sigkill`. Returns `(pid, action)` for
+    /// each escalation so the caller can audit-log the outcome.
+    ///
+    /// Does NOT consume entries on `PidReusedAborted` — the entry stays
+    /// so `pending_kills_count()` and `get_pending_kills()` reflect the
+    /// abort. Callers can call `clear_pending(pid)` after auditing.
+    pub fn execute_after_grace(&mut self) -> Vec<(u32, GovernorResult<KillAction>)> {
+        let pids = self.check_grace_period_expired();
+        let mut out = Vec::with_capacity(pids.len());
+        for pid in pids {
+            let name = self
+                .pending_kills
+                .get(&pid)
+                .map(|p| p.name.clone())
+                .unwrap_or_default();
+            let result = self.send_sigkill(pid, &name);
+            out.push((pid, result));
+        }
+        out
     }
 
     /// Check which pending processes need SIGKILL (grace period expired).

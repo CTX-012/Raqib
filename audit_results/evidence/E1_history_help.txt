@@ -1,0 +1,11 @@
+Show recent runs from the typed run store (latest.md Tier 1.1)
+
+Usage: edge_monitor history [OPTIONS] [MODEL]
+
+Arguments:
+  [MODEL]  Filter to runs of this model. Omit to list all known models
+
+Options:
+      --limit <LIMIT>  Maximum number of runs to show [default: 20]
+      --json           Emit JSON instead of a human-readable table
+  -h, --help           Print help

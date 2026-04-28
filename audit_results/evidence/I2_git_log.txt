@@ -1,0 +1,44 @@
+2ccbe73	feat(fingerprint): partial-hash model fingerprinting (latest.md Tier 3.1)
+ 6 files changed, 1336 insertions(+), 3 deletions(-)
+
+1f36487	feat(telemetry): Prometheus exporter (latest.md Tier 2.3)
+ 4 files changed, 598 insertions(+), 7 deletions(-)
+
+cf73ead	feat(telemetry): cold-load disk I/O detection (latest.md Tier 2.2)
+ 4 files changed, 297 insertions(+), 1 deletion(-)
+
+0cc1b14	feat(power): NVML + RAPL power & thermals (latest.md Tier 2.1)
+ 6 files changed, 636 insertions(+)
+
+b6edd59	feat(telemetry): dispatcher closes Tier 1.2 loop into RunRecord
+ 6 files changed, 497 insertions(+), 1 deletion(-)
+
+1af85b0	feat(telemetry): Ollama /api/ps sampler (latest.md Tier 1.2c) + frame hardening
+ 4 files changed, 457 insertions(+), 4 deletions(-)
+
+f8ee0a7	feat(telemetry): llama.cpp server scraper (latest.md Tier 1.2b)
+ 3 files changed, 350 insertions(+), 7 deletions(-)
+
+532e392	feat(telemetry): vLLM Prometheus scraper (latest.md Tier 1.2a)
+ 5 files changed, 1206 insertions(+), 4 deletions(-)
+
+ad9875b	feat(telemetry): stdout regex parser (latest.md Tier 1.2d, partial)
+ 6 files changed, 273 insertions(+), 3 deletions(-)
+
+a458883	feat(telemetry): TelemetrySource trait + accumulator (latest.md Foundation B)
+ 7 files changed, 540 insertions(+), 4 deletions(-)
+
+9d9499f	feat(analysis): regression warning on exit (latest.md Tier 1.3)
+ 7 files changed, 404 insertions(+), 52 deletions(-)
+
+aa91d35	feat(history): per-model run history viewer (latest.md Tier 1.1)
+ 16 files changed, 1056 insertions(+), 18 deletions(-)
+
+04bdb5e	feat(foundations): RunStore + baseline/regression engine
+ 9 files changed, 1132 insertions(+), 6 deletions(-)
+
+d02a7eb	chore: snapshot phase 0 + phase 1 baseline
+ 52 files changed, 10173 insertions(+), 80 deletions(-)
+
+b6a4712	update
+ 5 files changed, 885 insertions(+)

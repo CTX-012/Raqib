@@ -13,23 +13,20 @@ to history) and via reading concurrent worktrees.
 
 ## Active claims
 
-- builder_id: builder-claude
-  feature: Tier 3.3 KV cache pressure (avg_pct, evictions_total, TUI red >80%, history saturation flag)
-  files:
-    - src/storage/run_store.rs (extend RunMetrics)
-    - src/telemetry/source.rs (extend TelemetryFrame)
-    - src/telemetry/accumulator.rs (avg + evictions tracking)
-    - src/telemetry/samplers/vllm_prometheus.rs (scrape vllm:num_preemptions_total)
-    - src/ui/panels/registry.rs (KV column + red >80%)
-    - src/ui/panels/history_overlay.rs (KV saturation icon)
-    - src/runtime.rs (publish live KV into RuntimeState for the registry panel — added 10:42Z)
-  started: 2026-04-28T10:35:58Z
-  branch: builder-claude/tier-3-3-kv-cache-pressure
-  eta: 2 hours
+(none yet)
 
 ## Recently completed (last 24h)
 
-(none yet)
+- builder_id: builder-claude
+  feature: Tier 3.3 KV cache pressure
+  branch: builder-claude/tier-3-3-kv-cache-pressure
+  finished: 2026-04-28T10:48:00Z
+  commits:
+    - 83e299f feat(telemetry): KV cache pressure (latest.md Tier 3.3)
+  notes: 309 unit tests + 13 integration tests pass; clippy clean.
+         RunMetrics gained kv_cache_avg_pct + kv_cache_evictions_total.
+         TUI registry row now shows "KV NN%" red at >=80%, history
+         overlay flags runs with peak >=99.5% with a "KV!" badge.
 
 ## Locked files
 

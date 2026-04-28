@@ -28,11 +28,14 @@ ratatui = "0.29"
 crossterm = "0.28"
 ctrlc = "3"
 uuid = { version = "1", features = ["v4", "serde"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "time", "macros", "sync", "io-util", "process", "net"] }
+async-trait = "0.1"
 
 [dev-dependencies]
 pretty_assertions = "1"
 tempfile = "3"
 proptest = "1"
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "time", "test-util"] }
 
 [profile.release]
 lto = "thin"

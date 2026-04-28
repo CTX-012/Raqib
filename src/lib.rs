@@ -21,4 +21,5 @@ pub mod model;
 pub mod platform;
 pub mod runtime;
 pub mod storage;
+pub mod telemetry;
 pub mod ui;

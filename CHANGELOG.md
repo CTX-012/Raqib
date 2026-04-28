@@ -9,6 +9,21 @@ once `v1.0.0` is tagged. Until then, minor versions may include breaking changes
 ## [Unreleased]
 
 ### Added
+- **Foundation B — telemetry sampler infrastructure** (latest.md).
+  Defines the `TelemetrySource` async trait + `TelemetryFrame` +
+  `TelemetryAccumulator`, plus error envelope (`SourceError::
+  Transient | Permanent`). The accumulator folds repeated frames per
+  PID into the `RunMetrics` shape `RunRecord` already carries, so
+  Tier 1.2 samplers (vLLM / llama.cpp / Ollama / stdout) drop in
+  without further plumbing. Concrete sources land in Tier 1.2.
+- New `tokio` (with rt / time / sync / process / net features) and
+  `async-trait` dependencies — pulled in for Foundation B; no
+  blocking I/O leaks into the existing sync tick loop.
+- 7 unit tests across `telemetry::source` and `telemetry::accumulator`
+  (stub source returns frames, error variants round-trip, per-PID
+  isolation, peak/avg arithmetic, p99 nearest-rank tail behaviour,
+  NaN guard).
+
 - **Tier 1.3 — regression warning on exit** (latest.md). When an
   AI-classified process exits, the runtime compares its `RunRecord`
   against the rolling baseline of prior runs (default window 10) and
@@ -120,11 +135,11 @@ once `v1.0.0` is tagged. Until then, minor versions may include breaking changes
 ### Notes
 - Developed on WSL Ubuntu; NVML returns `None` gracefully without GPU
   passthrough. Real target (Jetson AGX Orin) not yet validated end-to-end.
-- 198 unit + 5 history-CLI integration + 3 pipeline integration + 2
-  proptest tests pass (was 168; +13 foundations, +6 history unit,
+- 206 unit + 5 history-CLI integration + 3 pipeline integration + 2
+  proptest tests pass (was 168; +13 A/C foundations, +6 history unit,
   +4 config edge cases, +5 history-CLI integration, +4 regression
-  plumbing, +3 regression config). `cargo clippy --all-targets --
-  -D warnings` clean.
+  plumbing, +3 regression config, +7 telemetry foundation B + +1).
+  `cargo clippy --all-targets -- -D warnings` clean.
 - No release artifact yet. `v0.1.0` will be tagged once Phase 1 launch
   checklist (CI, demo GIF, `.deb`, crates.io name reservation) is complete.
 

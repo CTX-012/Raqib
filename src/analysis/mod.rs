@@ -6,4 +6,6 @@
 
 pub mod compare;
 
-pub use compare::{Baseline, BaselineMetrics, Regression, Severity, detect_regressions};
+pub use compare::{
+    Baseline, BaselineMetrics, Regression, RegressionEvent, Severity, detect_regressions,
+};

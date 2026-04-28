@@ -181,6 +181,8 @@ built-in safe defaults. Schema (see
 - `[storage]` — `run_store_path` (default
   `~/.local/share/edge_monitor`), `fingerprint_cache`,
   `keep_runs_per_model` (default 200)
+- `[regression]` — `warn_pct` (10), `critical_pct` (25),
+  `baseline_window` (10), `min_baseline_samples` (3)
 
 `config.validate()` rejects nonsense (e.g. zero tick interval, grace
 period < 1s) before the runtime starts.
@@ -227,18 +229,33 @@ form the backbone:
   `storage.run_store_path = ""` to disable persistence (in-memory ring
   buffer still feeds the Completed panel).
 
-## Baseline + regression detection (Tier 1.3 ready)
+## Baseline + regression detection (Tier 1.3)
 
 [src/analysis/compare.rs](src/analysis/compare.rs) computes per-metric
 mean/stddev across a configurable rolling window and flags new runs
 that exceed warn (default 10%) / critical (default 25%) thresholds.
 Refuses to flag anything with a baseline of <3 samples. Direction-
-aware — a faster `tokens_per_sec_avg` is never a regression. The exit-
-hook wiring lands in Tier 1.3.
+aware — a faster `tokens_per_sec_avg` is never a regression.
+
+The runtime's exit hook ([src/runtime.rs](src/runtime.rs)
+`check_regressions`) runs after every AI process exits:
+
+- Pulls the most recent `[regression] baseline_window` runs of the
+  exiting model from `RunStore` and excludes the in-flight record.
+- Calls `detect_regressions_with()` with the configured thresholds.
+- Emits a `tracing::warn!` per regression with structured fields, so
+  headless operators see the alert in stderr.
+- Pushes a `RegressionEvent` onto `RuntimeState.regressions` (bounded
+  by `runtime.audit_history`).
+- The Audit TUI panel renders kills + regression events interleaved
+  by timestamp; critical regressions are red, warnings yellow.
+
+Configurable in `[regression]`: `warn_pct`, `critical_pct`,
+`baseline_window`, `min_baseline_samples`.
 
 ## Test surface
 
-201 tests pass (191 unit + 5 history-CLI integration + 3 pipeline
+208 tests pass (198 unit + 5 history-CLI integration + 3 pipeline
 integration + 2 proptest):
 
 - Unit tests cover every classifier strategy, lifecycle peak/avg

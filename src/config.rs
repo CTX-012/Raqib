@@ -28,6 +28,32 @@ pub struct Config {
     pub runtime: RuntimeConfig,
     pub policy: PolicyConfig,
     pub storage: StorageConfig,
+    pub regression: RegressionConfig,
+}
+
+/// Knobs for the regression detector that runs at every AI process exit
+/// (Tier 1.3). Defaults match latest.md's text — 10% warn / 25% critical
+/// / 10-run rolling baseline / refuse to flag below 3 samples. Set
+/// `min_baseline_samples = u32::MAX` to disable detection entirely
+/// without removing the config block.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RegressionConfig {
+    pub warn_pct: f32,
+    pub critical_pct: f32,
+    pub baseline_window: u32,
+    pub min_baseline_samples: u32,
+}
+
+impl Default for RegressionConfig {
+    fn default() -> Self {
+        Self {
+            warn_pct: 10.0,
+            critical_pct: 25.0,
+            baseline_window: 10,
+            min_baseline_samples: 3,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -208,6 +234,26 @@ impl Config {
                     .into(),
             ));
         }
+        if !self.regression.warn_pct.is_finite() || self.regression.warn_pct < 0.0 {
+            return Err(ConfigError::Invalid(
+                "regression.warn_pct must be a non-negative finite number".into(),
+            ));
+        }
+        if !self.regression.critical_pct.is_finite() || self.regression.critical_pct < 0.0 {
+            return Err(ConfigError::Invalid(
+                "regression.critical_pct must be a non-negative finite number".into(),
+            ));
+        }
+        if self.regression.critical_pct < self.regression.warn_pct {
+            return Err(ConfigError::Invalid(
+                "regression.critical_pct must be >= warn_pct".into(),
+            ));
+        }
+        if self.regression.baseline_window == 0 {
+            return Err(ConfigError::Invalid(
+                "regression.baseline_window must be > 0".into(),
+            ));
+        }
         Ok(())
     }
 
@@ -315,6 +361,28 @@ mod tests {
     fn storage_keep_zero_rejected() {
         let mut cfg = Config::default();
         cfg.storage.keep_runs_per_model = 0;
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn regression_critical_below_warn_rejected() {
+        let mut cfg = Config::default();
+        cfg.regression.warn_pct = 25.0;
+        cfg.regression.critical_pct = 10.0;
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn regression_negative_threshold_rejected() {
+        let mut cfg = Config::default();
+        cfg.regression.warn_pct = -1.0;
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn regression_zero_window_rejected() {
+        let mut cfg = Config::default();
+        cfg.regression.baseline_window = 0;
         assert!(cfg.validate().is_err());
     }
 }

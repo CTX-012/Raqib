@@ -109,13 +109,28 @@ pub struct Baseline {
 /// One detected regression. `delta_pct` is positive when the metric is
 /// worse than baseline, negative when better — the comparator does the
 /// direction-flip per-metric so the sign always means the same thing.
+///
+/// `metric` is `String` (not `&'static str`) so the struct can derive
+/// Deserialize — needed for the JSONL audit log Tier 1.3 writes.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Regression {
-    pub metric: &'static str,
+    pub metric: String,
     pub baseline: f32,
     pub current: f32,
     pub delta_pct: f32,
     pub severity: Severity,
+}
+
+/// Time-stamped envelope around a [`Regression`] for the audit ring
+/// buffer. Keeps the regression event self-describing when it lands in
+/// the TUI panel (model name + when it fired) without forcing the
+/// caller to re-derive that context from the `RunRecord`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RegressionEvent {
+    pub timestamp: DateTime<Utc>,
+    pub model: String,
+    pub baseline_size: usize,
+    pub regression: Regression,
 }
 
 /// Thresholds + sample-size gate. Defaults match latest.md's text.
@@ -154,8 +169,11 @@ pub fn detect_regressions_with(
     }
     let mut out = Vec::new();
 
-    // (metric_name, baseline-mean, current-value, lower_is_better)
-    let probes: &[(&'static str, Option<f32>, Option<f32>, bool)] = &[
+    // (metric_name, baseline-mean, current-value, lower_is_better).
+    // Names are stored as `String` on the emitted `Regression` per the
+    // serde-Deserialize requirement; static slices keep the table
+    // copy-only here.
+    let probes: &[(&str, Option<f32>, Option<f32>, bool)] = &[
         (
             "avg_cpu_pct",
             baseline.metrics.avg_cpu_pct.map(|m| m.mean),
@@ -223,7 +241,7 @@ pub fn detect_regressions_with(
             Severity::Warn
         };
         out.push(Regression {
-            metric: name,
+            metric: name.to_string(),
             baseline: base,
             current: cur,
             delta_pct,

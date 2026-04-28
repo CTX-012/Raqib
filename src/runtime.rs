@@ -3,6 +3,7 @@ use std::time::Instant;
 
 use thiserror::Error;
 
+use crate::analysis::compare::{RegressionConfig as DetectorConfig, detect_regressions_with};
 use crate::classifier;
 use crate::config::Config;
 use crate::governor::manual::{AuditLogEntry, KillSource, ManualKillAction};
@@ -55,6 +56,9 @@ pub struct RuntimeState {
     pub decisions: Vec<(u32, KillAction, String)>,
     pub completed: VecDeque<LifecycleSummary>,
     pub audit: VecDeque<AuditLogEntry>,
+    /// Recent regression alerts (Tier 1.3). Bounded by
+    /// `runtime.audit_history` so it doesn't grow unbounded.
+    pub regressions: VecDeque<crate::analysis::RegressionEvent>,
     pub dry_run: bool,
     pub tick_count: u64,
     pub last_tick: Option<Instant>,
@@ -249,9 +253,25 @@ impl Runtime {
                 && summary.category.is_some()
             {
                 let record = RunRecord::from_summary(summary.clone());
+                let model = record.model_or_name().to_string();
+                let record_clone = record.clone();
                 if let Err(e) = rs.append(record) {
                     tracing::warn!(error = %e, "failed to persist run record");
                 }
+
+                // Tier 1.3 — regression detection. Run *after* the
+                // append so the new record is part of the history but
+                // baseline excludes it (rs.recent skips the in-flight
+                // record by index ordering... actually it's first now,
+                // so we must explicitly compare against the prior N).
+                check_regressions(
+                    rs,
+                    &record_clone,
+                    &model,
+                    &self.config.regression,
+                    &mut self.state.regressions,
+                    self.config.runtime.audit_history,
+                );
             }
         }
 
@@ -380,6 +400,73 @@ impl Runtime {
     }
 }
 
+/// Tier 1.3 hook: compare a freshly-appended record against the rolling
+/// baseline of prior runs. Emits a tracing::warn per detected regression
+/// (severity ≥ Warn) and pushes a `RegressionEvent` onto the in-memory
+/// ring so the TUI audit panel can render it.
+///
+/// The new record is now the *first* entry in `rs.recent(model, _)`, so
+/// the baseline is intentionally computed from `recent(model, window+1)`
+/// and the leading entry is dropped — otherwise the new run would
+/// average itself into the very baseline it's being compared against.
+fn check_regressions(
+    rs: &RunStore,
+    new_record: &RunRecord,
+    model: &str,
+    cfg: &crate::config::RegressionConfig,
+    sink: &mut VecDeque<crate::analysis::RegressionEvent>,
+    sink_cap: usize,
+) {
+    let window = cfg.baseline_window as usize;
+    let mut history = rs.recent(model, window + 1);
+    if history.is_empty() {
+        return;
+    }
+    // Drop the in-flight record (it's the newest, hence first).
+    if history[0].run_id == new_record.run_id {
+        history.remove(0);
+    }
+    if history.len() < cfg.min_baseline_samples as usize {
+        return;
+    }
+    let baseline = crate::analysis::Baseline {
+        model: model.to_string(),
+        sample_size: history.len(),
+        metrics: crate::analysis::BaselineMetrics::from_records(&history),
+        computed_at: chrono::Utc::now(),
+    };
+    let detector_cfg = DetectorConfig {
+        warn_pct: cfg.warn_pct,
+        critical_pct: cfg.critical_pct,
+        min_baseline_samples: cfg.min_baseline_samples as usize,
+    };
+    let regressions = detect_regressions_with(new_record, &baseline, &detector_cfg);
+    for r in regressions {
+        if r.severity < crate::analysis::Severity::Warn {
+            continue;
+        }
+        tracing::warn!(
+            model = %model,
+            metric = %r.metric,
+            baseline = r.baseline,
+            current = r.current,
+            delta_pct = r.delta_pct,
+            severity = ?r.severity,
+            "regression detected"
+        );
+        let event = crate::analysis::RegressionEvent {
+            timestamp: chrono::Utc::now(),
+            model: model.to_string(),
+            baseline_size: baseline.sample_size,
+            regression: r,
+        };
+        sink.push_back(event);
+        while sink.len() > sink_cap {
+            sink.pop_front();
+        }
+    }
+}
+
 /// Reads `sysconf(_SC_CLK_TCK)`. Returns 100 on failure — that's the Linux
 /// kernel's compiled-in default on every distribution shipped since 2008, so
 /// the fallback is strictly better than panicking.
@@ -461,5 +548,119 @@ mod tests {
         assert_eq!(parse_used_gpu_memory_debug("Used( 42 )"), Some(42));
         assert_eq!(parse_used_gpu_memory_debug("Unavailable"), None);
         assert_eq!(parse_used_gpu_memory_debug("junk"), None);
+    }
+
+    // ── Tier 1.3 regression-detection plumbing tests ────────────────
+    //
+    // These hit `check_regressions` directly: build a tempdir RunStore,
+    // seed it with a baseline of fast records, append a slow one, and
+    // assert the sink fills (or doesn't, for the negative cases).
+
+    use crate::analysis::{RegressionEvent, Severity};
+    use crate::lifecycle::LifecycleSummary;
+    use crate::model::AICategory;
+    use chrono::Utc;
+
+    fn lc(model: &str, peak_rss_mb: u64) -> LifecycleSummary {
+        LifecycleSummary {
+            pid: 1,
+            name: "python".into(),
+            category: Some(AICategory::Inference),
+            model_name: Some(model.into()),
+            spawn_time: Utc::now(),
+            exit_time: Utc::now(),
+            uptime_secs: 30,
+            exit_code: Some(0),
+            signal: None,
+            avg_cpu_pct: 50.0,
+            peak_cpu_pct: 80.0,
+            peak_rss_mb,
+            peak_vram_mb: 0,
+            samples: 30,
+        }
+    }
+
+    #[test]
+    fn regression_fires_on_metric_blowup() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut rs = RunStore::open(dir.path()).unwrap();
+        // Baseline of 10 runs at 1024 MB peak RSS.
+        for _ in 0..10 {
+            rs.append(RunRecord::from_summary(lc("phi3-mini", 1024)))
+                .unwrap();
+        }
+        // New run at 2000 MB → ~95% over baseline → critical regression.
+        let bad = RunRecord::from_summary(lc("phi3-mini", 2000));
+        rs.append(bad.clone()).unwrap();
+
+        let cfg = crate::config::RegressionConfig::default();
+        let mut sink: VecDeque<RegressionEvent> = VecDeque::new();
+        check_regressions(&rs, &bad, "phi3-mini", &cfg, &mut sink, 100);
+
+        let event = sink
+            .iter()
+            .find(|e| e.regression.metric == "peak_rss_mb")
+            .expect("expected peak_rss_mb regression");
+        assert!(event.regression.severity >= Severity::Critical);
+        assert_eq!(event.model, "phi3-mini");
+        assert_eq!(event.baseline_size, 10);
+    }
+
+    #[test]
+    fn regression_silent_on_matching_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut rs = RunStore::open(dir.path()).unwrap();
+        for _ in 0..10 {
+            rs.append(RunRecord::from_summary(lc("phi3", 1024)))
+                .unwrap();
+        }
+        let same = RunRecord::from_summary(lc("phi3", 1024));
+        rs.append(same.clone()).unwrap();
+
+        let cfg = crate::config::RegressionConfig::default();
+        let mut sink: VecDeque<RegressionEvent> = VecDeque::new();
+        check_regressions(&rs, &same, "phi3", &cfg, &mut sink, 100);
+        assert!(sink.is_empty(), "no regression expected, got: {sink:?}");
+    }
+
+    #[test]
+    fn regression_silent_below_min_baseline_samples() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut rs = RunStore::open(dir.path()).unwrap();
+        // Only 2 baseline records; min_baseline_samples = 3 by default.
+        for _ in 0..2 {
+            rs.append(RunRecord::from_summary(lc("phi3", 1024)))
+                .unwrap();
+        }
+        // Catastrophic value but baseline too small → no event.
+        let bad = RunRecord::from_summary(lc("phi3", 50_000));
+        rs.append(bad.clone()).unwrap();
+
+        let cfg = crate::config::RegressionConfig::default();
+        let mut sink: VecDeque<RegressionEvent> = VecDeque::new();
+        check_regressions(&rs, &bad, "phi3", &cfg, &mut sink, 100);
+        assert!(
+            sink.is_empty(),
+            "tiny baseline must not flag regressions; got: {sink:?}"
+        );
+    }
+
+    #[test]
+    fn regression_sink_caps_at_configured_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut rs = RunStore::open(dir.path()).unwrap();
+        for _ in 0..10 {
+            rs.append(RunRecord::from_summary(lc("phi3", 1024)))
+                .unwrap();
+        }
+        let bad = RunRecord::from_summary(lc("phi3", 5000));
+        rs.append(bad.clone()).unwrap();
+
+        let cfg = crate::config::RegressionConfig::default();
+        let mut sink: VecDeque<RegressionEvent> = VecDeque::new();
+        // Multiple metrics regress (peak_rss_mb at minimum). Cap at 1
+        // and verify the buffer trims.
+        check_regressions(&rs, &bad, "phi3", &cfg, &mut sink, 1);
+        assert!(sink.len() <= 1, "sink overflowed cap: {sink:?}");
     }
 }

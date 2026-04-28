@@ -9,6 +9,28 @@ once `v1.0.0` is tagged. Until then, minor versions may include breaking changes
 ## [Unreleased]
 
 ### Added
+- **Tier 1.3 — regression warning on exit** (latest.md). When an
+  AI-classified process exits, the runtime compares its `RunRecord`
+  against the rolling baseline of prior runs (default window 10) and
+  emits a `RegressionEvent` for each metric that exceeded the warn
+  (10%) or critical (25%) threshold. Detection refuses to flag
+  anything when the baseline has fewer than 3 samples, and the new
+  record is excluded from its own baseline. Direction-aware: a
+  higher `tokens_per_sec_avg` is never a regression; higher
+  `peak_rss_mb` always is.
+- New `[regression]` config section: `warn_pct`, `critical_pct`,
+  `baseline_window`, `min_baseline_samples`. `config.validate()`
+  rejects negative thresholds, critical < warn, zero window.
+- TUI **Audit panel** retitled "Audit (kills + regressions)" and now
+  interleaves kill entries and regression alerts by timestamp,
+  newest first. Critical regressions render red, warnings yellow.
+- Tracing emits one `tracing::warn!` per regression with structured
+  fields (model, metric, baseline, current, delta_pct, severity) so
+  headless and TUI users both see the alert.
+- 4 unit tests in runtime.rs cover the exit hook: fires on metric
+  blowup, silent on matching run, silent on tiny baseline, sink
+  caps at the configured size.
+
 - **Tier 1.1 — per-model run history viewer** (latest.md). Two surfaces:
   - **CLI subcommand** `edge_monitor history [MODEL] [--limit N] [--json]`.
     With no model, prints a table of (model, run count, last run,
@@ -98,10 +120,11 @@ once `v1.0.0` is tagged. Until then, minor versions may include breaking changes
 ### Notes
 - Developed on WSL Ubuntu; NVML returns `None` gracefully without GPU
   passthrough. Real target (Jetson AGX Orin) not yet validated end-to-end.
-- 191 unit + 5 history-CLI integration + 3 pipeline integration + 2
+- 198 unit + 5 history-CLI integration + 3 pipeline integration + 2
   proptest tests pass (was 168; +13 foundations, +6 history unit,
-  +4 config edge cases, +5 history-CLI integration). `cargo clippy
-  --all-targets -- -D warnings` clean.
+  +4 config edge cases, +5 history-CLI integration, +4 regression
+  plumbing, +3 regression config). `cargo clippy --all-targets --
+  -D warnings` clean.
 - No release artifact yet. `v0.1.0` will be tagged once Phase 1 launch
   checklist (CI, demo GIF, `.deb`, crates.io name reservation) is complete.
 

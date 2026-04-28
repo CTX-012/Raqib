@@ -14,6 +14,7 @@
 pub mod analysis;
 pub mod classifier;
 pub mod config;
+pub mod fingerprint;
 pub mod governor;
 pub mod history;
 pub mod lifecycle;

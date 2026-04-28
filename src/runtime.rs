@@ -3,9 +3,12 @@ use std::time::Instant;
 
 use thiserror::Error;
 
+use std::path::PathBuf;
+
 use crate::analysis::compare::{RegressionConfig as DetectorConfig, detect_regressions_with};
 use crate::classifier;
-use crate::config::Config;
+use crate::config::{Config, expand_tilde};
+use crate::fingerprint::Fingerprinter;
 use crate::governor::manual::{AuditLogEntry, KillSource, ManualKillAction};
 use crate::governor::{AuditWriter, GovernorExecutor, KillAction, ManualKiller};
 use crate::lifecycle::tracker::LifecycleTracker;
@@ -117,6 +120,13 @@ pub struct Runtime {
     kills_by_reason: HashMap<String, u64>,
     /// Tier 2.3 — cumulative regression count keyed by (model, metric).
     regressions_count: HashMap<(String, String), u64>,
+    /// Tier 3.1 — model fingerprint cache. Hashes head+tail of the
+    /// weight file once per `(dev, inode, mtime, len)` tuple.
+    fingerprinter: Fingerprinter,
+    /// Tier 3.1 — last seen weight-file path per AI PID. Updated on
+    /// every classification result that includes one; consulted on
+    /// exit so we know which file to fingerprint.
+    pid_to_model_path: HashMap<u32, PathBuf>,
     /// Previous tick's cumulative CPU ticks, per PID, plus the wall-clock
     /// timestamp that reading was taken at. Used to compute cpu_pct as
     /// delta_ticks / CLK_TCK / elapsed_secs × 100.
@@ -157,6 +167,11 @@ impl Runtime {
         {
             tracing::error!(error = %e, "prometheus exporter setup failed; continuing without it");
         }
+        let fingerprinter = Fingerprinter::open(if config.storage.fingerprint_cache.is_empty() {
+            None
+        } else {
+            Some(expand_tilde(&config.storage.fingerprint_cache))
+        });
         Self {
             config,
             tracker: LifecycleTracker::new(),
@@ -169,6 +184,8 @@ impl Runtime {
             telemetry,
             kills_by_reason: HashMap::new(),
             regressions_count: HashMap::new(),
+            fingerprinter,
+            pid_to_model_path: HashMap::new(),
             prev_cpu: HashMap::new(),
             clk_tck: read_clk_tck(),
         }
@@ -225,8 +242,13 @@ impl Runtime {
                     category,
                     evidence,
                     model_name,
-                    ..
+                    model_path,
                 } = classifier::classify_process(p);
+                if let Some(path) = model_path {
+                    // Tier 3.1 — remember which weight file each PID
+                    // is using so we can fingerprint it on exit.
+                    self.pid_to_model_path.insert(p.pid, path);
+                }
                 let cpu_pct = self.compute_cpu_pct(p.pid, p.cpu_time_ticks, now);
                 next_cpu.insert(p.pid, (p.cpu_time_ticks, now));
                 AnnotatedProcess {
@@ -333,6 +355,14 @@ impl Runtime {
                 {
                     record.cold_start = Some(cs);
                 }
+                // Tier 3.1 — fingerprint the weight file (cached by
+                // dev+inode+mtime+len) so the history viewer can tell
+                // quantization variants of the same model name apart.
+                if let Some(path) = self.pid_to_model_path.get(&summary.pid).cloned()
+                    && let Some(fp) = self.fingerprinter.fingerprint(&path)
+                {
+                    record.model_fingerprint = Some(fp);
+                }
                 let model = record.model_or_name().to_string();
                 let record_clone = record.clone();
                 if let Err(e) = rs.append(record) {
@@ -362,10 +392,11 @@ impl Runtime {
                 }
             }
             // Drop accumulator state for the exited PID so a recycled
-            // PID later starts fresh. Tier 1.2.
+            // PID later starts fresh. Tier 1.2 + 3.1.
             if let Some(d) = &mut self.telemetry {
                 d.forget(summary.pid);
             }
+            self.pid_to_model_path.remove(&summary.pid);
         }
 
         let decisions = self.governor.evaluate(&lifecycle);

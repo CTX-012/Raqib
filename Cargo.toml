@@ -32,6 +32,7 @@ tokio = { version = "1", features = ["rt", "rt-multi-thread", "time", "macros", 
 async-trait = "0.1"
 regex = "1"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "http2"] }
+sha2 = "0.10"
 
 [dev-dependencies]
 pretty_assertions = "1"

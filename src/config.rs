@@ -46,6 +46,10 @@ pub struct TelemetryConfig {
     /// Empty disables the in-process Prometheus exporter.
     /// Format: `host:port` (e.g. `127.0.0.1:9472`). Tier 2.3.
     pub prometheus_bind: String,
+    /// Empty disables the Tier 3.6 vision probe socket. Otherwise a
+    /// Unix-domain stream socket path users can connect to to push
+    /// frame timestamps from their vision inference loops.
+    pub vision_probe_socket: String,
 }
 
 impl Default for TelemetryConfig {
@@ -55,6 +59,7 @@ impl Default for TelemetryConfig {
             llamacpp_scrape: true,
             ollama_api: true,
             prometheus_bind: String::new(),
+            vision_probe_socket: String::new(),
         }
     }
 }

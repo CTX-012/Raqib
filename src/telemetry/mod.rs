@@ -28,6 +28,7 @@ pub mod exporter;
 pub mod rapl;
 pub mod samplers;
 pub mod source;
+pub mod vision_probe;
 
 pub use accumulator::TelemetryAccumulator;
 pub use dispatcher::Dispatcher;

@@ -33,6 +33,7 @@ use crate::telemetry::cold_load::{ColdLoadTracker, read_bytes_for};
 use crate::telemetry::exporter::{self, MetricsSnapshot, SnapshotHandle};
 use crate::telemetry::rapl::RaplReader;
 use crate::telemetry::source::{ProcessSnapshot, TelemetryFrame, TelemetrySource};
+use crate::telemetry::vision_probe::VisionProbe;
 
 /// Default per-sample timeout. Long enough for a slow vLLM scrape
 /// (default reqwest timeout is 500 ms) plus jitter; short enough that
@@ -104,6 +105,23 @@ impl Dispatcher {
         self.exporter_snapshot = Some(snapshot);
         self.exporter_task = handle;
         Ok(())
+    }
+
+    /// Tier 3.6 — start the vision probe Unix socket. Empty string
+    /// disables. Frames received from clients flow into the same
+    /// per-PID accumulator as HTTP-scraped frames.
+    pub fn enable_vision_probe(&mut self, socket_path: &str) {
+        if socket_path.is_empty() {
+            return;
+        }
+        let path = std::path::PathBuf::from(socket_path);
+        let tx = self.frame_tx.clone();
+        self.runtime.spawn(async move {
+            let probe = VisionProbe::new(path, tx);
+            if let Err(e) = probe.serve().await {
+                tracing::error!(error = %e, "vision probe socket failed");
+            }
+        });
     }
 
     /// Update the exporter's shared snapshot. Called by the runtime

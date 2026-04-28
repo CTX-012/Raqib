@@ -40,6 +40,32 @@ production so the governor decision trail survives restarts.
 | `rate_limit_max_kills`   | u32     | `3`     | Max automated kills inside `rate_limit_window_secs`. `0` disables. |
 | `rate_limit_window_secs` | u64     | `60`    | Sliding-window size for the rate limit. |
 
+## `[storage]`
+
+The typed run store backs both the `edge_monitor history` subcommand and
+the Tier 1.3 regression detector. It writes one JSONL file per day under
+`run_store_path`, plus a small index file for fast `recent(model, N)`
+queries.
+
+| Field                  | Type   | Default                              | Meaning |
+|------------------------|--------|--------------------------------------|---------|
+| `run_store_path`       | String | `"~/.local/share/edge_monitor"`      | Directory the run store writes into. `~/` expands to `$HOME`. Set to `""` to disable persistence — the history subcommand returns no rows and the regression detector stays silent. |
+| `fingerprint_cache`    | String | `"~/.cache/edge_monitor/fingerprints.json"` | JSON cache so the model-fingerprinter doesn't re-hash multi-gigabyte weight files on every AI process exit. `""` disables the cache (every fingerprint re-computes from disk). |
+| `keep_runs_per_model`  | u32    | `200`                                | Hard cap on retained `RunRecord` entries per model name. Older entries are pruned at the next exit. Increase if you want a longer baseline window for regression detection. Must be `> 0`. |
+
+## `[regression]`
+
+Tier 1.3 baseline-vs-current detector. Runs at every AI process exit and
+compares the fresh `RunRecord` against the rolling baseline of prior
+runs for the same model.
+
+| Field                    | Type | Default | Meaning |
+|--------------------------|------|---------|---------|
+| `warn_pct`               | f32  | `10.0`  | Percent worse than baseline that promotes a metric drift to a `Warn` severity regression. Must be finite and ≥0. |
+| `critical_pct`           | f32  | `25.0`  | Same idea for `Critical` severity. Must be finite, ≥0, and ≥`warn_pct`. |
+| `baseline_window`        | u32  | `10`    | Number of prior runs (per model) folded into the rolling baseline. Larger → smoother but slower to track real drift. Must be `> 0`. |
+| `min_baseline_samples`   | u32  | `3`     | Minimum prior runs required before the detector fires. Below this the detector stays silent (small samples produce noisy false positives). Set to `u32::MAX` (`4294967295`) to disable regression detection without removing the section. |
+
 ## Minimal production example
 
 ```toml

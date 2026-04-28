@@ -65,7 +65,16 @@ Each module must:
 
 - Have passing unit tests before the next starts
 - Pass `cargo clippy --all-targets -- -D warnings`
-- Have no `unwrap()` or `expect()` outside tests
+- Have no `unwrap()` outside tests
+- Have no `expect()` outside tests **except for documented invariants
+  that are equivalent to "the binary is malformed if this fails"** —
+  specifically: mutex-poison recovery on a writer whose corruption is
+  worse than a crash (e.g. the audit writer in `governor/audit.rs`),
+  and `Regex::new` calls inside `OnceLock`-initialised statics where
+  the pattern is a compile-time constant. Each such call **must** be
+  preceded by an `// ok: expect — <one-line reason>` comment so
+  reviewers and auditors can skip them. New `expect()` sites that do
+  not match these two patterns are still rejected.
 
 ## Architecture
 

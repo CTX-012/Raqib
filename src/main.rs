@@ -18,6 +18,7 @@ use clap::{Parser, Subcommand};
 use tracing::Level;
 use tracing_subscriber::EnvFilter;
 
+use edge_monitor::compare;
 use edge_monitor::config::Config;
 use edge_monitor::history;
 use edge_monitor::runtime::{Runtime, RuntimeState};
@@ -76,6 +77,20 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// Side-by-side baseline comparison across one or more models
+    /// (latest.md Tier 3.7).
+    Compare {
+        /// Models to compare. At least one. Use `edge_monitor history`
+        /// (no args) to list known models.
+        #[arg(required = true, num_args = 1..)]
+        models: Vec<String>,
+        /// Number of recent runs per model to fold into the baseline.
+        #[arg(long, default_value_t = 10)]
+        runs: usize,
+        /// Emit JSON instead of a human-readable table.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -86,8 +101,15 @@ fn main() -> anyhow::Result<()> {
     config.validate().context("config validation failed")?;
 
     // Subcommand path: query-only, no signal handler / runtime needed.
-    if let Some(Commands::History { model, limit, json }) = cli.command {
-        return history::run_history(model, limit, json, &config);
+    if let Some(cmd) = cli.command {
+        return match cmd {
+            Commands::History { model, limit, json } => {
+                history::run_history(model, limit, json, &config)
+            }
+            Commands::Compare { models, runs, json } => {
+                compare::run_compare(models, runs, json, &config)
+            }
+        };
     }
 
     if config.policy.enforce {

@@ -54,6 +54,38 @@ commented config file.
 | `--no-ui`             | Run headless; log to stderr only                             |
 | `--ticks <N>`         | Exit after N ticks (`0` = run until killed). Useful in CI    |
 | `--log-level <LEVEL>` | `trace` / `debug` / `info` / `warn` / `error`                |
+| `--log-format <FMT>`  | `human` (default K=V text) or `json` (one JSON object per line, `jq`-pipeable) |
+
+## History
+
+Every AI process exit is appended to a typed run store under
+`~/.local/share/edge_monitor`. Inspect it with the `history`
+subcommand:
+
+```bash
+# Summary table — one row per known model.
+edge_monitor history
+
+# Recent runs of one specific model.
+edge_monitor history phi3-mini
+
+# Bigger window, JSON output for scripting.
+edge_monitor history phi3-mini --limit 50 --json
+```
+
+Sample output:
+
+```
+$ edge_monitor history phi3-mini
+TIMESTAMP             UPTIME  EXIT  CPU%avg  RSSpk_MB  VRAMpk_MB  TPSavg
+2026-04-28 09:12:04   00:03:42  ok      48.1      1812       4096    36.7
+2026-04-28 08:14:53   00:00:11  ok      63.2      1804       4096    34.9
+2026-04-27 22:58:11   00:08:01  ok      45.0      1820       4096    37.4
+```
+
+The store path, retention cap, and regression-detector thresholds are
+configurable — see [docs/configuration.md](docs/configuration.md)
+sections `[storage]` and `[regression]`.
 
 ## Safety defaults
 

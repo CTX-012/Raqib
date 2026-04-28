@@ -73,6 +73,10 @@ impl AuditWriter {
         entry: &T,
     ) -> Result<(), AuditWriterError> {
         let line = serde_json::to_string(entry)?;
+        // ok: expect — mutex poisoning means another thread panicked while
+        // holding the lock. Audit writes are critical (CLAUDE.md safety
+        // rule 6); refusing to continue with a corrupted writer is the
+        // safer behaviour than silently dropping subsequent kill records.
         let mut guard = self.inner.lock().expect("audit writer mutex poisoned");
         guard.write_all(line.as_bytes())?;
         guard.write_all(b"\n")?;

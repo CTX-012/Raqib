@@ -36,6 +36,8 @@ pub enum MetricKind {
 fn re_llama_cpp_tps() -> &'static Regex {
     static R: OnceLock<Regex> = OnceLock::new();
     R.get_or_init(|| {
+        // ok: expect — static regex, compile-time-constant pattern; a
+        // failure here would mean the binary itself is malformed.
         Regex::new(r"eval time\s*=.*?(\d+\.\d+)\s+tokens? per second")
             .expect("llama_cpp_tps regex must compile")
     })
@@ -45,6 +47,7 @@ fn re_llama_cpp_tps() -> &'static Regex {
 fn re_vllm_tps() -> &'static Regex {
     static R: OnceLock<Regex> = OnceLock::new();
     R.get_or_init(|| {
+        // ok: expect — static regex, compile-time-constant pattern.
         Regex::new(r"Avg generation throughput:\s*([0-9]+(?:\.[0-9]+)?)\s+tokens?/s")
             .expect("vllm_tps regex must compile")
     })
@@ -56,6 +59,7 @@ fn re_vllm_tps() -> &'static Regex {
 fn re_ultralytics_inference() -> &'static Regex {
     static R: OnceLock<Regex> = OnceLock::new();
     R.get_or_init(|| {
+        // ok: expect — static regex, compile-time-constant pattern.
         Regex::new(
             r"Speed:\s*([0-9]+(?:\.[0-9]+)?)\s*ms\s+preprocess,\s*([0-9]+(?:\.[0-9]+)?)\s*ms\s+inference,\s*([0-9]+(?:\.[0-9]+)?)\s*ms\s+postprocess",
         )

@@ -41,3 +41,37 @@ sigterm_grace_secs = 5
 # false = dry-run (log only). true = actually send signals. Override at the
 # command line with --dry-run for an extra safety belt.
 enforce = false
+
+[storage]
+# Directory holding per-day RunRecord JSONL plus a tiny index file.
+# `~/` expands to $HOME. Set to "" to disable persistence (in-memory only —
+# the history subcommand and regression detector both go silent).
+run_store_path = "~/.local/share/edge_monitor"
+
+# Hash cache so the model fingerprinter doesn't re-read GB-sized weight
+# files on every exit. "" disables caching (every fingerprint recomputes
+# from scratch).
+fingerprint_cache = "~/.cache/edge_monitor/fingerprints.json"
+
+# Hard cap on retained runs per model. Older entries are pruned. Set
+# higher if you want a longer baseline window for regression detection.
+keep_runs_per_model = 200
+
+[regression]
+# Percent threshold for a "Warn" regression. A run that's ≥ warn_pct %
+# worse than the baseline mean on any tracked metric raises a warning.
+warn_pct = 10.0
+
+# Percent threshold for a "Critical" regression. Must be ≥ warn_pct.
+critical_pct = 25.0
+
+# Number of prior runs (per model) used to compute the baseline mean
+# when comparing a new exit. A larger window stabilises the baseline at
+# the cost of slower drift detection.
+baseline_window = 10
+
+# Minimum number of historical runs required before regression detection
+# fires. Below this the detector stays silent — small samples produce
+# noisy false-positives. Set to u32::MAX (4294967295) to disable
+# regression detection without removing this section.
+min_baseline_samples = 3

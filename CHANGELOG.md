@@ -9,6 +9,21 @@ once `v1.0.0` is tagged. Until then, minor versions may include breaking changes
 ## [Unreleased]
 
 ### Added
+- **Tier 1.2d — stdout regex parser**
+  (`src/telemetry/samplers/stdout_parser.rs`). Pure-function
+  `parse_line()` extracts `tokens_per_sec`, `fps`, and `latency_ms`
+  from llama.cpp `llama_print_timings: eval time = ... tokens per
+  second`, vLLM `Avg generation throughput: NN.N tokens/s`, and
+  Ultralytics `Speed: Nms preprocess, Nms inference, Nms
+  postprocess` log lines. Convenience `line_to_frame()` builds a
+  `TelemetryFrame` ready for the accumulator. Strict parser — refuses
+  partial matches so noise lines never produce 0.0 readings.
+- New `regex` dependency (the std library has no equivalent and the
+  patterns are too varied for hand-rolled parsing).
+- 8 unit tests covering each runtime's log shape, fixture batch
+  extraction, strict-mismatch invariant, and TelemetryFrame
+  population.
+
 - **Foundation B — telemetry sampler infrastructure** (latest.md).
   Defines the `TelemetrySource` async trait + `TelemetryFrame` +
   `TelemetryAccumulator`, plus error envelope (`SourceError::
@@ -135,11 +150,12 @@ once `v1.0.0` is tagged. Until then, minor versions may include breaking changes
 ### Notes
 - Developed on WSL Ubuntu; NVML returns `None` gracefully without GPU
   passthrough. Real target (Jetson AGX Orin) not yet validated end-to-end.
-- 206 unit + 5 history-CLI integration + 3 pipeline integration + 2
+- 214 unit + 5 history-CLI integration + 3 pipeline integration + 2
   proptest tests pass (was 168; +13 A/C foundations, +6 history unit,
   +4 config edge cases, +5 history-CLI integration, +4 regression
-  plumbing, +3 regression config, +7 telemetry foundation B + +1).
-  `cargo clippy --all-targets -- -D warnings` clean.
+  plumbing, +3 regression config, +8 telemetry foundation B,
+  +8 stdout parser, +5 misc). `cargo clippy --all-targets --
+  -D warnings` clean.
 - No release artifact yet. `v0.1.0` will be tagged once Phase 1 launch
   checklist (CI, demo GIF, `.deb`, crates.io name reservation) is complete.
 

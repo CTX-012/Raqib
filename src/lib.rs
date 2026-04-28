@@ -11,6 +11,7 @@
 // covers every public API.
 #![allow(dead_code)]
 
+pub mod analysis;
 pub mod classifier;
 pub mod config;
 pub mod governor;

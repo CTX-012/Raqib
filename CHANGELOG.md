@@ -9,6 +9,26 @@ once `v1.0.0` is tagged. Until then, minor versions may include breaking changes
 ## [Unreleased]
 
 ### Added
+- **Foundation A — `RunStore`** (`src/storage/run_store.rs`): typed
+  read/write store for per-run records with a per-model index. Storage
+  layout: `<root>/runs/<YYYY-MM-DD>/run-<uuid>.json` per record plus an
+  append-only `index.jsonl` for fast startup scan. `RunRecord` embeds
+  the existing `LifecycleSummary` and adds `run_id` (UUIDv4),
+  `model_fingerprint`, `runtime`, `quantization`, `metrics: RunMetrics`,
+  `exit_reason`, `cold_start`. API: `append`, `list_models`, `recent`,
+  `get`, `baseline`. Crash-safe: record file is fsynced before the index
+  entry is appended, so a partial write leaves an orphaned file (still
+  recoverable) rather than a dangling index pointer.
+- **Foundation C — baseline + regression detector**
+  (`src/analysis/compare.rs`): per-metric mean/stddev baseline computed
+  from a record slice, plus `detect_regressions(record, baseline)` that
+  returns `Regression` entries above a configurable warn / critical
+  threshold (defaults: 10% / 25%). Refuses to flag regressions when the
+  baseline has fewer than 3 samples. Knows direction per metric — a
+  faster `tokens_per_sec_avg` is never a regression.
+- New `uuid` dependency (v1, `v4` + `serde` features).
+- Manual smoke script: `scripts/manual/foundations_smoke.sh` runs the
+  unit suites for both foundations.
 - Phase 0 Linux build — all 8 modules complete.
   - Classifier: keyword matching with short-keyword word boundaries,
     cmdline/env model-path extraction, Python script sniffing, AI
@@ -54,8 +74,9 @@ once `v1.0.0` is tagged. Until then, minor versions may include breaking changes
 ### Notes
 - Developed on WSL Ubuntu; NVML returns `None` gracefully without GPU
   passthrough. Real target (Jetson AGX Orin) not yet validated end-to-end.
-- 168 unit + integration tests pass. `cargo clippy --all-targets -- -D warnings`
-  clean.
+- 181 unit + 3 pipeline integration + 2 proptest tests pass
+  (was 168; +7 RunStore, +6 baseline/regression).
+  `cargo clippy --all-targets -- -D warnings` clean.
 - No release artifact yet. `v0.1.0` will be tagged once Phase 1 launch
   checklist (CI, demo GIF, `.deb`, crates.io name reservation) is complete.
 

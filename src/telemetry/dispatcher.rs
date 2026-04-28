@@ -27,8 +27,9 @@ use std::time::Duration;
 use tokio::sync::{Mutex, mpsc};
 
 use crate::platform::GpuSnapshot;
-use crate::storage::run_store::RunMetrics;
+use crate::storage::run_store::{ColdStartStats, RunMetrics};
 use crate::telemetry::accumulator::TelemetryAccumulator;
+use crate::telemetry::cold_load::{ColdLoadTracker, read_bytes_for};
 use crate::telemetry::rapl::RaplReader;
 use crate::telemetry::source::{ProcessSnapshot, TelemetryFrame, TelemetrySource};
 
@@ -50,6 +51,8 @@ pub struct Dispatcher {
     /// Tier 2.1 — RAPL package-power reader. Stateful across ticks
     /// to compute Δ-based wattage.
     rapl: RaplReader,
+    /// Tier 2.2 — cold-load disk I/O detector. Stateful per-PID.
+    cold_load: ColdLoadTracker,
 }
 
 impl Dispatcher {
@@ -74,6 +77,7 @@ impl Dispatcher {
             accumulator: TelemetryAccumulator::new(),
             sample_timeout: DEFAULT_SAMPLE_TIMEOUT,
             rapl: RaplReader::new(),
+            cold_load: ColdLoadTracker::new(),
         })
     }
 
@@ -188,6 +192,24 @@ impl Dispatcher {
         }
     }
 
+    /// Tier 2.2 — sample `/proc/<pid>/io` for each AI process and
+    /// fold into the cold-load tracker. Caller passes the same
+    /// `processes` slice as `tick`. Reads silently skip PIDs whose
+    /// `/proc/<pid>/io` is unreadable (permission, race-with-exit).
+    pub fn record_disk_io(&mut self, processes: &[ProcessSnapshot]) {
+        for proc in processes {
+            if let Some(read_bytes) = read_bytes_for(proc.pid) {
+                let _ = self.cold_load.record(proc.pid, read_bytes);
+            }
+        }
+    }
+
+    /// Cold-load stats for `pid` if the load completed (or hit the
+    /// hard timeout). `None` when still in progress or never started.
+    pub fn cold_start_for(&self, pid: u32) -> Option<ColdStartStats> {
+        self.cold_load.stats(pid)
+    }
+
     /// `RunMetrics` rolled up from telemetry frames seen for `pid`.
     /// Returned `None` when no telemetry frames were ever recorded
     /// for that PID — caller should leave the metric fields on the
@@ -207,6 +229,7 @@ impl Dispatcher {
     /// Prevents stale data leaking into a recycled PID.
     pub fn forget(&mut self, pid: u32) {
         self.accumulator.forget(pid);
+        self.cold_load.forget(pid);
     }
 
     /// Read-only handle to the accumulator (UI may want this for the

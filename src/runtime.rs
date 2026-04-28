@@ -273,6 +273,7 @@ impl Runtime {
                 .collect();
             d.tick(&live_ai);
             d.record_system_power(&live_ai, &snapshot.gpu);
+            d.record_disk_io(&live_ai);
         }
 
         // Record run summaries as they fire. Bounded by config to keep memory flat.
@@ -310,6 +311,14 @@ impl Runtime {
                     && let Some(metrics) = d.metrics_for(summary.pid)
                 {
                     record.metrics = metrics;
+                }
+                // Tier 2.2 — attach cold-load stats if the detector
+                // saw a complete load before exit. Streaming inference
+                // workloads with no plateau will have None here.
+                if let Some(d) = &self.telemetry
+                    && let Some(cs) = d.cold_start_for(summary.pid)
+                {
+                    record.cold_start = Some(cs);
                 }
                 let model = record.model_or_name().to_string();
                 let record_clone = record.clone();

@@ -22,6 +22,7 @@
 //!    via channel or mutex. No interior mutability inside the trait.
 
 pub mod accumulator;
+pub mod cold_load;
 pub mod dispatcher;
 pub mod rapl;
 pub mod samplers;

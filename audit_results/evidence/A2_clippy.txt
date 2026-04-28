@@ -1,17 +1,1 @@
-    Checking edge_monitor v0.1.0 (/home/faisal/edge_monitor)
-error: field assignment outside of initializer for an instance created with Default::default()
-   --> src/exit_classify.rs:213:9
-    |
-213 |         ctx.killed_by_governor = true;
-    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-    |
-note: consider initializing the variable with `exit_classify::ExitContext { killed_by_governor: true, governor_reason: Some("VRAM > limit".into()), ..Default::default() }` and removing relevant reassignments
-   --> src/exit_classify.rs:212:9
-    |
-212 |         let mut ctx = ExitContext::default();
-    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#field_reassign_with_default
-    = note: `-D clippy::field-reassign-with-default` implied by `-D warnings`
-    = help: to override `-D warnings` add `#[allow(clippy::field_reassign_with_default)]`
-
-error: could not compile `edge_monitor` (lib test) due to 1 previous error
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.25s

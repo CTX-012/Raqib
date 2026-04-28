@@ -11,12 +11,21 @@ edge_monitor_processes_total{category="none"} 0
 # TYPE edge_monitor_run_gpu_watts gauge
 # HELP edge_monitor_run_cpu_watts Per-process CPU package power (W).
 # TYPE edge_monitor_run_cpu_watts gauge
+# HELP edge_monitor_gpu_watts Per-PID GPU board power (W).
+# TYPE edge_monitor_gpu_watts gauge
+# HELP edge_monitor_gpu_temp_celsius GPU die temperature attributed to PID (°C).
+# TYPE edge_monitor_gpu_temp_celsius gauge
+# HELP edge_monitor_cold_load_seconds Wall-clock duration of the model cold-load phase.
+# TYPE edge_monitor_cold_load_seconds gauge
+# HELP edge_monitor_ai_processes_active Total count of live AI-classified processes.
+# TYPE edge_monitor_ai_processes_active gauge
+edge_monitor_ai_processes_active 0
 # HELP edge_monitor_governor_kills_total Cumulative kill decisions by reason.
 # TYPE edge_monitor_governor_kills_total counter
-edge_monitor_governor_kills_total{reason="already_exited"} 7
-edge_monitor_governor_kills_total{reason="whitelisted"} 338
+edge_monitor_governor_kills_total{reason="already_exited"} 5
+edge_monitor_governor_kills_total{reason="whitelisted"} 295
 # HELP edge_monitor_regressions_total Cumulative regression alerts by (model, metric).
 # TYPE edge_monitor_regressions_total counter
-# HELP edge_monitor_tick_count Number of completed tick cycles.
-# TYPE edge_monitor_tick_count counter
-edge_monitor_tick_count 6
+# HELP edge_monitor_tick_count_total Number of completed tick cycles.
+# TYPE edge_monitor_tick_count_total counter
+edge_monitor_tick_count_total 5

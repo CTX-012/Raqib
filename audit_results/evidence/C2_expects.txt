@@ -1,5 +1,5 @@
 src/storage/log_store.rs:66:        let mut guard = self.inner.lock().expect("log store mutex poisoned");
-src/runtime.rs:848:            .expect("expected peak_rss_mb regression");
+src/runtime.rs:878:            .expect("expected peak_rss_mb regression");
 src/classifier/model_extract.rs:267:        let result = classify(&sample).expect("should classify");
 src/classifier/model_extract.rs:293:        let result = classify(&sample).expect("should classify");
 src/classifier/model_extract.rs:311:        let result = classify(&sample).expect("should classify");
@@ -11,10 +11,10 @@ src/classifier/script_sniff.rs:269:        let (cat, _) = analyze_script_content
 src/classifier/script_sniff.rs:276:        let (cat, _) = analyze_script_content(src).expect("should detect");
 src/classifier/script_sniff.rs:306:        let path = python_script_path(&sample).expect("should find script");
 src/classifier/script_sniff.rs:421:        let result = classify(&sample).expect("should classify");
-src/governor/audit.rs:76:        let mut guard = self.inner.lock().expect("audit writer mutex poisoned");
+src/governor/audit.rs:80:        let mut guard = self.inner.lock().expect("audit writer mutex poisoned");
 src/analysis/compare.rs:316:            .expect("expected tokens_per_sec_avg regression");
 src/analysis/compare.rs:357:            .expect("expected peak_rss_mb regression");
-src/config.rs:323:        Config::default().validate().expect("default must validate");
+src/config.rs:328:        Config::default().validate().expect("default must validate");
 src/telemetry/cold_load.rs:216:            .expect("plateau should be detected");
 src/telemetry/samplers/ollama_api.rs:52:            .expect("default reqwest client must build");
 src/telemetry/samplers/ollama_api.rs:109:        Regex::new(r"(^|\s|/)ollama(\s|$)").expect("ollama cmdline regex")
@@ -22,11 +22,13 @@ src/telemetry/samplers/ollama_api.rs:290:        let frame = s.sample(&p).await.
 src/telemetry/samplers/llama_cpp_server.rs:51:            .expect("default reqwest client must build");
 src/telemetry/samplers/llama_cpp_server.rs:93:            .expect("llama_server cmdline regex")
 src/telemetry/samplers/llama_cpp_server.rs:327:        let frame = s.sample(&p).await.expect("scrape should succeed");
-src/telemetry/samplers/stdout_parser.rs:40:            .expect("llama_cpp_tps regex must compile")
-src/telemetry/samplers/stdout_parser.rs:49:            .expect("vllm_tps regex must compile")
-src/telemetry/samplers/stdout_parser.rs:62:        .expect("ultralytics regex must compile")
+src/telemetry/samplers/stdout_parser.rs:42:            .expect("llama_cpp_tps regex must compile")
+src/telemetry/samplers/stdout_parser.rs:52:            .expect("vllm_tps regex must compile")
+src/telemetry/samplers/stdout_parser.rs:66:        .expect("ultralytics regex must compile")
 src/telemetry/samplers/vllm_prometheus.rs:48:            .expect("default reqwest client must build");
 src/telemetry/samplers/vllm_prometheus.rs:94:        Regex::new(r"\bvllm(\.entrypoints|\s+serve|\b)").expect("vllm cmdline regex")
 src/telemetry/samplers/vllm_prometheus.rs:356:        let frame = s.sample(&p).await.expect("scrape should succeed");
 src/telemetry/rapl.rs:217:        let w = r.read_watts().expect("watts");
 src/telemetry/rapl.rs:248:        let w = r.read_watts().expect("watts");
+src/telemetry/exporter.rs:494:                let name = parts.next().expect("# TYPE without name");
+src/telemetry/exporter.rs:495:                let kind = parts.next().expect("# TYPE without kind");

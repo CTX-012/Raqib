@@ -1,0 +1,94 @@
+Audit starting in: /home/faisal/edge_monitor
+Evidence dir: audit_results/evidence
+
+
+=== Phase A: Build & static checks ===
+[PASS] A.1 — cargo build --release succeeds
+[PASS] A.2 — cargo clippy clean (no warnings)
+[PASS] A.3 — cargo fmt clean
+[PASS] A.4 — --version runs and returns semver
+         edge_monitor 0.1.0
+
+=== Phase B: Test suite verification ===
+[PASS] B.1 — cargo test runs all green
+         312 tests across 7 binaries
+[WARN] B.2 — no empty test binaries
+         2 binaries have ZERO tests (scaffolds without content). 5 have real tests.
+[PASS] B.3 — test count via --list
+         312 test functions enumerated.
+[WARN] B.4 — tests appear to exercise real behavior
+         avg per-test runtime: 0.00 ms (312 tests in 0s) — under 0.5ms/test suggests assertions on constants. Spot-check test bodies.
+
+=== Phase C: Production code quality ===
+[WARN] C.1 — no .unwrap() in production code
+         250 unwrap() calls found. See C1_unwraps.txt for file:line list.
+[WARN] C.2 — no .expect() in production code
+         34 expect() calls. Linux audit flagged audit.rs:76 and stdout_parser.rs:40,49,62. Document or refactor.
+./verify-edge-monitor.sh: line 320: [[: 0
+0: syntax error in expression (error token is "0")
+./verify-edge-monitor.sh: line 322: [[: 0
+0: syntax error in expression (error token is "0")
+[WARN] C.3 — no TODO/FIXME markers
+         0
+0 markers in production code.
+
+=== Phase D: Identity / structural drift ===
+[PASS] D.1 — no VATCH branding leakage
+[PASS] D.2 — no old Windows vocabulary
+[PASS] D.3 — config is TOML (no stray config.json)
+[PASS] D.4 — ratatui dependency present
+./verify-edge-monitor.sh: line 394: [[: 0
+0: syntax error in expression (error token is "0")
+./verify-edge-monitor.sh: line 396: [[: 0
+0: syntax error in expression (error token is "0")
+[FAIL] D.5 — raw ANSI escapes in production
+         0
+0 files use raw ANSI. Suggests TUI not ported to ratatui.
+
+=== Phase E: CLI surface ===
+[PASS] E.1 — history subcommand exists (Tier 1.1)
+[PASS] E.2 — compare subcommand exists
+[WARN] E.3 — exec wrapper subcommand (Tier 1.2)
+         Required for stdout-parsing tok/s. May rely only on Prometheus scraping.
+grep: unrecognized option '--no-ui|--headless'
+Usage: grep [OPTION]... PATTERNS [FILE]...
+Try 'grep --help' for more information.
+[FAIL] E.4 — --no-ui headless mode
+[PASS] E.5 — --dry-run flag (governor safety)
+
+=== Phase F: Headless runtime ===
+[FAIL] F.1 — --no-ui --ticks 5 produces ≥5 tick lines
+         Only 0 tick markers. Headless mode silent or broken.
+[PASS] F.2 — bad config rejected with non-zero exit
+
+=== Phase G: Prometheus endpoint ===
+[PASS] G.1 — Prometheus /metrics serves valid output
+         5 metric lines, 13 HELP, 13 TYPE
+
+=== Phase H: Grafana dashboards ===
+[SKIP] H.1 — Grafana dashboards directory exists
+         No grafana/ or dashboards/ directory found.
+
+=== Phase I: Documentation drift ===
+[PASS] I.1.CLAUDE — CLAUDE.md freshness
+         0.0 days old
+[PASS] I.1.HANDOFF — HANDOFF.md freshness
+         4.1 days old
+[PASS] I.1.README — README.md freshness
+         0.0 days old
+[PASS] I.1.FEATURES — FEATURES.md freshness
+         0.1 days old
+[PASS] I.2 — no misleading commit messages in last 20
+
+=== Phase J: Ground-truth tokens/sec test (slow) ===
+[SKIP] J.1 — tokens/sec ground-truth
+         Ollama not installed. https://ollama.com to enable T.1 ground-truth check.
+
+================================================
+Audit complete in 1.1 minutes
+  PASS: 20   FAIL: 3   WARN: 6   SKIP: 2
+  Report: audit_results/REPORT.md
+  Evidence: audit_results/evidence
+================================================
+
+⚠ 1 S0/S1 LAUNCH BLOCKER(S) — see report

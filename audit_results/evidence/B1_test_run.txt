@@ -1,243 +1,245 @@
-   Compiling edge_monitor v0.1.0 (/home/faisal/edge_monitor)
-warning: unused import: `std::os::fd::OwnedFd`
- --> src/governor/mod.rs:4:5
-  |
-4 | use std::os::fd::OwnedFd;
-  |     ^^^^^^^^^^^^^^^^^^^^
-  |
-  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.17s
+     Running unittests src/lib.rs (target/debug/deps/edge_monitor-7ae572524f5720f9)
 
-warning: unused import: `std::sync::Arc`
- --> src/governor/mod.rs:5:5
-  |
-5 | use std::sync::Arc;
-  |     ^^^^^^^^^^^^^^
-
-warning: `edge_monitor` (lib) generated 2 warnings (run `cargo fix --lib -p edge_monitor` to apply 2 suggestions)
-warning: `edge_monitor` (lib test) generated 2 warnings (2 duplicates)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 6.00s
-     Running unittests src/lib.rs (target/debug/deps/edge_monitor-d485f399759e2759)
-
-running 290 tests
-test analysis::compare::tests::faster_run_is_not_a_regression ... ok
-test analysis::compare::tests::baseline_metrics_per_metric_n ... ok
+running 299 tests
 test analysis::compare::tests::higher_rss_is_a_regression ... ok
+test analysis::compare::tests::baseline_metrics_per_metric_n ... ok
 test analysis::compare::tests::matching_record_no_regressions ... ok
-test analysis::compare::tests::slow_run_is_critical ... ok
-test classifier::keyword_match::tests::case_insensitive ... ok
 test analysis::compare::tests::tiny_baseline_emits_no_regressions ... ok
 test classifier::keyword_match::tests::empty_cmdline_returns_none ... ok
+test analysis::compare::tests::slow_run_is_critical ... ok
 test classifier::keyword_match::tests::empty_keyword_never_matches ... ok
+test classifier::keyword_match::tests::case_insensitive ... ok
 test classifier::keyword_match::tests::known_inference_server_names ... ok
 test classifier::keyword_match::tests::llm_word_boundary ... ok
+test analysis::compare::tests::faster_run_is_not_a_regression ... ok
 test classifier::keyword_match::tests::long_keyword_matches_substring ... ok
-test classifier::keyword_match::tests::non_ai_names_return_none ... ok
 test classifier::keyword_match::tests::non_ai_cmdline_returns_none ... ok
+test classifier::keyword_match::tests::non_ai_names_return_none ... ok
 test classifier::keyword_match::tests::short_keyword_blocked_inside_word ... ok
 test classifier::keyword_match::tests::short_keyword_fires_at_boundaries ... ok
-test classifier::keyword_match::tests::vllm_module_in_python_cmdline ... ok
-test classifier::keyword_match::tests::transformers_in_script_path ... ok
 test classifier::keyword_match::tests::training_launcher_names ... ok
+test classifier::keyword_match::tests::transformers_in_script_path ... ok
+test classifier::keyword_match::tests::vllm_module_in_python_cmdline ... ok
 test classifier::keyword_match::tests::vllm_word_boundary ... ok
 test classifier::model_extract::tests::bare_gguf_path_detected ... ok
-test classifier::model_extract::tests::classify_returns_none_for_non_ai ... ok
+test classifier::model_extract::tests::classify_finds_gguf_in_cmdline ... ok
+test classifier::model_extract::tests::classify_extracts_model_name_from_dotted_filename ... ok
+test classifier::model_extract::tests::classify_finds_strong_env_var ... ok
 test classifier::model_extract::tests::empty_cmdline_returns_none ... ok
-test classifier::model_extract::tests::no_model_in_cmdline_returns_none ... ok
+test classifier::model_extract::tests::classify_ollama_models_dir_env_has_no_model_name ... ok
+test classifier::model_extract::tests::classify_returns_none_for_non_ai ... ok
+test classifier::model_extract::tests::empty_env_var_ignored ... ok
 test classifier::model_extract::tests::flag_space_value_form ... ok
+test classifier::model_extract::tests::flag_eq_value_form ... ok
+test classifier::model_extract::tests::framework_env_vars_not_detected ... ok
+test classifier::model_extract::tests::model_path_env_var_detected ... ok
+test classifier::model_extract::tests::no_model_in_cmdline_returns_none ... ok
+test classifier::model_extract::tests::short_flag_m ... ok
 test classifier::model_extract::tests::strong_extensions_detected ... ok
 test classifier::model_extract::tests::weak_extensions_not_detected ... ok
-test classifier::script_sniff::tests::blank_lines_are_ignored ... ok
-test classifier::model_extract::tests::flag_eq_value_form ... ok
-test classifier::model_extract::tests::classify_extracts_model_name_from_dotted_filename ... ok
-test classifier::script_sniff::tests::detects_from_transformers_import ... ok
 test classifier::script_sniff::tests::comment_lines_do_not_yield_literal ... ok
-test classifier::model_extract::tests::classify_ollama_models_dir_env_has_no_model_name ... ok
-test classifier::model_extract::tests::classify_finds_gguf_in_cmdline ... ok
-test classifier::script_sniff::tests::detects_pipeline_call ... ok
-test classifier::script_sniff::tests::extracts_llama_cpp_kwarg_literal ... ok
-test classifier::model_extract::tests::framework_env_vars_not_detected ... ok
-test classifier::script_sniff::tests::detects_torch_import ... ok
+test classifier::script_sniff::tests::blank_lines_are_ignored ... ok
 test classifier::script_sniff::tests::detects_deepspeed_training ... ok
-test classifier::model_extract::tests::classify_finds_strong_env_var ... ok
-test classifier::script_sniff::tests::extracts_from_pretrained_repo_id ... ok
-test classifier::model_extract::tests::short_flag_m ... ok
-test classifier::model_extract::tests::empty_env_var_ignored ... ok
-test classifier::model_extract::tests::model_path_env_var_detected ... ok
 test classifier::script_sniff::tests::comments_are_ignored ... ok
 test classifier::script_sniff::tests::detects_llama_cpp ... ok
+test classifier::script_sniff::tests::detects_from_transformers_import ... ok
+test classifier::script_sniff::tests::detects_pipeline_call ... ok
+test classifier::script_sniff::tests::extracts_from_pretrained_repo_id ... ok
+test classifier::script_sniff::tests::detects_torch_import ... ok
 test classifier::script_sniff::tests::extracts_py_script_path ... ok
 test classifier::script_sniff::tests::extracts_yolo_literal ... ok
 test classifier::script_sniff::tests::non_ai_script_returns_none ... ok
-test classifier::script_sniff::tests::classify_script_exposes_model_name_for_yolo ... ok
+test classifier::script_sniff::tests::extracts_llama_cpp_kwarg_literal ... ok
 test classifier::script_sniff::tests::non_py_argv1_returns_none ... ok
-test classifier::script_sniff::tests::extracts_whisper_size ... ok
 test classifier::script_sniff::tests::non_python_names_rejected ... ok
 test classifier::script_sniff::tests::non_python_process_returns_none ... ok
-test classifier::script_sniff::tests::python_m_flag_returns_none ... ok
-test classifier::script_sniff::tests::python_variants_recognised ... ok
 test classifier::script_sniff::tests::python_c_flag_returns_none ... ok
-test classifier::tests::ai_result_has_non_empty_evidence ... ok
+test classifier::script_sniff::tests::classify_script_exposes_model_name_for_yolo ... ok
+test classifier::script_sniff::tests::extracts_whisper_size ... ok
 test classifier::script_sniff::tests::returns_none_without_constructor ... ok
+test classifier::script_sniff::tests::python_m_flag_returns_none ... ok
+test classifier::tests::ai_result_has_non_empty_evidence ... ok
+test classifier::script_sniff::tests::python_variants_recognised ... ok
 test classifier::tests::deepspeed_process_is_training ... ok
-test classifier::tests::gguf_model_arg_is_inference ... ok
-test classifier::tests::model_path_env_var_is_inference ... ok
 test classifier::tests::bash_is_not_ai ... ok
-test classifier::tests::not_ai_result_has_empty_evidence ... ok
+test classifier::tests::model_path_env_var_is_inference ... ok
 test classifier::tests::nginx_is_not_ai ... ok
 test classifier::tests::ollama_process_is_inference ... ok
+test classifier::tests::not_ai_result_has_empty_evidence ... ok
 test classifier::tests::safetensors_model_arg_is_inference ... ok
-test classifier::tests::sshd_is_not_ai ... ok
-test classifier::tests::tensorrt_engine_is_inference ... ok
+test classifier::tests::gguf_model_arg_is_inference ... ok
 test classifier::tests::vllm_in_python_module_path_is_inference ... ok
 test classifier::tests::whisper_in_cmdline_is_inference ... ok
+test classifier::tests::sshd_is_not_ai ... ok
+test classifier::tests::tensorrt_engine_is_inference ... ok
+test compare::tests::empty_models_returns_error ... ok
 test config::tests::default_is_dry_run ... ok
 test config::tests::build_policy_roundtrips_allowlist ... ok
 test config::tests::default_validates ... ok
+test compare::tests::render_table_includes_all_rows ... ok
 test config::tests::force_dry_run_overrides_enforce ... ok
-test config::tests::regression_zero_window_rejected ... ok
+test config::tests::regression_critical_below_warn_rejected ... ok
 test config::tests::regression_negative_threshold_rejected ... ok
-test config::tests::storage_run_store_returns_none_when_empty ... ok
-test config::tests::storage_keep_zero_rejected ... ok
+[
+  {
+    "model": "nonexistent",
+    "sample_size": 0,
+    "tokens_per_sec_avg": null,
+    "fps_avg": null,
+    "peak_rss_mb": null,
+    "peak_vram_mb": null,
+    "gpu_watts_avg": null,
+    "uptime_secs": null,
+    "joules_per_token": null,
+    "cold_load_seconds": null
+  }
+]
 test config::tests::storage_defaults_use_home_relative_paths ... ok
+test config::tests::regression_zero_window_rejected ... ok
+test config::tests::storage_keep_zero_rejected ... ok
+test config::tests::storage_run_store_returns_none_when_empty ... ok
 test config::tests::zero_grace_rejected ... ok
 test config::tests::zero_tick_rejected ... ok
-test config::tests::regression_critical_below_warn_rejected ... ok
+test exit_classify::tests::clean_exit_zero_status ... ok
+test exit_classify::tests::cuda_error_other_than_oom ... ok
+test exit_classify::tests::governor_kill_attribution_wins_over_signal ... ok
 test exit_classify::tests::cuda_oom_via_stderr ... ok
 test exit_classify::tests::crash_with_nonzero_exit_no_signals ... ok
-test exit_classify::tests::truncate_keeps_utf8_boundaries ... ok
-test exit_classify::tests::unknown_when_no_signals_no_exit_code ... ok
-test exit_classify::tests::cuda_error_other_than_oom ... ok
-test exit_classify::tests::clean_exit_zero_status ... ok
-test exit_classify::tests::unrelated_dmesg_oom_does_not_misattribute ... ok
-test config::tests::from_file_rejects_invalid ... ok
-test exit_classify::tests::kernel_oom_detected_via_dmesg_pid ... ok
-test fingerprint::tests::cache_handles_missing_file_gracefully ... ok
-test exit_classify::tests::segfault_on_sigsegv ... ok
 test config::tests::from_file_loads_minimal_toml ... ok
+test config::tests::from_file_rejects_invalid ... ok
 test exit_classify::tests::user_signal_when_unknown_signal_and_no_dmesg ... ok
-test exit_classify::tests::governor_kill_attribution_wins_over_signal ... ok
+test exit_classify::tests::unrelated_dmesg_oom_does_not_misattribute ... ok
+test compare::tests::unknown_model_yields_empty_column_not_error ... ok
+test exit_classify::tests::unknown_when_no_signals_no_exit_code ... ok
+test exit_classify::tests::kernel_oom_detected_via_dmesg_pid ... ok
+test exit_classify::tests::truncate_keeps_utf8_boundaries ... ok
+test exit_classify::tests::segfault_on_sigsegv ... ok
+test fingerprint::tests::cache_handles_missing_file_gracefully ... ok
+test fingerprint::tests::malformed_cache_file_is_reset_silently ... ok
+test governor::audit::tests::append_preserves_existing_content ... ok
+test governor::executor::tests::executor_evaluate_dry_run ... ok
 test governor::executor::tests::executor_evaluate_exited ... ok
 test governor::executor::tests::executor_clear_pending ... ok
 test governor::executor::tests::executor_evaluate_whitelisted ... ok
-test governor::executor::tests::executor_evaluate_dry_run ... ok
+test governor::audit::tests::replay_skips_malformed_lines ... ok
 test governor::executor::tests::executor_new ... ok
-test governor::executor::tests::executor_rate_limit_not_consumed_in_dry_run ... ok
-test fingerprint::tests::malformed_cache_file_is_reset_silently ... ok
 test governor::executor::tests::executor_pending_kills_count ... ok
+test governor::executor::tests::executor_rate_limit_disabled_when_max_is_zero ... ok
+test governor::executor::tests::executor_rate_limit_not_consumed_in_dry_run ... ok
 test governor::executor::tests::executor_rate_limits_enforced_kills ... ok
 test governor::manual::tests::audit_entry_source_is_manual ... ok
-test governor::executor::tests::executor_rate_limit_disabled_when_max_is_zero ... ok
-test governor::audit::tests::replay_skips_malformed_lines ... ok
-test governor::manual::tests::dry_run_sigterm_logs_not_kills ... ok
-test governor::manual::tests::dry_run_sigkill_logs_not_kills ... ok
 test governor::audit::tests::round_trip_single_entry ... ok
-test governor::audit::tests::append_preserves_existing_content ... ok
 test governor::manual::tests::audit_report_contains_expected_fields ... ok
-test governor::manual::tests::find_by_index_sorted ... ok
-test governor::manual::tests::audit_tracks_multiple_entries ... ok
-test governor::manual::tests::find_by_index_out_of_range ... ok
-test fingerprint::tests::same_file_same_fingerprint ... ok
-test fingerprint::tests::cache_hit_avoids_recomputation ... ok
 test governor::manual::tests::find_by_pid_found ... ok
+test governor::manual::tests::dry_run_sigkill_logs_not_kills ... ok
+test governor::manual::tests::find_by_index_sorted ... ok
+test fingerprint::tests::same_file_same_fingerprint ... ok
+test fingerprint::tests::modified_byte_zero_changes_fingerprint ... ok
+test governor::manual::tests::find_by_index_out_of_range ... ok
+test governor::manual::tests::audit_tracks_multiple_entries ... ok
+test governor::manual::tests::dry_run_sigterm_logs_not_kills ... ok
 test governor::manual::tests::find_by_pid_not_found ... ok
 test governor::manual::tests::manual_killer_new ... ok
 test governor::pid_reuse::tests::read_starttime_for_self_is_some ... ok
-test governor::pid_reuse::tests::read_starttime_handles_comm_with_parens ... ok
-test governor::pid_reuse::tests::read_starttime_returns_none_for_dead_pid ... ok
-test governor::pid_reuse::tests::try_pidfd_open_for_self_succeeds_or_skips ... ok
-test governor::policy::tests::policy_add_whitelist ... ok
 test governor::policy::tests::policy_blacklist ... ok
-test governor::policy::tests::policy_safe_default ... ok
-test governor::policy::tests::policy_whitelist_priority ... ok
-test governor::policy::tests::policy_default_ai_action ... ok
-test governor::tests::pending_kill_new ... ok
-test governor::policy::tests::policy_non_ai_always_allowed ... ok
+test governor::pid_reuse::tests::read_starttime_handles_comm_with_parens ... ok
 test governor::policy::tests::policy_enable_enforcement ... ok
-test governor::tests::pending_kill_should_send_kill ... ok
-test history::tests::duration_formatting_handles_seconds_minutes_hours ... ok
+test governor::policy::tests::policy_default_ai_action ... ok
+test governor::policy::tests::policy_safe_default ... ok
+test governor::pid_reuse::tests::read_starttime_returns_none_for_dead_pid ... ok
 test governor::tests::governor_decision ... ok
+test governor::policy::tests::policy_add_whitelist ... ok
+test governor::policy::tests::policy_non_ai_always_allowed ... ok
 test governor::tests::pending_kill_elapsed ... ok
-test fingerprint::tests::modified_byte_zero_changes_fingerprint ... ok
-test history::tests::empty_store_prints_no_history ... ok
+test governor::pid_reuse::tests::try_pidfd_open_for_self_succeeds_or_skips ... ok
+test governor::policy::tests::policy_whitelist_priority ... ok
+test fingerprint::tests::cache_hit_avoids_recomputation ... ok
+test governor::tests::pending_kill_new ... ok
 test history::tests::exit_short_covers_all_variants ... ok
-test history::tests::json_output_round_trips_for_records ... ok
-test history::tests::run_table_includes_index_count_and_status ... ok
+test compare::tests::populated_models_produce_columns_with_metrics ... ok
+test history::tests::duration_formatting_handles_seconds_minutes_hours ... ok
 test history::tests::no_runs_for_model_prints_message ... ok
+test history::tests::run_table_includes_index_count_and_status ... ok
 test lifecycle::tests::lifecycle_snapshot_counts ... ok
-test lifecycle::tests::lifecycle_snapshot_recent_exits ... ok
+test history::tests::empty_store_prints_no_history ... ok
+test governor::tests::pending_kill_should_send_kill ... ok
 test lifecycle::tests::lifecycle_summary_format ... ok
-test lifecycle::tests::lifecycle_summary_from_lifecycle ... ok
-test lifecycle::tests::process_lifecycle_mark_exit ... ok
-test lifecycle::tests::process_lifecycle_new ... ok
-test history::tests::json_output_round_trips_for_model_summary ... ok
-test lifecycle::tests::process_lifecycle_uptime ... ok
-test lifecycle::tracker::tests::lifecycle_tracker_accumulates_resource_stats_into_summary ... ok
-test lifecycle::tracker::tests::lifecycle_tracker_detects_exit ... ok
+test exit_classify::tests::read_recent_kernel_log_never_panics ... ok
+test lifecycle::tests::lifecycle_snapshot_recent_exits ... ok
+test history::tests::json_output_round_trips_for_records ... ok
 test lifecycle::tracker::tests::lifecycle_tracker_detects_spawn ... ok
 test lifecycle::tracker::tests::lifecycle_tracker_multiple_processes ... ok
 test lifecycle::tracker::tests::lifecycle_tracker_new ... ok
-test lifecycle::tracker::tests::lifecycle_tracker_propagates_model_name_into_summary ... ok
+test lifecycle::tests::lifecycle_summary_from_lifecycle ... ok
+test lifecycle::tests::process_lifecycle_new ... ok
 test lifecycle::tracker::tests::lifecycle_tracker_persistence_across_updates ... ok
+test lifecycle::tracker::tests::lifecycle_tracker_accumulates_resource_stats_into_summary ... ok
+test lifecycle::tracker::tests::lifecycle_tracker_detects_exit ... ok
+test lifecycle::tests::process_lifecycle_mark_exit ... ok
+test history::tests::json_output_round_trips_for_model_summary ... ok
 test lifecycle::tracker::tests::lifecycle_tracker_reuse_pid ... ok
 test platform::gpu_nvidia::tests::empty_gpu_snapshot_has_no_gpu ... ok
-test platform::gpu_nvidia::tests::gpu_snapshot_aggregates_metrics ... ok
 test platform::gpu_nvidia::tests::gpu_device_metrics_vram_percent ... ok
-test platform::linux_proc::tests::cpu_ticks_malformed_returns_none ... ok
+test lifecycle::tests::process_lifecycle_uptime ... ok
+test platform::gpu_nvidia::tests::gpu_snapshot_aggregates_metrics ... ok
+test lifecycle::tracker::tests::lifecycle_tracker_propagates_model_name_into_summary ... ok
 test platform::gpu_nvidia::tests::gpu_device_metrics_vram_percent_zero_total ... ok
 test lifecycle::tracker::tests::lifecycle_tracker_rapid_churn ... ok
+test platform::linux_proc::tests::cpu_ticks_malformed_returns_none ... ok
+test platform::gpu_nvidia::tests::collect_gpu_metrics_returns_snapshot ... ok
+test platform::gpu_nvidia::tests::new_gpu_collector_always_succeeds ... ok
 test platform::linux_proc::tests::cpu_ticks_parses_comm_with_spaces_and_parens ... ok
 test platform::linux_proc::tests::cpu_ticks_parsed_from_stat_line ... ok
 test platform::linux_proc::tests::new_collector_succeeds_on_linux ... ok
-test platform::linux_proc::tests::read_cmdline_parses_null_separated_tokens ... ok
-test platform::linux_proc::tests::vmrss_parsed_from_status_fragment ... ok
-test platform::gpu_nvidia::tests::collect_gpu_metrics_returns_snapshot ... ok
-test platform::linux_proc::tests::read_environ_parses_key_value_pairs ... ok
-test platform::tests::system_metrics_memory_percent ... ok
 test platform::linux_proc::tests::vmrss_missing_returns_none ... ok
-test platform::tests::system_metrics_memory_percent_zero_total ... ok
-test platform::gpu_nvidia::tests::new_gpu_collector_always_succeeds ... ok
-test runtime::tests::parse_used_gpu_memory_debug_extracts_bytes ... ok
-test platform::tests::collect_gpu_metrics_returns_snapshot ... ok
 test platform::linux_proc::tests::read_ppid_returns_option ... ok
-test runtime::tests::regression_silent_below_min_baseline_samples ... ok
-test runtime::tests::runtime_starts_in_configured_dry_run ... ok
-test runtime::tests::toggle_dry_run_flips_state_and_manual_killer ... ok
-test storage::log_store::tests::round_trip_from_lifecycle_integration ... ok
-test storage::log_store::tests::round_trip_preserves_all_fields ... ok
+test platform::linux_proc::tests::vmrss_parsed_from_status_fragment ... ok
+test platform::tests::system_metrics_memory_percent_zero_total ... ok
+test runtime::tests::parse_used_gpu_memory_debug_extracts_bytes ... ok
+test platform::tests::system_metrics_memory_percent ... ok
+test platform::linux_proc::tests::read_environ_parses_key_value_pairs ... ok
+test platform::linux_proc::tests::read_cmdline_parses_null_separated_tokens ... ok
 test storage::log_store::tests::append_does_not_truncate_existing ... ok
+test platform::tests::collect_gpu_metrics_returns_snapshot ... ok
+test storage::log_store::tests::round_trip_from_lifecycle_integration ... ok
+test runtime::tests::regression_fires_on_metric_blowup ... ok
+test runtime::tests::regression_silent_below_min_baseline_samples ... ok
+test runtime::tests::regression_sink_caps_at_configured_size ... ok
+test storage::log_store::tests::round_trip_preserves_all_fields ... ok
+test runtime::tests::regression_silent_on_matching_run ... ok
 test storage::run_store::tests::exit_reason_classification_matrix ... ok
-test exit_classify::tests::read_recent_kernel_log_never_panics ... ok
-test platform::linux_proc::tests::collect_all_processes_on_linux ... ok
-test telemetry::accumulator::tests::average_and_peak_tokens_per_sec_are_correct ... ok
+test storage::run_store::tests::list_models_returns_all_keys_sorted ... ok
+test runtime::tests::runtime_starts_in_configured_dry_run ... ok
+test storage::run_store::tests::baseline_handles_edge_window_sizes ... ok
 test telemetry::accumulator::tests::empty_pid_returns_none ... ok
-test storage::run_store::tests::record_file_exists_for_every_index_entry ... ok
-test telemetry::accumulator::tests::energy_zero_for_single_sample ... ok
-test telemetry::accumulator::tests::forget_removes_stats ... ok
+test telemetry::accumulator::tests::average_and_peak_tokens_per_sec_are_correct ... ok
+test runtime::tests::toggle_dry_run_flips_state_and_manual_killer ... ok
 test telemetry::accumulator::tests::gpu_watts_average_and_peak ... ok
+test telemetry::accumulator::tests::forget_removes_stats ... ok
+test storage::run_store::tests::corrupted_index_line_is_skipped_not_fatal ... ok
+test telemetry::accumulator::tests::energy_zero_for_single_sample ... ok
 test telemetry::accumulator::tests::impossibly_large_tps_is_rejected ... ok
-test telemetry::accumulator::tests::latency_p99_handles_skewed_distribution ... ok
-test telemetry::accumulator::tests::nan_tps_is_skipped_not_recorded ... ok
-test telemetry::accumulator::tests::model_name_hint_propagates ... ok
 test telemetry::accumulator::tests::negative_tps_is_rejected ... ok
-test telemetry::accumulator::tests::pids_do_not_cross_contaminate ... ok
+test telemetry::accumulator::tests::latency_p99_handles_skewed_distribution ... ok
 test telemetry::cold_load::tests::forget_resets_state ... ok
+test telemetry::accumulator::tests::nan_tps_is_skipped_not_recorded ... ok
+test telemetry::accumulator::tests::pids_do_not_cross_contaminate ... ok
+test telemetry::accumulator::tests::model_name_hint_propagates ... ok
 test telemetry::cold_load::tests::separate_pids_do_not_share_state ... ok
 test telemetry::cold_load::tests::detects_load_then_plateau ... ok
-test fingerprint::tests::middle_only_change_collides_documented ... ok
-test fingerprint::tests::modified_tail_byte_changes_fingerprint ... ok
 test telemetry::cold_load::tests::small_reads_never_finalise ... ok
-test storage::run_store::tests::baseline_handles_edge_window_sizes ... ok
-test runtime::tests::regression_silent_on_matching_run ... ok
-test storage::run_store::tests::corrupted_index_line_is_skipped_not_fatal ... ok
-test runtime::tests::regression_sink_caps_at_configured_size ... ok
 test telemetry::exporter::tests::empty_snapshot_still_emits_zero_processes_series ... ok
+test fingerprint::tests::modified_tail_byte_changes_fingerprint ... ok
 test telemetry::exporter::tests::fmt_f32_handles_non_finite ... ok
 test telemetry::exporter::tests::label_escape_handles_quotes_and_backslashes ... ok
 test telemetry::exporter::tests::render_emits_expected_families ... ok
-test telemetry::dispatcher::tests::dispatcher_records_frames_from_applicable_source ... ok
-test telemetry::dispatcher::tests::dispatcher_survives_panicking_sampler ... ok
+test telemetry::exporter::tests::rendered_output_passes_prometheus_lint ... ok
+test storage::run_store::tests::recent_returns_newest_first ... ok
+test storage::run_store::tests::record_file_exists_for_every_index_entry ... ok
+test telemetry::exporter::tests::unknown_path_returns_404 ... ok
+test telemetry::exporter::tests::end_to_end_serve_metrics ... ok
 test telemetry::rapl::tests::first_read_returns_none ... ok
-test telemetry::rapl::tests::reader_constructs_even_without_rapl ... ok
 test telemetry::samplers::llama_cpp_server::tests::applies_to_recognises_llama_server ... ok
 test telemetry::samplers::llama_cpp_server::tests::applies_to_rejects_non_llama_server ... ok
 test telemetry::samplers::llama_cpp_server::tests::compute_frame_derives_tps_from_counter_delta ... ok
@@ -246,43 +248,45 @@ test telemetry::samplers::llama_cpp_server::tests::compute_frame_no_tps_without_
 test telemetry::samplers::llama_cpp_server::tests::compute_frame_uses_direct_gauge_when_present ... ok
 test telemetry::samplers::llama_cpp_server::tests::discover_port_default_is_8080 ... ok
 test telemetry::samplers::llama_cpp_server::tests::discover_port_handles_both_flag_forms ... ok
-test telemetry::samplers::llama_cpp_server::tests::end_to_end_scrape_through_local_server ... ok
-test telemetry::samplers::ollama_api::tests::applies_to_recognises_ollama_serve ... ok
-test telemetry::samplers::ollama_api::tests::applies_to_rejects_non_ollama ... ok
-test telemetry::samplers::ollama_api::tests::applies_to_via_env_var ... ok
+test telemetry::dispatcher::tests::dispatcher_records_frames_from_applicable_source ... ok
+test telemetry::dispatcher::tests::dispatcher_survives_panicking_sampler ... ok
+test telemetry::dispatcher::tests::forget_drops_per_pid_state ... ok
+test telemetry::rapl::tests::delta_math_handles_wraparound ... ok
 test telemetry::samplers::ollama_api::tests::discover_port_default ... ok
+test telemetry::samplers::ollama_api::tests::applies_to_via_env_var ... ok
+test telemetry::samplers::ollama_api::tests::applies_to_rejects_non_ollama ... ok
 test telemetry::samplers::ollama_api::tests::discover_port_from_env ... ok
+test telemetry::samplers::ollama_api::tests::applies_to_recognises_ollama_serve ... ok
 test telemetry::samplers::ollama_api::tests::discover_port_from_host_flag ... ok
-test telemetry::samplers::ollama_api::tests::end_to_end_scrape_emits_model_hint ... ok
 test telemetry::samplers::ollama_api::tests::parse_loaded_model_extracts_first ... ok
 test telemetry::samplers::ollama_api::tests::parse_loaded_model_returns_none_when_empty ... ok
-test telemetry::samplers::stdout_parser::tests::batch_extract_over_many_lines ... ok
-test telemetry::rapl::tests::delta_math_handles_wraparound ... ok
+test telemetry::samplers::ollama_api::tests::end_to_end_scrape_emits_model_hint ... ok
 test telemetry::samplers::stdout_parser::tests::line_to_frame_returns_none_on_no_match ... ok
-test telemetry::samplers::stdout_parser::tests::line_to_frame_populates_telemetry_fields ... ok
-test telemetry::samplers::stdout_parser::tests::strict_parser_does_not_match_partial_lines ... ok
 test telemetry::samplers::stdout_parser::tests::llama_cpp_eval_time_line_yields_tps ... ok
+test telemetry::samplers::stdout_parser::tests::strict_parser_does_not_match_partial_lines ... ok
+test telemetry::samplers::stdout_parser::tests::line_to_frame_populates_telemetry_fields ... ok
 test telemetry::samplers::stdout_parser::tests::unrelated_line_yields_nothing ... ok
 test telemetry::samplers::stdout_parser::tests::ultralytics_speed_line_yields_latency_and_fps ... ok
 test telemetry::samplers::stdout_parser::tests::vllm_avg_throughput_line_yields_tps ... ok
-test telemetry::samplers::vllm_prometheus::tests::applies_to_rejects_non_vllm ... ok
-test telemetry::samplers::vllm_prometheus::tests::applies_to_recognises_vllm_serve ... ok
+test telemetry::samplers::stdout_parser::tests::batch_extract_over_many_lines ... ok
 test telemetry::samplers::vllm_prometheus::tests::discover_port_falls_back_to_default ... ok
+test telemetry::samplers::vllm_prometheus::tests::applies_to_rejects_non_vllm ... ok
 test telemetry::samplers::vllm_prometheus::tests::applies_to_via_env_var ... ok
+test telemetry::samplers::vllm_prometheus::tests::applies_to_recognises_vllm_serve ... ok
 test telemetry::samplers::vllm_prometheus::tests::discover_port_finds_flag_eq_form ... ok
 test telemetry::samplers::vllm_prometheus::tests::discover_port_finds_flag_value_form ... ok
 test telemetry::samplers::vllm_prometheus::tests::endpoint_for_targets_loopback ... ok
 test telemetry::samplers::vllm_prometheus::tests::frame_from_metrics_maps_vllm_names ... ok
 test telemetry::samplers::vllm_prometheus::tests::parse_metrics_extracts_named_lines ... ok
 test telemetry::source::tests::permanent_error_carries_message ... ok
-test storage::run_store::tests::list_models_returns_all_keys_sorted ... ok
-test storage::run_store::tests::recent_returns_newest_first ... ok
+test telemetry::vision_probe::tests::fps_math_simple_window ... ok
+test fingerprint::tests::middle_only_change_collides_documented ... ok
+test telemetry::rapl::tests::reader_constructs_even_without_rapl ... ok
 test ui::app::tests::arm_then_confirm_kill_clears_arm ... ok
+test telemetry::source::tests::stub_source_returns_telemetry ... ok
 test ui::app::tests::cancel_filter_clears_text_and_returns_to_normal ... ok
 test ui::app::tests::filter_substring_narrows_visible ... ok
 test ui::app::tests::focus_change_disarms_kill_for_safety ... ok
-test runtime::tests::regression_fires_on_metric_blowup ... ok
-test telemetry::source::tests::stub_source_returns_telemetry ... ok
 test ui::app::tests::focus_cycles_forward_and_backward ... ok
 test ui::app::tests::quit_request_propagates ... ok
 test ui::app::tests::registry_visible_only_includes_ai ... ok
@@ -291,57 +295,68 @@ test ui::app::tests::select_prev_does_not_underflow ... ok
 test ui::input::tests::ctrl_c_quits_even_in_filter_mode ... ok
 test ui::input::tests::d_toggles_dry_run ... ok
 test ui::input::tests::enter_commits_filter ... ok
-test telemetry::samplers::vllm_prometheus::tests::end_to_end_scrape_through_local_server ... ok
 test ui::input::tests::esc_cancels_filter ... ok
 test ui::input::tests::k_triggers_confirm_kill ... ok
 test ui::input::tests::printable_char_in_filter_mode_appends ... ok
 test ui::input::tests::q_quits_in_normal_mode ... ok
 test ui::input::tests::slash_starts_filter ... ok
-test telemetry::exporter::tests::unknown_path_returns_404 ... ok
 test ui::input::tests::tab_cycles_focus_forward ... ok
+test telemetry::samplers::llama_cpp_server::tests::end_to_end_scrape_through_local_server ... ok
+test telemetry::samplers::vllm_prometheus::tests::end_to_end_scrape_through_local_server ... ok
+test platform::linux_proc::tests::collect_all_processes_on_linux ... ok
 test telemetry::dispatcher::tests::dispatcher_skips_non_applicable_source ... ok
-test telemetry::dispatcher::tests::forget_drops_per_pid_state ... ok
-test telemetry::exporter::tests::end_to_end_serve_metrics ... ok
 test telemetry::rapl::tests::delta_math_handles_normal_increment ... ok
 test storage::run_store::tests::appends_then_reopens_with_full_index ... ok
 test telemetry::dispatcher::tests::dispatcher_timeout_protects_against_slow_samplers ... ok
+test telemetry::vision_probe::tests::idle_client_is_disconnected ... ok
 test platform::tests::collect_system_metrics_succeeds ... ok
 test platform::tests::collect_snapshot_succeeds ... ok
 test runtime::tests::tick_populates_state ... ok
+test telemetry::vision_probe::tests::malformed_lines_do_not_break_the_stream ... ok
 test fingerprint::tests::cache_invalidates_on_mtime_change ... ok
+test telemetry::vision_probe::tests::one_hundred_frames_yields_fps_near_100 ... ok
 
-test result: ok. 290 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.02s
+test result: ok. 299 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.54s
 
-     Running unittests src/main.rs (target/debug/deps/edge_monitor-42b103e47074773d)
+     Running unittests src/main.rs (target/debug/deps/edge_monitor-f9539b074aa9b74b)
 
 running 0 tests
 
 test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
-     Running tests/governor_properties.rs (target/debug/deps/governor_properties-9b94a01821be4e75)
+     Running tests/governor_pid_reuse.rs (target/debug/deps/governor_pid_reuse-ed278483157ce948)
+
+running 3 tests
+test audit_log_records_pid_reused_aborted ... ok
+test pidfd_path_completes_kill_when_target_still_alive ... ok
+test sigkill_aborted_when_target_already_exited ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+     Running tests/governor_properties.rs (target/debug/deps/governor_properties-29ef03caccdcaa67)
 
 running 2 tests
 test rate_limit_is_a_hard_ceiling ... ok
 test allowlisted_processes_never_killed ... ok
 
-test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
 
-     Running tests/history_cli.rs (target/debug/deps/history_cli-c04ddb8196aeb8d1)
+     Running tests/history_cli.rs (target/debug/deps/history_cli-19577418559899dc)
 
 running 5 tests
-test empty_store_prints_no_history_message ... ok
-test json_output_parses_as_record_array_for_a_model ... ok
 test appended_record_shows_up_in_history_text ... ok
 test appended_record_shows_up_in_model_summary_table ... ok
+test empty_store_prints_no_history_message ... ok
+test json_output_parses_as_record_array_for_a_model ... ok
 test json_output_parses_as_summary_array_when_no_model ... ok
 
-test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
 
-     Running tests/pipeline_end_to_end.rs (target/debug/deps/pipeline_end_to_end-ac2d88ba36e53d6b)
+     Running tests/pipeline_end_to_end.rs (target/debug/deps/pipeline_end_to_end-3c90bc6ee4188fd4)
 
 running 3 tests
-test ai_process_with_model_path_is_tracked_and_killed_in_enforce_mode ... ok
 test exited_ai_process_generates_summary_with_resource_stats ... ok
+test ai_process_with_model_path_is_tracked_and_killed_in_enforce_mode ... ok
 test persistent_summary_round_trips_through_log_store ... ok
 
 test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s

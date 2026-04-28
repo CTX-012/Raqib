@@ -1,3 +1,15 @@
+47cb990	feat(metrics): cold-start vs steady-state separation (latest.md Tier 3.2)
+ 6 files changed, 233 insertions(+), 10 deletions(-)
+
+a532928	feat(telemetry): vision probe Unix socket (latest.md Tier 3.6)
+ 5 files changed, 375 insertions(+)
+
+0e3b518	feat(compare): side-by-side model comparison CLI (latest.md Tier 3.7)
+ 9 files changed, 498 insertions(+), 3 deletions(-)
+
+95baf8b	feat(exit-classify): "Why did this die?" with dmesg + stderr (Tier 3.5)
+ 39 files changed, 2440 insertions(+), 27 deletions(-)
+
 2ccbe73	feat(fingerprint): partial-hash model fingerprinting (latest.md Tier 3.1)
  6 files changed, 1336 insertions(+), 3 deletions(-)
 

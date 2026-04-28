@@ -15,6 +15,7 @@ pub mod analysis;
 pub mod classifier;
 pub mod compare;
 pub mod config;
+pub mod exec_wrapper;
 pub mod exit_classify;
 pub mod fingerprint;
 pub mod governor;

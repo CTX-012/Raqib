@@ -20,6 +20,7 @@ use tracing_subscriber::EnvFilter;
 
 use edge_monitor::compare;
 use edge_monitor::config::Config;
+use edge_monitor::exec_wrapper;
 use edge_monitor::history;
 use edge_monitor::runtime::{Runtime, RuntimeState};
 use edge_monitor::ui;
@@ -91,6 +92,20 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// Run a workload under instrumentation: forks COMMAND with
+    /// piped stdio, tees the output to your terminal and to the
+    /// stdout regex parser, then writes a `RunRecord` on exit
+    /// (latest.md Tier 1.2d).
+    Exec {
+        /// Optional label for the model_name field of the run record.
+        /// Defaults to argv[0] of the wrapped command.
+        #[arg(long)]
+        name: Option<String>,
+        /// Command to run. Use `--` to separate edge_monitor flags
+        /// from the wrapped command.
+        #[arg(required = true, last = true)]
+        command: Vec<String>,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -108,6 +123,15 @@ fn main() -> anyhow::Result<()> {
             }
             Commands::Compare { models, runs, json } => {
                 compare::run_compare(models, runs, json, &config)
+            }
+            Commands::Exec { name, command } => {
+                // exec needs an async runtime — spin one up locally.
+                let rt = tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(2)
+                    .enable_all()
+                    .build()?;
+                let code = rt.block_on(exec_wrapper::run_exec(name, command, &config))?;
+                std::process::exit(code);
             }
         };
     }
@@ -225,9 +249,16 @@ fn init_tracing(level: &str, format: &str) -> anyhow::Result<()> {
     // | jq` would otherwise see the tracing log first and choke.
     let env_filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(lvl.to_string()));
+    // ANSI escape codes are great in an interactive terminal but break
+    // grep / jq / log shippers reading piped stderr — they end up
+    // splitting tokens like `tick=1` across `tick`, an SGR sequence,
+    // and `=1`. Auto-detect via IsTerminal so live operators still get
+    // colour while CI / headless runs stay machine-readable.
+    let stderr_is_tty = std::io::IsTerminal::is_terminal(&std::io::stderr());
     let builder = tracing_subscriber::fmt()
         .with_env_filter(env_filter)
         .with_target(false)
+        .with_ansi(stderr_is_tty)
         .with_writer(std::io::stderr);
     match format {
         "json" => builder.json().flatten_event(true).init(),

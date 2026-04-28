@@ -4,13 +4,15 @@ Usage: edge_monitor [OPTIONS] [COMMAND]
 
 Commands:
   history  Show recent runs from the typed run store (latest.md Tier 1.1)
+  compare  Side-by-side baseline comparison across one or more models (latest.md Tier 3.7)
   help     Print this message or the help of the given subcommand(s)
 
 Options:
-      --config <PATH>          Path to TOML config (defaults to ./edge_monitor.toml if present)
-      --dry-run                Force dry-run regardless of config (overrides policy.enforce)
-      --no-ui                  Run without TUI; tick once per interval and log to stderr
-      --ticks <TICKS>          Headless tick budget. Useful in CI / smoke tests. 0 = run until killed [default: 0]
-      --log-level <LOG_LEVEL>  Log level: trace, debug, info, warn, error [default: info]
-  -h, --help                   Print help
-  -V, --version                Print version
+      --config <PATH>            Path to TOML config (defaults to ./edge_monitor.toml if present)
+      --dry-run                  Force dry-run regardless of config (overrides policy.enforce)
+      --no-ui                    Run without TUI; tick once per interval and log to stderr
+      --ticks <TICKS>            Headless tick budget. Useful in CI / smoke tests. 0 = run until killed [default: 0]
+      --log-level <LOG_LEVEL>    Log level: trace, debug, info, warn, error [default: info]
+      --log-format <LOG_FORMAT>  Log output format: "human" (default, K=V text) or "json" (one JSON object per line, parseable by `jq`). Use `json` for headless / pipeline-style runs where downstream tooling expects a stable schema (TEST.md S.2.3) [default: human] [possible values: human, json]
+  -h, --help                     Print help
+  -V, --version                  Print version

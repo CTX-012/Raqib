@@ -1,8 +1,8 @@
-[2m2026-04-28T10:02:50.891830Z[0m [32m INFO[0m no config file; using built-in defaults
-[2m2026-04-28T10:02:50.892057Z[0m [32m INFO[0m DRY-RUN mode — no signals will be sent.
-[2m2026-04-28T10:02:51.072909Z[0m [32m INFO[0m tick [3mtick[0m[2m=[0m1 [3mai_processes[0m[2m=[0m0 [3mexits[0m[2m=[0m0
-[2m2026-04-28T10:02:51.917179Z[0m [32m INFO[0m tick [3mtick[0m[2m=[0m2 [3mai_processes[0m[2m=[0m0 [3mexits[0m[2m=[0m0
-[2m2026-04-28T10:02:52.922995Z[0m [32m INFO[0m tick [3mtick[0m[2m=[0m3 [3mai_processes[0m[2m=[0m0 [3mexits[0m[2m=[0m0
-[2m2026-04-28T10:02:53.916919Z[0m [32m INFO[0m tick [3mtick[0m[2m=[0m4 [3mai_processes[0m[2m=[0m0 [3mexits[0m[2m=[0m0
-[2m2026-04-28T10:02:54.919949Z[0m [32m INFO[0m tick [3mtick[0m[2m=[0m5 [3mai_processes[0m[2m=[0m0 [3mexits[0m[2m=[0m0
-[2m2026-04-28T10:02:54.919999Z[0m [32m INFO[0m tick budget reached; exiting [3mticks[0m[2m=[0m5
+[2m2026-04-28T10:26:02.337797Z[0m [32m INFO[0m no config file; using built-in defaults
+[2m2026-04-28T10:26:02.337908Z[0m [32m INFO[0m DRY-RUN mode — no signals will be sent.
+[2m2026-04-28T10:26:02.541546Z[0m [32m INFO[0m tick [3mtick[0m[2m=[0m1 [3mai_processes[0m[2m=[0m0 [3mexits[0m[2m=[0m0
+[2m2026-04-28T10:26:03.368236Z[0m [32m INFO[0m tick [3mtick[0m[2m=[0m2 [3mai_processes[0m[2m=[0m0 [3mexits[0m[2m=[0m1
+[2m2026-04-28T10:26:04.361250Z[0m [32m INFO[0m tick [3mtick[0m[2m=[0m3 [3mai_processes[0m[2m=[0m0 [3mexits[0m[2m=[0m1
+[2m2026-04-28T10:26:05.361471Z[0m [32m INFO[0m tick [3mtick[0m[2m=[0m4 [3mai_processes[0m[2m=[0m0 [3mexits[0m[2m=[0m0
+[2m2026-04-28T10:26:06.362895Z[0m [32m INFO[0m tick [3mtick[0m[2m=[0m5 [3mai_processes[0m[2m=[0m0 [3mexits[0m[2m=[0m0
+[2m2026-04-28T10:26:06.362944Z[0m [32m INFO[0m tick budget reached; exiting [3mticks[0m[2m=[0m5

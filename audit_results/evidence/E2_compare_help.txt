@@ -1,0 +1,11 @@
+Side-by-side baseline comparison across one or more models (latest.md Tier 3.7)
+
+Usage: edge_monitor compare [OPTIONS] <MODELS>...
+
+Arguments:
+  <MODELS>...  Models to compare. At least one. Use `edge_monitor history` (no args) to list known models
+
+Options:
+      --runs <RUNS>  Number of recent runs per model to fold into the baseline [default: 10]
+      --json         Emit JSON instead of a human-readable table
+  -h, --help         Print help

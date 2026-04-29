@@ -53,6 +53,26 @@ fn re_vllm_tps() -> &'static Regex {
     })
 }
 
+/// Ollama `--verbose` summary block — the generation throughput we care
+/// about lives on a line that begins with `eval rate:` (with the
+/// optional leading whitespace `^\s*` keeps the parser tolerant of log
+/// adapters). Critical that the pattern NOT match `prompt eval rate:`,
+/// which is the prompt-ingestion rate (a different, higher number) —
+/// the `^\s*eval` anchor refuses any line where another word precedes
+/// `eval`. Confirmed against three real `ollama run --verbose` trials
+/// (Tester 2 V1 evidence, BUILDER_STATUS.md → Tester 2 Findings):
+/// trial 1 = 6.97 tok/s, trial 2 = 2.82, trial 3 = 2.34, with prompt
+/// eval rate = 1.46 / 2.02 / 60.37 respectively — different metrics, so
+/// the anchoring matters.
+fn re_ollama_eval_rate() -> &'static Regex {
+    static R: OnceLock<Regex> = OnceLock::new();
+    R.get_or_init(|| {
+        // ok: expect — static regex, compile-time-constant pattern.
+        Regex::new(r"^\s*eval rate:\s+([0-9]+(?:\.[0-9]+)?)\s+tokens?/s\b")
+            .expect("ollama_eval_rate regex must compile")
+    })
+}
+
 /// Ultralytics `Speed: 1.2ms preprocess, 8.5ms inference, 0.3ms postprocess`.
 /// We surface the *inference* number as `latency_ms`; downstream callers
 /// derive fps = 1000 / total when they have all three components.
@@ -81,6 +101,14 @@ pub fn parse_line(line: &str) -> Vec<ParsedMetric> {
         });
     }
     if let Some(c) = re_vllm_tps().captures(line)
+        && let Some(v) = c.get(1).and_then(|m| m.as_str().parse::<f32>().ok())
+    {
+        out.push(ParsedMetric {
+            kind: MetricKind::TokensPerSec,
+            value: v,
+        });
+    }
+    if let Some(c) = re_ollama_eval_rate().captures(line)
         && let Some(v) = c.get(1).and_then(|m| m.as_str().parse::<f32>().ok())
     {
         out.push(ParsedMetric {
@@ -196,6 +224,99 @@ mod tests {
     #[test]
     fn line_to_frame_returns_none_on_no_match() {
         assert!(line_to_frame(1, "noise").is_none());
+    }
+
+    /// Tester 2 V1 fixture — captured from `ollama run --verbose phi3
+    /// "Explain quicksort in 200 words."` on 2026-04-29
+    /// (`/tmp/v1_trial_{1,2,3}.out`). Embedded as static lines so the
+    /// test runs without an Ollama install. Each trial's
+    /// `eval rate:` line is the generation throughput; the
+    /// `prompt eval rate:` line is the prompt-ingestion rate (a
+    /// different metric) and MUST NOT be parsed as tokens/sec.
+    #[test]
+    fn ollama_eval_rate_extracts_tps_and_ignores_prompt_eval_rate() {
+        let trial_1 = [
+            "total duration:       2m47.084s",
+            "load duration:        1m38.918s",
+            "prompt eval count:    20 token(s)",
+            "prompt eval duration: 13.727s",
+            "prompt eval rate:     1.46 tokens/s",
+            "eval count:           474 token(s)",
+            "eval duration:        1m8.011s",
+            "eval rate:            6.97 tokens/s",
+        ];
+        let trial_2 = [
+            "prompt eval rate:     2.02 tokens/s",
+            "eval rate:            2.82 tokens/s",
+        ];
+        let trial_3 = [
+            "prompt eval rate:     60.37 tokens/s",
+            "eval rate:            2.34 tokens/s",
+        ];
+
+        let extract = |lines: &[&str]| -> Vec<f32> {
+            let mut tps = Vec::new();
+            for l in lines {
+                for m in parse_line(l) {
+                    if m.kind == MetricKind::TokensPerSec {
+                        tps.push(m.value);
+                    }
+                }
+            }
+            tps
+        };
+
+        let t1 = extract(&trial_1);
+        assert_eq!(
+            t1.len(),
+            1,
+            "trial 1 should yield exactly one tok/s, got {:?}",
+            t1
+        );
+        assert!((t1[0] - 6.97).abs() < 1e-3, "trial 1: got {}", t1[0]);
+
+        let t2 = extract(&trial_2);
+        assert_eq!(t2.len(), 1, "trial 2 should yield exactly one tok/s, got {:?}", t2);
+        assert!((t2[0] - 2.82).abs() < 1e-3, "trial 2: got {}", t2[0]);
+
+        // Trial 3's prompt eval rate (60.37) is HIGHER than its eval
+        // rate (2.34). If the regex ever loosens to match prompt eval
+        // rate by accident, this assertion catches it loudly.
+        let t3 = extract(&trial_3);
+        assert_eq!(t3.len(), 1, "trial 3 should yield exactly one tok/s, got {:?}", t3);
+        assert!(
+            (t3[0] - 2.34).abs() < 1e-3,
+            "trial 3: got {} — if this is 60.37, the regex matched prompt eval rate",
+            t3[0]
+        );
+    }
+
+    /// Cross-runtime safety: the new Ollama regex must not poach
+    /// existing vLLM / llama.cpp lines. Their parsers stay strict and
+    /// own their formats unambiguously.
+    #[test]
+    fn ollama_regex_does_not_match_vllm_or_llama_cpp_lines() {
+        let llama = "llama_print_timings:        eval time =    1234.56 ms /   140 runs   (    8.81 ms per token,   113.42 tokens per second)";
+        let vllm = "INFO 2026-04-28 ... Avg generation throughput: 37.4 tokens/s, Avg prompt throughput: 0.0 tokens/s.";
+
+        // Each of these lines should still produce exactly one
+        // tokens_per_sec — from the runtime's own parser, not from the
+        // Ollama regex piggybacking on the same line.
+        let llama_metrics: Vec<f32> = parse_line(llama)
+            .into_iter()
+            .filter(|m| m.kind == MetricKind::TokensPerSec)
+            .map(|m| m.value)
+            .collect();
+        assert_eq!(llama_metrics.len(), 1);
+        assert!((llama_metrics[0] - 113.42).abs() < 1e-3);
+
+        let vllm_metrics: Vec<f32> = parse_line(vllm)
+            .into_iter()
+            .filter(|m| m.kind == MetricKind::TokensPerSec)
+            .map(|m| m.value)
+            .collect();
+        assert_eq!(vllm_metrics.len(), 1);
+        assert!((vllm_metrics[0] - 37.4).abs() < 1e-3);
     }
 
     /// Spec test from latest.md 1.2d: "test fixture with 50 lines of

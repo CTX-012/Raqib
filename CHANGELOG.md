@@ -353,6 +353,25 @@ once `v1.0.0` is tagged. Until then, minor versions may include breaking changes
 - Dual licensing under MIT OR Apache-2.0.
 
 ### Fixed
+- **V1 (S1) — Ollama tokens/sec now extracted via stdout parser.**
+  Tester 2's V1 ground-truth check found that `edge_monitor`
+  reported no `tokens_per_sec_avg` for any of three real
+  `ollama run --verbose phi3` trials, even though Ollama itself
+  printed `eval rate: 6.97 tokens/s` (etc) on stdout. Root cause:
+  `stdout_parser.rs` had regexes for llama.cpp and vLLM tokens/sec
+  output but no Ollama pattern, so the design's documented Tier 1.2c
+  fallthrough ("Ollama tok/s falls through to stdout parsing")
+  dead-ended. New regex
+  `r"^\s*eval rate:\s+([0-9]+(?:\.[0-9]+)?)\s+tokens?/s\b"` matches
+  Ollama's generation rate while explicitly NOT matching
+  `prompt eval rate:` (a different, often higher number — trial 3
+  had `prompt eval rate = 60.37` vs `eval rate = 2.34`). Verified
+  against T2's captured trial outputs at `/tmp/v1_trial_{1,2,3}.out`
+  by `scripts/manual/ollama_tps_smoke.sh`. Two new unit tests guard
+  the fix: one asserts the three trial values parse correctly, one
+  asserts the new regex does not poach existing vLLM / llama.cpp
+  lines.
+
 - **S.0.8 — SIGTERM clean shutdown re-verified and patched.** The
   audit flagged this as `needs re-verification — no commit message
   references the ctrlc termination feature`, and the audit was right

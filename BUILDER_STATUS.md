@@ -14,10 +14,12 @@ to history) and via reading concurrent worktrees.
 ## Active Claims
 
 - builder_id: builder-A
-  scope: UX rename pass → [A-6] in Ready for Test.
+  scope: TUI detail-mode toggle → [A-7] in Ready for Test (the
+         deferred half of [A-6]'s UX work).
          Earlier slices: S.3 → [A-1], S.2 → [A-2], S.0.8 → [A-3],
-         Tier 3.4 → [A-4] (all T2-PASS), V1 Ollama tok/s → [A-5].
-  branch: audit/2026-04-29 (all six A-* commits land here).
+         Tier 3.4 → [A-4] (all T2-PASS), V1 Ollama tok/s → [A-5],
+         UX rename pass → [A-6].
+  branch: audit/2026-04-29 (all seven A-* commits land here).
   finished: 2026-04-29
 
 - builder_id: builder-C
@@ -799,12 +801,88 @@ to history) and via reading concurrent worktrees.
   rule guard + 3 governor_pid_reuse + 2 governor_properties + 5
   history_cli + 2 log_format + 3 pipeline + 1 sigterm_clean_shutdown).
   Tier 3.4 moved out of "Remaining gaps" since `[A-4]` landed the
-  data path; only the per-row history rendering is deferred (see
-  pushback in Cross-builder requests below). The two `[B-4]`
+  data path; only the per-row history rendering was deferred at
+  the time — now landed via `[B-7]` below. The two `[B-4]`
   wiring gaps (vision probe socket, exec→cold_load) are now also
   documented under "Remaining gaps for v0.1.0" alongside T2's V3
   S.0.7 visibility finding. Stdout parser description picked up
   Ollama `eval rate:` regex from `[A-5]`.
+
+### [B-6] `[regression] baseline_strategy` + `drop_outliers` wired end-to-end
+- Commit SHA: 25665b86eb7fed4e89a85e029f7014a63616246c
+- Files changed: src/config.rs, src/runtime.rs,
+  edge_monitor.toml.example, docs/configuration.md
+- Verification command (what the tester should run):
+  ```
+  cargo test --release --lib config::tests \
+    && ./target/release/edge_monitor --config edge_monitor.toml.example \
+        --no-ui --ticks 1 2>&1 | tail -4
+  ```
+- Expected output (last 10 lines):
+  ```
+  test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; ...
+  ... INFO loading config path=edge_monitor.toml.example
+  ... INFO DRY-RUN mode — no signals will be sent.
+  ... INFO tick tick=1 ai_processes=... exits=0
+  ... INFO tick budget reached; exiting ticks=1
+  ```
+- Builder note: closes the wiring gap previously filed in this
+  section's pushback. `[C-5]` landed the typed
+  `BaselineStrategy::{Mean,Median}` enum and the
+  `from_records_with(strategy, drop_outliers)` API, but
+  `runtime::check_regressions` was hardcoding `Mean` and `false`;
+  `RegressionConfig` had neither field. This commit:
+  * Adds `baseline_strategy: String` (default `"mean"`) and
+    `drop_outliers: bool` (default `false`) to
+    `RegressionConfig`. `validate()` rejects any strategy other
+    than `"mean"`/`"median"` (case-insensitive) at load time
+    with a message naming the offending value.
+  * `RegressionConfig::strategy()` resolves the string into the
+    typed enum.
+  * `runtime::check_regressions` now reads `cfg.strategy()` and
+    `cfg.drop_outliers` instead of the hardcoded constants, so
+    `Baseline.strategy` / `Baseline.outlier_run_ids` reflect the
+    user's choice.
+  * 4 new unit tests pin the matrix: default-is-mean,
+    median-resolves, case-insensitive normalisation,
+    unknown-strategy-rejected.
+  * `edge_monitor.toml.example` and `docs/configuration.md` now
+    document both fields with their defaults and when median /
+    drop_outliers is the right call.
+  Authorised override of the brief's "no `src/` edits" rule (user
+  said "do it now"); resolves the earlier `[B-?]` pushback note.
+
+### [B-7] Tier 3.4 history viewer renders concurrent / tok-per-req
+- Commit SHA: e3a22da128e5b2e015c2d183a5e5a504b19c86ad
+- Files changed: src/history.rs
+- Verification command (what the tester should run):
+  ```
+  cargo test --release --lib history::tests::tier_34
+  ```
+- Expected output (last 10 lines):
+  ```
+  test history::tests::tier_34_format_concurrent_line_falls_back_to_peak_divisor ... ok
+  test history::tests::tier_34_format_concurrent_line_uses_avg_when_present ... ok
+  test history::tests::tier_34_no_telemetry_renders_no_extra_line ... ok
+  test history::tests::tier_34_render_runs_emits_concurrent_line_under_row ... ok
+  test history::tests::tier_34_waiting_peak_appended_when_nonzero ... ok
+  test history::tests::tier_34_zero_peak_skips_per_request_divisor ... ok
+  test result: ok. 6 passed; 0 failed; ...
+  ```
+- Builder note: closes Builder A's `[A-4]` cross-builder request
+  for the per-row text rendering called out by the Tier 3.4 spec
+  example
+  `#14  serving 8 concurrent (peak)  →  20.1 tok/s/req · 161 tok/s
+  aggregate`. `format_concurrent_line()` is `pub(crate)` so future
+  TUI overlays can reuse it. Vision / Ollama / llama.cpp without
+  busy-slot exposure render as before (no extra line) — the table
+  stays compact for non-LLM history. Per-request math guards
+  `concurrent_avg > 0` (and falls back to peak when avg missing,
+  naming the divisor in the rendered text) and skips entirely on
+  peak=0 to avoid emitting Inf/NaN. Waiting peak surfaces only as
+  a non-zero suffix. clippy --all-targets -- -D warnings clean;
+  tests/history_cli.rs integration suite still green (5/5).
+  Authorised override of the brief's "no `src/` edits" rule.
 
 ## Cross-builder requests
 
@@ -824,22 +902,15 @@ to history) and via reading concurrent worktrees.
   asserting that the three secondary panels are absent until F2 is
   pressed.
 
-- **From Builder A → Builder B: history viewer should show the new
-  Tier 3.4 numbers.** **Builder B push-back, 2026-04-29:** my brief
-  enumerates exactly which files I may edit (`CHANGELOG.md`,
-  `FEATURES.md`, `edge_monitor.toml.example`, `docs/configuration.md`,
-  `scripts/manual/*.sh`, `BUILDER_STATUS.md`) and explicitly
-  forbids any `src/` file: *"You may NOT edit … any `src/` file. If
-  you find a documentation claim that doesn't match the code, file
-  it as a `## Cross-builder request` in `BUILDER_STATUS.md` — do
-  not 'fix' the code yourself."* `src/history.rs` is therefore
-  out of scope for Builder B. Either Tier 3.4 [A-4] absorbs the
-  rendering or a new claim authorised to edit `src/` picks it up.
-  `FEATURES.md` already names the pending rendering as the only
-  loose end on Tier 3.4 (refreshed in `[B-5]`). Until source-edit
-  authorisation is granted Builder B will not pick this up; the
-  earlier "acknowledged, will land as `[B-?]`" note further down
-  in this section is hereby withdrawn.
+- **(Resolved)** From Builder A → Builder B: history viewer should
+  show the new Tier 3.4 numbers. **Resolved by `[B-7]`** at SHA
+  `e3a22da` after the user explicitly authorised a one-time
+  override of the brief's "no `src/` edits" rule. Per-row second
+  line now reads
+  `serving N concurrent (peak; M.M avg)  →  X.X tok/s/req · Y.Y
+  tok/s aggregate[ · queue peak Q]` exactly as the Tier 3.4 spec
+  example called out. Six new unit tests pin the matrix. See
+  `[B-7]` entry above for verification command.
 
 - **Re: Builder A note about a failing prune test.** Builder C now
   owns and has resolved that path. `recent()` was sorting by append
@@ -860,25 +931,14 @@ to history) and via reading concurrent worktrees.
   either implement `PowerConfig` so the example matches the spec, or
   amend latest.md so the spec matches the code.
 
-- **From Builder B → Builder C: C-5 baseline_strategy example —
-  blocked, not landable as docs alone.** Re-checked HEAD after
-  `[C-5]`'s sign-off: `BaselineStrategy::{Mean, Median}` is exposed
-  by `src/analysis/compare.rs` and `BaselineMetrics::from_records_with`
-  takes both the strategy and a `drop_outliers: bool`, but
-  `src/runtime.rs` line 747 hardcodes
-  `let strategy = BaselineStrategy::Mean;` and `drop_outliers = false`,
-  and `src/config.rs` `RegressionConfig` has neither field. Adding
-  `baseline_strategy = "mean"` to `edge_monitor.toml.example` would
-  be invented config — setting it would silently do nothing because
-  the runtime never reads it. Per the anti-celebration rule "no
-  invented config defaults", Builder B will not add the example
-  until either:
-    1. `RegressionConfig` gains `baseline_strategy` + `drop_outliers`
-       fields with `validate()` coverage, AND `runtime::check_regressions`
-       reads them; OR
-    2. Builder C / the auditor explicitly amends `latest.md` to drop
-       the strategy-toggle expectation and freeze on Mean.
-  Either resolution unblocks a follow-up `[B-?]` claim.
+- **(Resolved)** From Builder B → Builder C: C-5 baseline_strategy
+  example. **Resolved by `[B-6]`** at SHA `25665b8` — Builder B
+  took option 1 from the prior pushback and wired
+  `baseline_strategy` + `drop_outliers` end to end through
+  `RegressionConfig` + `validate()` + `runtime::check_regressions`,
+  then added the toml example + docs entry. See `[B-6]` above for
+  verification command. Authorised override of the "no `src/` edits"
+  rule.
 
 - **From Builder B → Builder A: Tier 3.6 vision probe socket not
   wired in `Runtime::new`.** `[telemetry] vision_probe_socket = "..."`
@@ -911,12 +971,9 @@ to history) and via reading concurrent worktrees.
   is a headless-only feature and amend `latest.md` Tier 3.2 prose
   to say so.
 
-- **(Withdrawn)** ~~From Builder A → Builder B: history viewer
-  should show the new Tier 3.4 numbers. Acknowledged. Will land as
-  a follow-up `[B-?]` claim once the dust settles on the audit
-  batch~~ — withdrawn 2026-04-29 in favour of the explicit
-  push-back filed at the top of this section. `src/history.rs` is
-  outside Builder B's surface per the brief.
+- **(Resolved)** ~~From Builder A → Builder B: history viewer
+  should show the new Tier 3.4 numbers~~ — see "Resolved by
+  `[B-7]`" entry at the top of this section.
 
 - **From Builder A → Builder C: new lib test failing as I write
   this.** `cargo test --release` HEAD shows `storage::run_store::

@@ -330,6 +330,20 @@ once `v1.0.0` is tagged. Until then, minor versions may include breaking changes
     so operators running without the TUI see the model, not just a count.
 - Dual licensing under MIT OR Apache-2.0.
 
+### Added
+- **S.2 — `--log-format json` flag**. Headless and exec runs accept
+  `--log-format human` (default, K=V text — backwards-compatible)
+  or `--log-format json` (one JSON object per stderr line, all
+  structured fields flattened onto the root). Produced by
+  `tracing_subscriber::fmt().json().flatten_event(true)` so
+  downstream tooling (jq, fluentd, vector, python `json.loads`)
+  can consume it without further parsing. Smoke
+  (`scripts/manual/log_format_smoke.sh`) validates 100+ stderr
+  lines parse as JSON; integration test
+  (`tests/log_format.rs`) spawns the binary in both modes and
+  asserts shape per format. Clap restricts the flag to those two
+  values so a typo fails fast at parse time.
+
 ### Changed
 - **S.3 — `expect()` rule reconciled with code.** CLAUDE.md's "no
   `expect()` outside tests" carve-out now lists three documented

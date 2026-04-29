@@ -63,6 +63,10 @@ impl LogStore {
     /// records the moment the process that generated them exits.
     pub fn append(&self, summary: &LifecycleSummary) -> Result<(), LogStoreError> {
         let line = serde_json::to_string(summary)?;
+        // ok: expect — mutex poisoning means another thread panicked while
+        // holding the lock. Lifecycle summaries feed history/regression
+        // detection; refusing to continue on a corrupted writer is safer
+        // than silently dropping subsequent records.
         let mut guard = self.inner.lock().expect("log store mutex poisoned");
         guard.write_all(line.as_bytes())?;
         guard.write_all(b"\n")?;

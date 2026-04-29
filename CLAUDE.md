@@ -67,14 +67,23 @@ Each module must:
 - Pass `cargo clippy --all-targets -- -D warnings`
 - Have no `unwrap()` outside tests
 - Have no `expect()` outside tests **except for documented invariants
-  that are equivalent to "the binary is malformed if this fails"** —
-  specifically: mutex-poison recovery on a writer whose corruption is
-  worse than a crash (e.g. the audit writer in `governor/audit.rs`),
-  and `Regex::new` calls inside `OnceLock`-initialised statics where
-  the pattern is a compile-time constant. Each such call **must** be
-  preceded by an `// ok: expect — <one-line reason>` comment so
-  reviewers and auditors can skip them. New `expect()` sites that do
-  not match these two patterns are still rejected.
+  that are equivalent to "the binary is malformed (or its baseline
+  runtime environment is broken beyond recovery) if this fails"**.
+  Each such call **must** be preceded by an `// ok: expect — <one-line
+  reason>` comment so reviewers and auditors can skip them, and
+  `rg 'expect\(' src/` outside `#[cfg(test)]` must show only annotated
+  lines. The currently accepted patterns are:
+  1. **Mutex-poison recovery** on a writer whose corruption is worse
+     than a crash (e.g. the audit writer in `governor/audit.rs`, the
+     lifecycle log store).
+  2. **`Regex::new` inside `OnceLock`-initialised statics** where the
+     pattern is a compile-time constant.
+  3. **`reqwest::Client::builder().build()` in a sampler constructor**
+     where the only failure mode is "the system's TLS / DNS resolver
+     stack is broken" — at that point we cannot run anyway.
+  Any new pattern beyond these requires updating this list (and a
+  reviewer signoff) — a one-off `// ok: expect` comment is not a
+  licence to invent a new exemption.
 
 ## Architecture
 

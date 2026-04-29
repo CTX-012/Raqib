@@ -42,6 +42,9 @@ pub struct VllmPrometheusSource {
 
 impl VllmPrometheusSource {
     pub fn new() -> Self {
+        // ok: expect — reqwest's default builder only fails when the
+        // host's TLS / DNS resolver stack is broken; if that's true we
+        // cannot run regardless.
         let client = reqwest::Client::builder()
             .timeout(SCRAPE_TIMEOUT)
             .build()
@@ -91,6 +94,7 @@ fn re_vllm_cmdline() -> &'static Regex {
         // `vllm` as a bare token, `vllm serve`, `vllm.entrypoints.*`,
         // or `python -m vllm`. The boundary `\b` keeps "vllm" from
         // matching inside arbitrary substrings.
+        // ok: expect — static regex, compile-time-constant pattern.
         Regex::new(r"\bvllm(\.entrypoints|\s+serve|\b)").expect("vllm cmdline regex")
     })
 }

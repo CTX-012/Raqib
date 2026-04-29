@@ -46,6 +46,9 @@ pub struct OllamaApiSource {
 
 impl OllamaApiSource {
     pub fn new() -> Self {
+        // ok: expect — reqwest's default builder only fails when the
+        // host's TLS / DNS resolver stack is broken; if that's true we
+        // cannot run regardless.
         let client = reqwest::Client::builder()
             .timeout(SCRAPE_TIMEOUT)
             .build()
@@ -106,6 +109,7 @@ fn re_ollama_cmdline() -> &'static Regex {
     static R: OnceLock<Regex> = OnceLock::new();
     R.get_or_init(|| {
         // `ollama serve`, `ollama run`, or just `ollama` as a token.
+        // ok: expect — static regex, compile-time-constant pattern.
         Regex::new(r"(^|\s|/)ollama(\s|$)").expect("ollama cmdline regex")
     })
 }

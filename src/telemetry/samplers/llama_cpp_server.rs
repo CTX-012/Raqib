@@ -45,6 +45,9 @@ pub struct LlamaCppServerSource {
 
 impl LlamaCppServerSource {
     pub fn new() -> Self {
+        // ok: expect — reqwest's default builder only fails when the
+        // host's TLS / DNS resolver stack is broken; if that's true we
+        // cannot run regardless.
         let client = reqwest::Client::builder()
             .timeout(SCRAPE_TIMEOUT)
             .build()
@@ -89,6 +92,7 @@ fn re_llama_server_cmdline() -> &'static Regex {
         // The canonical names: `llama-server` (current builds) and
         // `server` (older). Bare-token match avoids bouncing on
         // unrelated paths that contain "server".
+        // ok: expect — static regex, compile-time-constant pattern.
         Regex::new(r"(^|\s|/)(llama-server|llama_server)(\s|$)")
             .expect("llama_server cmdline regex")
     })

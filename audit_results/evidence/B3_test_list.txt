@@ -1,4 +1,4 @@
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.17s
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.49s
      Running unittests src/lib.rs (target/debug/deps/edge_monitor-7ae572524f5720f9)
 analysis::compare::tests::baseline_metrics_per_metric_n: test
 analysis::compare::tests::faster_run_is_not_a_regression: test
@@ -6,6 +6,8 @@ analysis::compare::tests::higher_rss_is_a_regression: test
 analysis::compare::tests::matching_record_no_regressions: test
 analysis::compare::tests::slow_run_is_critical: test
 analysis::compare::tests::tiny_baseline_emits_no_regressions: test
+analysis::compare::tests::twelve_percent_drop_is_warn_not_critical: test
+analysis::compare::tests::warn_critical_boundary_matrix: test
 classifier::keyword_match::tests::case_insensitive: test
 classifier::keyword_match::tests::empty_cmdline_returns_none: test
 classifier::keyword_match::tests::empty_keyword_never_matches: test
@@ -89,6 +91,10 @@ config::tests::storage_keep_zero_rejected: test
 config::tests::storage_run_store_returns_none_when_empty: test
 config::tests::zero_grace_rejected: test
 config::tests::zero_tick_rejected: test
+exec_wrapper::tests::exec_with_empty_command_errors: test
+exec_wrapper::tests::stats_tracks_tps_average_and_peak: test
+exec_wrapper::tests::stats_tracks_ultralytics_fps_and_latency: test
+exec_wrapper::tests::stderr_tail_is_capped: test
 exit_classify::tests::clean_exit_zero_status: test
 exit_classify::tests::crash_with_nonzero_exit_no_signals: test
 exit_classify::tests::cuda_error_other_than_oom: test
@@ -201,11 +207,16 @@ runtime::tests::toggle_dry_run_flips_state_and_manual_killer: test
 storage::log_store::tests::append_does_not_truncate_existing: test
 storage::log_store::tests::round_trip_from_lifecycle_integration: test
 storage::log_store::tests::round_trip_preserves_all_fields: test
+storage::run_store::prop_tests::append_recent_invariants: test
+storage::run_store::tests::append_returns_err_when_filesystem_rejects_write: test
 storage::run_store::tests::appends_then_reopens_with_full_index: test
 storage::run_store::tests::baseline_handles_edge_window_sizes: test
 storage::run_store::tests::corrupted_index_line_is_skipped_not_fatal: test
 storage::run_store::tests::exit_reason_classification_matrix: test
 storage::run_store::tests::list_models_returns_all_keys_sorted: test
+storage::run_store::tests::prune_keeps_three_newest_by_spawn_time: test
+storage::run_store::tests::prune_with_limit_two_leaves_two_files_on_disk: test
+storage::run_store::tests::pruned_ids_stay_pruned_after_reopen: test
 storage::run_store::tests::recent_returns_newest_first: test
 storage::run_store::tests::record_file_exists_for_every_index_entry: test
 telemetry::accumulator::tests::average_and_peak_tokens_per_sec_are_correct: test
@@ -214,6 +225,11 @@ telemetry::accumulator::tests::energy_zero_for_single_sample: test
 telemetry::accumulator::tests::forget_removes_stats: test
 telemetry::accumulator::tests::gpu_watts_average_and_peak: test
 telemetry::accumulator::tests::impossibly_large_tps_is_rejected: test
+telemetry::accumulator::tests::kv_cache_avg_pct_tracks_all_samples: test
+telemetry::accumulator::tests::kv_cache_evictions_handles_counter_reset: test
+telemetry::accumulator::tests::kv_cache_evictions_none_without_samples: test
+telemetry::accumulator::tests::kv_cache_evictions_total_is_delta: test
+telemetry::accumulator::tests::kv_cache_pct_out_of_range_rejected: test
 telemetry::accumulator::tests::latency_p99_handles_skewed_distribution: test
 telemetry::accumulator::tests::model_name_hint_propagates: test
 telemetry::accumulator::tests::nan_tps_is_skipped_not_recorded: test
@@ -274,6 +290,7 @@ telemetry::samplers::vllm_prometheus::tests::discover_port_finds_flag_value_form
 telemetry::samplers::vllm_prometheus::tests::end_to_end_scrape_through_local_server: test
 telemetry::samplers::vllm_prometheus::tests::endpoint_for_targets_loopback: test
 telemetry::samplers::vllm_prometheus::tests::frame_from_metrics_maps_vllm_names: test
+telemetry::samplers::vllm_prometheus::tests::frame_from_metrics_rejects_negative_preemptions: test
 telemetry::samplers::vllm_prometheus::tests::parse_metrics_extracts_named_lines: test
 telemetry::source::tests::permanent_error_carries_message: test
 telemetry::source::tests::stub_source_returns_telemetry: test
@@ -300,9 +317,13 @@ ui::input::tests::q_quits_in_normal_mode: test
 ui::input::tests::slash_starts_filter: test
 ui::input::tests::tab_cycles_focus_forward: test
 
-299 tests, 0 benchmarks
+316 tests, 0 benchmarks
      Running unittests src/main.rs (target/debug/deps/edge_monitor-f9539b074aa9b74b)
 0 tests, 0 benchmarks
+     Running tests/expect_rule_guard.rs (target/debug/deps/expect_rule_guard-61d4d68b7e92ba5a)
+every_prod_expect_is_annotated: test
+
+1 test, 0 benchmarks
      Running tests/governor_pid_reuse.rs (target/debug/deps/governor_pid_reuse-ed278483157ce948)
 audit_log_records_pid_reused_aborted: test
 pidfd_path_completes_kill_when_target_still_alive: test
@@ -322,6 +343,11 @@ json_output_parses_as_record_array_for_a_model: test
 json_output_parses_as_summary_array_when_no_model: test
 
 5 tests, 0 benchmarks
+     Running tests/log_format.rs (target/debug/deps/log_format-f122b828e9c2f931)
+human_format_is_not_json_shaped: test
+json_format_emits_one_json_object_per_stderr_line: test
+
+2 tests, 0 benchmarks
      Running tests/pipeline_end_to_end.rs (target/debug/deps/pipeline_end_to_end-3c90bc6ee4188fd4)
 ai_process_with_model_path_is_tracked_and_killed_in_enforce_mode: test
 exited_ai_process_generates_summary_with_resource_stats: test

@@ -5,6 +5,7 @@ Usage: edge_monitor [OPTIONS] [COMMAND]
 Commands:
   history  Show recent runs from the typed run store (latest.md Tier 1.1)
   compare  Side-by-side baseline comparison across one or more models (latest.md Tier 3.7)
+  exec     Run a workload under instrumentation: forks COMMAND with piped stdio, tees the output to your terminal and to the stdout regex parser, then writes a `RunRecord` on exit (latest.md Tier 1.2d)
   help     Print this message or the help of the given subcommand(s)
 
 Options:

@@ -1,5 +1,5 @@
-Exit code: 1\n[2m2026-04-28T10:26:06.370144Z[0m [32m INFO[0m loading config [3mpath[0m[2m=[0m/tmp/bad_em_140831.toml
-Error: loading /tmp/bad_em_140831.toml
+Exit code: 1\n2026-04-29T06:17:51.170980Z  INFO loading config path=/tmp/bad_em_43925.toml
+Error: loading /tmp/bad_em_43925.toml
 
 Caused by:
     0: config parse failed: TOML parse error at line 1, column 8

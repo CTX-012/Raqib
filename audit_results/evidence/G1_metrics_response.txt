@@ -22,10 +22,11 @@ edge_monitor_processes_total{category="none"} 0
 edge_monitor_ai_processes_active 0
 # HELP edge_monitor_governor_kills_total Cumulative kill decisions by reason.
 # TYPE edge_monitor_governor_kills_total counter
-edge_monitor_governor_kills_total{reason="already_exited"} 5
-edge_monitor_governor_kills_total{reason="whitelisted"} 295
+edge_monitor_governor_kills_total{reason="already_exited"} 3
+edge_monitor_governor_kills_total{reason="dry_run"} 2
+edge_monitor_governor_kills_total{reason="whitelisted"} 340
 # HELP edge_monitor_regressions_total Cumulative regression alerts by (model, metric).
 # TYPE edge_monitor_regressions_total counter
 # HELP edge_monitor_tick_count_total Number of completed tick cycles.
 # TYPE edge_monitor_tick_count_total counter
-edge_monitor_tick_count_total 5
+edge_monitor_tick_count_total 6

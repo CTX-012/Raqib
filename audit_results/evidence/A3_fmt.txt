@@ -1,1 +1,196 @@
-
+Diff in /home/faisal/edge_monitor/src/analysis/compare.rs:422:
+             ("10.01% (just above warn)", 89.99, Some(Severity::Warn)),
+             ("12% (mid warn band)", 88.0, Some(Severity::Warn)),
+             ("19.99% (just below critical)", 80.01, Some(Severity::Warn)),
+[31m-            ("20.01% (just at/above critical)", 79.99, Some(Severity::Critical)),
+(B[m[32m+            (
+(B[m[32m+                "20.01% (just at/above critical)",
+(B[m[32m+                79.99,
+(B[m[32m+                Some(Severity::Critical),
+(B[m[32m+            ),
+(B[m         ];
+ 
+         for (label, current_tps, expected) in cases {
+Diff in /home/faisal/edge_monitor/src/exec_wrapper.rs:240:
+     if let Some(path) = config.storage.run_store() {
+         match RunStore::open(&path) {
+             Ok(store) => {
+[31m-                let mut store = store
+(B[m[31m-                    .with_keep_limit(Some(config.storage.keep_runs_per_model as usize));
+(B[m[32m+                let mut store =
+(B[m[32m+                    store.with_keep_limit(Some(config.storage.keep_runs_per_model as usize));
+(B[m                 if let Err(e) = store.append(record) {
+                     eprintln!("edge_monitor: failed to persist run record: {}", e);
+                 }
+Diff in /home/faisal/edge_monitor/src/storage/run_store.rs:499:
+         // driven. `get` performs disk I/O — acceptable because this
+         // path only fires when the cap was just crossed (typically
+         // O(1) per append once steady state is reached).
+[31m-        let ids: Vec<RunId> = self
+(B[m[31m-            .by_model
+(B[m[31m-            .get(model_key)
+(B[m[31m-            .cloned()
+(B[m[31m-            .unwrap_or_default();
+(B[m[32m+        let ids: Vec<RunId> = self.by_model.get(model_key).cloned().unwrap_or_default();
+(B[m         let mut with_time: Vec<(RunId, DateTime<Utc>)> = ids
+             .iter()
+             .filter_map(|id| {
+Diff in /home/faisal/edge_monitor/src/storage/run_store.rs:725:
+         // append code never produces that order today, but the parser
+         // is the natural place to be defensive.
+         let mut entries: Vec<IndexEntry> = Vec::new();
+[31m-        let mut tombstoned: std::collections::HashSet<RunId> =
+(B[m[31m-            std::collections::HashSet::new();
+(B[m[32m+        let mut tombstoned: std::collections::HashSet<RunId> = std::collections::HashSet::new();
+(B[m         for (i, line) in BufReader::new(file).lines().enumerate() {
+             let line = line?;
+             if line.trim().is_empty() {
+Diff in /home/faisal/edge_monitor/src/storage/run_store.rs:952:
+     #[test]
+     fn prune_keeps_three_newest_by_spawn_time() {
+         let dir = tempfile::tempdir().unwrap();
+[31m-        let mut store = RunStore::open(dir.path())
+(B[m[31m-            .unwrap()
+(B[m[31m-            .with_keep_limit(Some(3));
+(B[m[32m+        let mut store = RunStore::open(dir.path()).unwrap().with_keep_limit(Some(3));
+(B[m 
+         let base = Utc::now() - chrono::Duration::seconds(100);
+         // Spawn timestamps deliberately *out of order* vs append order.
+Diff in /home/faisal/edge_monitor/src/storage/run_store.rs:980:
+             recent.len(),
+             recent.iter().map(|r| r.run_id).collect::<Vec<_>>()
+         );
+[31m-        let kept_ids: std::collections::HashSet<RunId> =
+(B[m[31m-            recent.iter().map(|r| r.run_id).collect();
+(B[m[31m-        let expected_kept: std::collections::HashSet<RunId> = [2, 3, 4]
+(B[m[31m-            .iter()
+(B[m[31m-            .map(|i| id_by_idx[i])
+(B[m[31m-            .collect();
+(B[m[32m+        let kept_ids: std::collections::HashSet<RunId> = recent.iter().map(|r| r.run_id).collect();
+(B[m[32m+        let expected_kept: std::collections::HashSet<RunId> =
+(B[m[32m+            [2, 3, 4].iter().map(|i| id_by_idx[i]).collect();
+(B[m         assert_eq!(
+             kept_ids, expected_kept,
+             "kept set should be the three newest by spawn_time"
+Diff in /home/faisal/edge_monitor/src/storage/run_store.rs:1000:
+         // Prune audit log: 2 prune actions fired (one per cap-crossing
+         // append). Together they account for the two evicted ids.
+         let audit = store.prune_audit_log();
+[31m-        let all_deleted: std::collections::HashSet<RunId> =
+(B[m[31m-            audit.iter().flat_map(|a| a.deleted.iter().copied()).collect();
+(B[m[32m+        let all_deleted: std::collections::HashSet<RunId> = audit
+(B[m[32m+            .iter()
+(B[m[32m+            .flat_map(|a| a.deleted.iter().copied())
+(B[m[32m+            .collect();
+(B[m         let expected_deleted: std::collections::HashSet<RunId> =
+             [0, 1].iter().map(|i| id_by_idx[i]).collect();
+         assert_eq!(
+Diff in /home/faisal/edge_monitor/src/storage/run_store.rs:1020:
+     #[test]
+     fn prune_with_limit_two_leaves_two_files_on_disk() {
+         let dir = tempfile::tempdir().unwrap();
+[31m-        let mut store = RunStore::open(dir.path())
+(B[m[31m-            .unwrap()
+(B[m[31m-            .with_keep_limit(Some(2));
+(B[m[32m+        let mut store = RunStore::open(dir.path()).unwrap().with_keep_limit(Some(2));
+(B[m 
+         let base = Utc::now() - chrono::Duration::seconds(1_000);
+         for i in 0..10u32 {
+Diff in /home/faisal/edge_monitor/src/storage/run_store.rs:1029:
+             let ts = base + chrono::Duration::seconds(i as i64);
+[31m-            store
+(B[m[31m-                .append(fixture_record_at(i, "qwen", ts))
+(B[m[31m-                .unwrap();
+(B[m[32m+            store.append(fixture_record_at(i, "qwen", ts)).unwrap();
+(B[m         }
+ 
+         // Walk the runs/ tree and count *.json files.
+Diff in /home/faisal/edge_monitor/src/storage/run_store.rs:1060:
+     fn pruned_ids_stay_pruned_after_reopen() {
+         let dir = tempfile::tempdir().unwrap();
+         {
+[31m-            let mut store = RunStore::open(dir.path())
+(B[m[31m-                .unwrap()
+(B[m[31m-                .with_keep_limit(Some(2));
+(B[m[32m+            let mut store = RunStore::open(dir.path()).unwrap().with_keep_limit(Some(2));
+(B[m             let base = Utc::now() - chrono::Duration::seconds(50);
+             for i in 0..5u32 {
+                 let ts = base + chrono::Duration::seconds(i as i64);
+Diff in /home/faisal/edge_monitor/src/storage/run_store.rs:1069:
+[31m-                store
+(B[m[31m-                    .append(fixture_record_at(i, "llama", ts))
+(B[m[31m-                    .unwrap();
+(B[m[32m+                store.append(fixture_record_at(i, "llama", ts)).unwrap();
+(B[m             }
+             assert_eq!(store.recent("llama", 100).len(), 2);
+         }
+Diff in /home/faisal/edge_monitor/src/storage/run_store.rs:1146:
+         // can land at any of the three IO sites; whichever fires, the
+         // wrapped path must appear so the operator can diagnose.
+         assert!(
+[31m-            msg.contains("run-")
+(B[m[31m-                || msg.contains("runs")
+(B[m[31m-                || msg.contains("index"),
+(B[m[32m+            msg.contains("run-") || msg.contains("runs") || msg.contains("index"),
+(B[m             "error string lacks the failing path context: {msg}"
+         );
+         // In-memory state is consistent: the only record visible to
+Diff in /home/faisal/edge_monitor/src/storage/run_store.rs:1261:
+ 
+     fn op_strategy() -> impl Strategy<Value = Op> {
+         prop_oneof![
+[31m-            (model_strategy(), -50i32..50i32)
+(B[m[31m-                .prop_map(|(model, spawn_offset)| Op::Append { model, spawn_offset }),
+(B[m[31m-            (model_strategy(), 0usize..15)
+(B[m[31m-                .prop_map(|(model, n)| Op::Recent { model, n }),
+(B[m[32m+            (model_strategy(), -50i32..50i32).prop_map(|(model, spawn_offset)| Op::Append {
+(B[m[32m+                model,
+(B[m[32m+                spawn_offset
+(B[m[32m+            }),
+(B[m[32m+            (model_strategy(), 0usize..15).prop_map(|(model, n)| Op::Recent { model, n }),
+(B[m         ]
+     }
+ 
+Diff in /home/faisal/edge_monitor/src/ui/panels/history_overlay.rs:98:
+                 r.summary.peak_vram_mb,
+                 exit,
+             );
+[31m-            let mut spans: Vec<Span<'_>> =
+(B[m[31m-                vec![Span::styled(row, Style::default().fg(color))];
+(B[m[32m+            let mut spans: Vec<Span<'_>> = vec![Span::styled(row, Style::default().fg(color))];
+(B[m 
+             // Tier 3.3 — saturation badge. Independent of exit colour
+             // so a clean-exit run that maxed KV still gets flagged.
+Diff in /home/faisal/edge_monitor/src/ui/panels/history_overlay.rs:108:
+             {
+                 spans.push(Span::styled(
+                     "  KV!",
+[31m-                    Style::default()
+(B[m[31m-                        .fg(Color::Red)
+(B[m[31m-                        .add_modifier(Modifier::BOLD),
+(B[m[32m+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+(B[m                 ));
+             }
+ 
+Diff in /home/faisal/edge_monitor/src/ui/panels/registry.rs:59:
+             {
+                 let kv_text = format!("  KV {:>4.0}%", kv);
+                 let style = if kv >= KV_HOT_PCT {
+[31m-                    Style::default()
+(B[m[31m-                        .fg(Color::Red)
+(B[m[31m-                        .add_modifier(Modifier::BOLD)
+(B[m[32m+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+(B[m                 } else {
+                     cyan
+                 };
+Diff in /home/faisal/edge_monitor/tests/log_format.rs:96:
+         // regression at PR time.
+         if line.starts_with('{') {
+             // Try to parse — if it's a real object, that's a bug.
+[31m-            if let Ok(serde_json::Value::Object(_)) = serde_json::from_str::<serde_json::Value>(line) {
+(B[m[32m+            if let Ok(serde_json::Value::Object(_)) =
+(B[m[32m+                serde_json::from_str::<serde_json::Value>(line)
+(B[m[32m+            {
+(B[m                 panic!("human-format line parsed as a JSON object: {line}");
+             }
+         }

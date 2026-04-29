@@ -1,3 +1,1 @@
-    Blocking waiting for file lock on artifact directory
-   Compiling edge_monitor v0.1.0 (/home/faisal/edge_monitor)
-    Finished `release` profile [optimized] target(s) in 52.71s
+    Finished `release` profile [optimized] target(s) in 0.14s

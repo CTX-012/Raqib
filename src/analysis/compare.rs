@@ -358,6 +358,96 @@ mod tests {
         assert_eq!(r.severity, Severity::Critical);
     }
 
+    /// F.3.4 — a 12% drop on `tokens_per_sec_avg` against a stable
+    /// 10-record baseline at 40 tok/s lands as Warn (not Critical, not
+    /// silently dropped). The default thresholds are 10% warn / 25%
+    /// critical so 12% is unambiguously the warn band.
+    #[test]
+    fn twelve_percent_drop_is_warn_not_critical() {
+        let baseline = baseline_from(10, 40.0);
+        // 12% slower than 40 = 35.2.
+        let current = record_with_tps(35.2);
+        let regs = detect_regressions(&current, &baseline);
+        let r = regs
+            .iter()
+            .find(|r| r.metric == "tokens_per_sec_avg")
+            .expect("expected tokens_per_sec_avg regression at 12% drop");
+        assert_eq!(
+            r.severity,
+            Severity::Warn,
+            "12% drop should be Warn, got {:?} (delta_pct={})",
+            r.severity,
+            r.delta_pct
+        );
+        assert!(
+            (r.delta_pct - 12.0).abs() < 0.5,
+            "delta_pct should be ~12, got {}",
+            r.delta_pct
+        );
+    }
+
+    /// F.3.4 boundary battery. Five cases at 9.99% / 10.01% / 19.99% /
+    /// 20.01% (and the 12% mid-band) hold the comparator's classification
+    /// boundaries to the warn = 10% / critical = 20% thresholds the
+    /// brief specifies. Boundaries catch off-by-one (`>` vs `>=`) in the
+    /// banding logic; with the default thresholds (warn = 10 / critical
+    /// = 25) the 19.99 and 20.01 cases would both come out Warn and we
+    /// would learn nothing, so a one-off `RegressionConfig` overrides
+    /// the upper bound to 20% for this test.
+    ///
+    /// Boundary semantics under the comparator:
+    ///
+    /// * `delta_pct < warn_pct` → no regression emitted (Matching).
+    /// * `warn_pct ≤ delta_pct < critical_pct` → Warn.
+    /// * `delta_pct ≥ critical_pct` → Critical.
+    ///
+    /// `9.99 < 10` and `19.99 < 20` are honoured by `<` checks, not
+    /// `<=`; flipping either to `<=` (or the equivalent `>` to `>=`)
+    /// in the implementation would break exactly one of these cases.
+    #[test]
+    fn warn_critical_boundary_matrix() {
+        let cfg = RegressionConfig {
+            warn_pct: 10.0,
+            critical_pct: 20.0,
+            min_baseline_samples: MIN_BASELINE_SAMPLES,
+        };
+        let baseline = baseline_from(10, 100.0);
+
+        // (slowdown_pct, current_tps, expected) — 100 tok/s baseline
+        // makes the arithmetic exact in f32 enough to land on the
+        // intended side of each boundary.
+        // Expected = None means "no regression emitted" (Matching).
+        let cases: &[(&str, f32, Option<Severity>)] = &[
+            ("9.99% (just below warn)", 90.01, None),
+            ("10.01% (just above warn)", 89.99, Some(Severity::Warn)),
+            ("12% (mid warn band)", 88.0, Some(Severity::Warn)),
+            ("19.99% (just below critical)", 80.01, Some(Severity::Warn)),
+            ("20.01% (just at/above critical)", 79.99, Some(Severity::Critical)),
+        ];
+
+        for (label, current_tps, expected) in cases {
+            let current = record_with_tps(*current_tps);
+            let regs = detect_regressions_with(&current, &baseline, &cfg);
+            let found = regs.iter().find(|r| r.metric == "tokens_per_sec_avg");
+            match (expected, found) {
+                (None, None) => { /* matching — correct */ }
+                (None, Some(r)) => panic!(
+                    "{label}: expected no regression, got {:?} delta_pct={}",
+                    r.severity, r.delta_pct
+                ),
+                (Some(_), None) => panic!(
+                    "{label}: expected regression, got none. baseline={} current={}",
+                    100.0, current_tps
+                ),
+                (Some(exp), Some(r)) => assert_eq!(
+                    *exp, r.severity,
+                    "{label}: expected {:?}, got {:?} delta_pct={}",
+                    exp, r.severity, r.delta_pct
+                ),
+            }
+        }
+    }
+
     /// `BaselineMetrics::from_records` yields per-metric n based on
     /// presence — `tokens_per_sec_avg` should have n=2 even though the
     /// record set has 5 entries with 3 telemetry-less ones.

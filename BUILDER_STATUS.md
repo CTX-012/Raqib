@@ -21,12 +21,12 @@ to history) and via reading concurrent worktrees.
   finished: 2026-04-29
 
 - builder_id: builder-C
-  scope: TEST.md gap closure — ALL DONE, see [C-1] through [C-5]
-         in Ready for Test.
-  branch: audit/2026-04-29 (was builder-claude/tier-3-3-kv-cache-
-          pressure; the working tree was renamed mid-session by
-          something in the harness, all five C-* commits are on
-          the renamed branch).
+  scope: TEST.md gap closure ([C-1]…[C-5]) + DESIGN_HANDOFF Gap 14
+         in the run_store + compare lane ([C-6]). Project owner
+         filed DESIGN_HANDOFF.md as a sibling spec ([D-1]); see
+         that section for status — it is forward-looking and not
+         yet adopted into latest.md.
+  branch: audit/2026-04-29
   finished: 2026-04-29
 
 ## Ready for Test
@@ -602,6 +602,100 @@ to history) and via reading concurrent worktrees.
   still parse. Cross-builder request to Builder B for an
   `edge_monitor.toml.example` line is in the section below — I
   did not edit toml.example per the brief.
+
+### [D-1] DESIGN_HANDOFF.md filed as forward-looking sibling spec
+- Commit SHA: 140cd98ff39c92bf2dd0d5aa32853b545c30a5b8
+- Files changed: DESIGN_HANDOFF.md (new, 717 lines)
+- Builder note: project owner pasted a 17-part design / UX / gap
+  analysis at session end, asking it be filed as the authoritative
+  roadmap. **It is not** — `latest.md` retains that role. The new
+  doc is filed as a sibling to VISION.md (audience) and HANDOFF.md
+  (engineering) with a status banner at the top making the
+  authority explicit: items here that conflict with `latest.md`
+  (theme system, energy accounting framing as v1, post-mortem
+  cards, vocabulary changes such as "Registry" → "AI Workloads"
+  conflicting with Builder B's just-shipped FEATURES.md /
+  docs/configuration.md) need to be reconciled into `latest.md`
+  before any code chases them. Per the parallel-builder protocol
+  in CLAUDE.md, code that drifts ahead of the spec gets reverted
+  at audit time.
+
+  Encoding: original paste contained UTF-8/Latin-1 mojibake from
+  clipboard round-tripping. Confident cases (em-dashes, middle
+  dots, degree signs, full-block progress bars, curly quotes,
+  arrow glyphs) were normalised in transcription; preamble flags
+  any remaining `â`-style artefact for review.
+
+  No code change. Tester can verify with:
+  ```
+  head -25 DESIGN_HANDOFF.md
+  ```
+  and confirm the status banner is intact.
+
+### [C-6] DESIGN_HANDOFF Gap 14 — actionable error and empty-state messages
+- Commit SHA: b9e51179fd4e9720af7353ef0a470f0bb42c8d93
+- Files changed: src/storage/run_store.rs, src/analysis/compare.rs
+- New tests added:
+    - storage::run_store::tests::run_store_error_messages_carry_state_and_next_step
+- Test output proving the new test ran:
+  ```
+  $ cargo test --release --lib storage::run_store
+  Finished `release` profile [optimized] target(s)
+       Running unittests src/lib.rs
+
+  running 13 tests
+  test storage::run_store::tests::exit_reason_classification_matrix ... ok
+  test storage::run_store::tests::prune_keeps_three_newest_by_spawn_time ... ok
+  test storage::run_store::tests::list_models_returns_all_keys_sorted ... ok
+  test storage::run_store::tests::run_store_error_messages_carry_state_and_next_step ... ok
+  test storage::run_store::tests::corrupted_index_line_is_skipped_not_fatal ... ok
+  test storage::run_store::tests::baseline_handles_edge_window_sizes ... ok
+  test storage::run_store::tests::append_returns_err_when_filesystem_rejects_write ... ok
+  test storage::run_store::tests::pruned_ids_stay_pruned_after_reopen ... ok
+  test storage::run_store::tests::record_file_exists_for_every_index_entry ... ok
+  test storage::run_store::tests::recent_returns_newest_first ... ok
+  test storage::run_store::tests::prune_with_limit_two_leaves_two_files_on_disk ... ok
+  test storage::run_store::tests::appends_then_reopens_with_full_index ... ok
+  test storage::run_store::prop_tests::append_recent_invariants ... ok
+
+  test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 319 filtered out
+  ```
+- Builder note: scoped to the two files Builder C owns; deliberately
+  does NOT touch the TUI / CLI surface (Builder A's lane) where the
+  bulk of Gap 14 lives. Three things change:
+
+  1. Every `RunStoreError` `Display` impl now follows a fixed
+     three-part contract — what failed / state of the system after /
+     one concrete next step. The new test pins the contract by
+     substring rather than exact wording so future polish edits stay
+     free as long as the three parts survive. Anti-celebration
+     verified: stripping the WriteRecord hint clause makes the test
+     fail with `"WriteRecord: error message does not say what state
+     the system is in after the failure"`; restored.
+
+  2. Empty-state logs added per DESIGN_HANDOFF Principle 6
+     ("empty states teach the product"):
+     - `recent(unknown_model)` → debug log instead of silent return.
+     - `detect_regressions_with` tiny-baseline silent-return →
+       debug log naming model + sample_size + min_baseline_samples
+       so an operator wondering "why no regression alert?" can find
+       the answer with `--log-level debug`.
+
+  3. Existing warn-log messages in `recent()` and `load_index`
+     gained a `recovery=` structured field so log scrapers can
+     categorise without parsing free text, plus a clearer one-line
+     suggestion for hand-recovery.
+
+  336 lib tests + 13 integration tests pass; clippy clean. The
+  pre-existing F.1.7 ENOSPC test still passes — its substring
+  contract (`run-`/`runs`/`index`) is satisfied by the new
+  WriteRecord message which still names `runs/<date>/run-<uuid>.json`.
+
+  **Tester 1 / Tester 2:** run
+  `cargo test --release --lib storage::run_store::tests::run_store_error_messages_carry_state_and_next_step`
+  and confirm green. The test is meant to be regression-resistant
+  to copy edits; if you tighten the messages further, just keep
+  the three contract parts and it'll stay green.
 
 ### [B-3] edge_monitor.toml.example + docs/configuration.md [telemetry] section
 - Commit SHA: 3d65df22e16f65835f2000044bfe583cb57fefdf

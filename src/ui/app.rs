@@ -59,6 +59,10 @@ pub enum Action {
     OpenHistory,
     /// Close the history overlay (Esc).
     CloseHistory,
+    /// Toggle the secondary panels (Framework procs / All processes /
+    /// Recent actions) on or off. They stay hidden by default so the
+    /// main view is just AI Workloads + Recent runs.
+    ToggleDetailMode,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,6 +95,12 @@ pub struct App {
     /// press so subsequent ticks don't replace the records the user is
     /// reading.
     history: Option<HistoryOverlay>,
+    /// Detail mode — when `true`, render the secondary panels
+    /// (Framework procs, All processes, Recent actions). Default `false`
+    /// keeps the main view focused on AI Workloads + Recent runs, which
+    /// is what the operator-feedback pass asked for. Tab focus-cycling
+    /// is suppressed in default mode since only one panel is reachable.
+    detail_mode: bool,
 }
 
 impl Default for App {
@@ -110,6 +120,7 @@ impl App {
             filter: String::new(),
             armed_kill: None,
             history: None,
+            detail_mode: false,
         }
     }
 
@@ -121,6 +132,9 @@ impl App {
     }
     pub fn show_help(&self) -> bool {
         self.show_help
+    }
+    pub fn detail_mode(&self) -> bool {
+        self.detail_mode
     }
     pub fn should_quit(&self) -> bool {
         self.quit_requested
@@ -140,12 +154,21 @@ impl App {
     }
 
     pub fn focus_next(&mut self) {
+        // Tab is meaningless when only AI Workloads is on screen — silently
+        // no-op rather than secretly moving focus to a panel the operator
+        // can't see.
+        if !self.detail_mode {
+            return;
+        }
         self.focus = self.focus.next();
         self.selected = 0;
         self.armed_kill = None;
     }
 
     pub fn focus_prev(&mut self) {
+        if !self.detail_mode {
+            return;
+        }
         self.focus = self.focus.prev();
         self.selected = 0;
         self.armed_kill = None;
@@ -153,6 +176,20 @@ impl App {
 
     pub fn toggle_help(&mut self) {
         self.show_help = !self.show_help;
+    }
+
+    /// Toggle the secondary-panel view. Leaving detail mode snaps focus
+    /// back to AI Workloads (FocusedPanel::Registry) so the operator
+    /// returns to a known starting point — the previously focused panel
+    /// is no longer on screen, so keeping focus there would be invisible
+    /// state.
+    pub fn toggle_detail_mode(&mut self) {
+        self.detail_mode = !self.detail_mode;
+        if !self.detail_mode {
+            self.focus = FocusedPanel::Registry;
+            self.selected = 0;
+            self.armed_kill = None;
+        }
     }
 
     pub fn start_filter(&mut self) {
@@ -280,11 +317,56 @@ mod tests {
     #[test]
     fn focus_cycles_forward_and_backward() {
         let mut app = App::new();
+        // Tab is meaningful only in detail mode; flip the mode on first.
+        app.toggle_detail_mode();
         assert_eq!(app.focus(), FocusedPanel::Registry);
         app.focus_next();
         assert_eq!(app.focus(), FocusedPanel::Rogues);
         app.focus_prev();
         assert_eq!(app.focus(), FocusedPanel::Registry);
+    }
+
+    #[test]
+    fn default_mode_locks_focus_to_registry() {
+        let mut app = App::new();
+        assert!(!app.detail_mode());
+        // Tab / Shift-Tab are no-ops while the secondary panels are
+        // hidden — moving focus to a panel the operator can't see would
+        // be invisible state.
+        app.focus_next();
+        assert_eq!(app.focus(), FocusedPanel::Registry);
+        app.focus_prev();
+        assert_eq!(app.focus(), FocusedPanel::Registry);
+    }
+
+    #[test]
+    fn toggle_detail_mode_flips_the_flag_and_resets_focus() {
+        let mut app = App::new();
+        assert!(!app.detail_mode());
+        app.toggle_detail_mode();
+        assert!(app.detail_mode());
+        app.focus_next(); // now actually moves
+        assert_eq!(app.focus(), FocusedPanel::Rogues);
+        // Leaving detail mode snaps focus back to Registry; otherwise
+        // the status bar would still say "focus: Rogues" while Rogues
+        // is no longer drawn.
+        app.toggle_detail_mode();
+        assert!(!app.detail_mode());
+        assert_eq!(app.focus(), FocusedPanel::Registry);
+        assert_eq!(app.selected_index(), 0);
+    }
+
+    #[test]
+    fn leaving_detail_mode_disarms_pending_kill() {
+        let mut app = App::new();
+        app.toggle_detail_mode();
+        app.arm_kill(99);
+        assert_eq!(app.armed_kill_pid(), Some(99));
+        // Returning to default mode hides the panel where the operator
+        // armed the kill — clearing the arm is the safe default; an
+        // armed kill the user can no longer see is a footgun.
+        app.toggle_detail_mode();
+        assert_eq!(app.armed_kill_pid(), None);
     }
 
     #[test]
@@ -343,6 +425,9 @@ mod tests {
     #[test]
     fn focus_change_disarms_kill_for_safety() {
         let mut app = App::new();
+        // Tab is a no-op in default mode, so move into detail mode
+        // first; that's the only mode where focus actually changes.
+        app.toggle_detail_mode();
         app.arm_kill(42);
         app.focus_next();
         assert_eq!(app.armed_kill_pid(), None);

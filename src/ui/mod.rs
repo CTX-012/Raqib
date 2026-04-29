@@ -147,6 +147,7 @@ fn apply_action(action: Action, runtime: &mut Runtime, app: &mut App) {
             }
         }
         Action::CloseHistory => app.close_history(),
+        Action::ToggleDetailMode => app.toggle_detail_mode(),
         Action::None => {}
     }
 }

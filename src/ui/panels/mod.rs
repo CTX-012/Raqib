@@ -24,15 +24,57 @@ use super::app::App;
 pub fn render(f: &mut Frame, state: &RuntimeState, app: &App) {
     let area = f.area();
 
-    // Top: status bar (1 line). Bottom: panels.
+    if app.detail_mode() {
+        render_detail(f, area, state, app);
+    } else {
+        render_default(f, area, state, app);
+    }
+
+    if app.show_help() {
+        help::render(f, area);
+    }
+
+    // History overlay last so it floats above everything (including the
+    // help panel — though the input layer prevents both from being open
+    // simultaneously).
+    history_overlay::render(f, area, app);
+}
+
+/// Default view — what the operator sees on launch. Drops the
+/// secondary panels (Framework procs, All processes, Recent actions)
+/// so the screen is just the bits that answer "what's running and how
+/// did the last few runs go". Hit `v` to bring the others back.
+fn render_default(f: &mut Frame, area: Rect, state: &RuntimeState, app: &App) {
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1), // status bar
+            Constraint::Length(7), // vitals
+            Constraint::Min(8),    // AI Workloads (full width)
+            Constraint::Length(8), // recent runs
+            Constraint::Length(1), // hint footer
+        ])
+        .split(area);
+
+    render_status_bar(f, layout[0], state, app);
+    vitals::render(f, layout[1], state);
+    registry::render(f, layout[2], state, app);
+    completed::render(f, layout[3], state);
+    render_footer(f, layout[4], app);
+}
+
+/// Detail view — the legacy six-panel layout, behind a `v` toggle.
+/// Kept for operators who actually want to see framework procs by PID
+/// or scroll through the audit trail without leaving the TUI.
+fn render_detail(f: &mut Frame, area: Rect, state: &RuntimeState, app: &App) {
     let layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1), // status bar
             Constraint::Length(7), // vitals
             Constraint::Min(8),    // process panels (3 columns)
-            Constraint::Length(8), // completed
-            Constraint::Length(8), // audit
+            Constraint::Length(8), // recent runs
+            Constraint::Length(8), // recent actions
             Constraint::Length(1), // hint footer
         ])
         .split(area);
@@ -43,15 +85,6 @@ pub fn render(f: &mut Frame, state: &RuntimeState, app: &App) {
     completed::render(f, layout[3], state);
     audit::render(f, layout[4], state);
     render_footer(f, layout[5], app);
-
-    if app.show_help() {
-        help::render(f, area);
-    }
-
-    // History overlay last so it floats above everything (including the
-    // help panel — though the input layer prevents both from being open
-    // simultaneously).
-    history_overlay::render(f, area, app);
 }
 
 fn render_status_bar(f: &mut Frame, area: Rect, state: &RuntimeState, app: &App) {
@@ -117,8 +150,15 @@ fn render_process_row(f: &mut Frame, area: Rect, state: &RuntimeState, app: &App
     culprits::render(f, cols[2], state, app);
 }
 
-fn render_footer(f: &mut Frame, area: Rect, _app: &App) {
-    let hints = " q quit · Tab focus · j/k select · / filter · k kill (×2) · h history · d dry-run · ? help ";
+fn render_footer(f: &mut Frame, area: Rect, app: &App) {
+    // Detail mode unlocks Tab; default mode locks focus to AI Workloads.
+    // The footer reflects what the operator can actually do right now —
+    // listing keys that no-op in default mode would be misleading.
+    let hints = if app.detail_mode() {
+        " q quit · v hide details · Tab focus · j/k select · / filter · k kill (×2) · h history · d dry-run · ? help "
+    } else {
+        " q quit · v show details · j/k select · / filter · k kill (×2) · h history · d dry-run · ? help "
+    };
     let p = Paragraph::new(hints).style(Style::default().fg(Color::DarkGray));
     f.render_widget(p, area);
 }

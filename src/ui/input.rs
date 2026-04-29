@@ -38,6 +38,7 @@ pub fn translate(key: KeyEvent, app: &App) -> Action {
             KeyCode::Char('k') => Action::ConfirmKill,
             KeyCode::Char('h') => Action::OpenHistory,
             KeyCode::Char('/') => Action::StartFilter,
+            KeyCode::Char('v') => Action::ToggleDetailMode,
             KeyCode::Char('j') | KeyCode::Down => Action::SelectNext,
             KeyCode::Char('K') | KeyCode::Up => Action::SelectPrev,
             KeyCode::Tab => Action::FocusNext,
@@ -125,5 +126,14 @@ mod tests {
     fn tab_cycles_focus_forward() {
         let app = App::new();
         assert_eq!(translate(key(KeyCode::Tab), &app), Action::FocusNext);
+    }
+
+    #[test]
+    fn v_toggles_detail_mode() {
+        let app = App::new();
+        assert_eq!(
+            translate(key(KeyCode::Char('v')), &app),
+            Action::ToggleDetailMode,
+        );
     }
 }

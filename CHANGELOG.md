@@ -352,6 +352,24 @@ once `v1.0.0` is tagged. Until then, minor versions may include breaking changes
     so operators running without the TUI see the model, not just a count.
 - Dual licensing under MIT OR Apache-2.0.
 
+### Added
+- **TUI detail-mode toggle (`v`).** The default view drops three
+  panels — Framework procs, All processes, Recent actions — and
+  shows just AI Workloads (full-width) plus Recent runs. Hit `v` to
+  flip into detail mode and get the legacy six-panel layout back; hit
+  `v` again to return. Tab focus-cycling is suppressed in default
+  mode (only AI Workloads is on screen, so cycling would hide focus
+  on a panel the operator can't see). Leaving detail mode snaps focus
+  back to AI Workloads and disarms any pending manual kill — an
+  armed kill against a row the user can no longer see is a footgun.
+  The footer hint also updates per mode so the listed keys match the
+  actions actually available. 4 new unit tests
+  (`ui::app::tests::default_mode_locks_focus_to_registry`,
+  `toggle_detail_mode_flips_the_flag_and_resets_focus`,
+  `leaving_detail_mode_disarms_pending_kill`,
+  `ui::input::tests::v_toggles_detail_mode`) plus
+  `scripts/manual/detail_mode_smoke.sh` pin the wiring.
+
 ### Changed
 - **UX pass — operator-facing labels rewritten in plain language.**
   TUI panel titles, headless log lines, and the governor's dry-run

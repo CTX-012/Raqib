@@ -744,11 +744,16 @@ fn check_regressions(
     if history.len() < cfg.min_baseline_samples as usize {
         return;
     }
+    let strategy = crate::analysis::compare::BaselineStrategy::Mean;
+    let (metrics, outliers) =
+        crate::analysis::BaselineMetrics::from_records_with(&history, strategy, false);
     let baseline = crate::analysis::Baseline {
         model: model.to_string(),
         sample_size: history.len(),
-        metrics: crate::analysis::BaselineMetrics::from_records(&history),
+        metrics,
         computed_at: chrono::Utc::now(),
+        outlier_run_ids: outliers,
+        strategy,
     };
     let detector_cfg = DetectorConfig {
         warn_pct: cfg.warn_pct,

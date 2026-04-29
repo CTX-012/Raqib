@@ -712,11 +712,16 @@ impl RunStore {
         if records.is_empty() {
             return None;
         }
+        let strategy = crate::analysis::compare::BaselineStrategy::Mean;
+        let (metrics, outliers) =
+            BaselineMetrics::from_records_with(&records, strategy, false);
         Some(Baseline {
             model: model.to_string(),
             sample_size: records.len(),
-            metrics: BaselineMetrics::from_records(&records),
+            metrics,
             computed_at: Utc::now(),
+            outlier_run_ids: outliers,
+            strategy,
         })
     }
 

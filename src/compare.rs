@@ -110,6 +110,8 @@ pub fn run_compare(
             sample_size: records.len(),
             metrics: BaselineMetrics::from_records(&records),
             computed_at: chrono::Utc::now(),
+            outlier_run_ids: Vec::new(),
+            strategy: crate::analysis::compare::BaselineStrategy::default(),
         };
         // Derived: J/token. Average the per-record ratio over records
         // that have both energy and tokens — averaging ratios is
@@ -317,6 +319,8 @@ mod tests {
                 sample_size: records.len(),
                 metrics: BaselineMetrics::from_records(&records),
                 computed_at: Utc::now(),
+                outlier_run_ids: Vec::new(),
+                strategy: crate::analysis::compare::BaselineStrategy::default(),
             };
             let col = ComparisonColumn::from_baseline(model.into(), &baseline, Some(0.082));
             assert!(col.tokens_per_sec_avg.is_some());

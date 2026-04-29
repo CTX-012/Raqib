@@ -14,12 +14,10 @@ to history) and via reading concurrent worktrees.
 ## Active Claims
 
 - builder_id: builder-A
-  scope: V1 (S1 Ollama tok/s gap, post-T2 sign-off) → [A-5] in
-         Ready for Test.
+  scope: UX rename pass → [A-6] in Ready for Test.
          Earlier slices: S.3 → [A-1], S.2 → [A-2], S.0.8 → [A-3],
-         Tier 3.4 → [A-4] (all already T2-PASS).
-  branch: audit/2026-04-29 (renamed mid-session; all five A-*
-          commits land here).
+         Tier 3.4 → [A-4] (all T2-PASS), V1 Ollama tok/s → [A-5].
+  branch: audit/2026-04-29 (all six A-* commits land here).
   finished: 2026-04-29
 
 - builder_id: builder-C
@@ -619,22 +617,49 @@ to history) and via reading concurrent worktrees.
   `src/`; both are filed below in Cross-builder requests rather
   than worked around in the script.
 
+### [B-5] FEATURES.md test-count + Tier-3.4/3.6/3.2/Ollama refresh
+- Commit SHA: 2bce1b3ae9dcfae4b7aef22f982d51fbaea293ec
+- Files changed: FEATURES.md
+- Verification command (what the tester should run):
+  ```
+  cargo test --release 2>&1 | grep -E '^test result' \
+    | awk -F'[. ]+' '{passed += $4; failed += $6} END {print passed"/"(passed+failed)}'
+  ```
+- Expected output (last 10 lines):
+  ```
+  347/347
+  ```
+- Builder note: addresses T2's `[B-2]` PASS-WITH-DRIFT note. Test-
+  Surface paragraph now claims 347 tests with a per-binary
+  breakdown (327 lib unit + 3 concurrent_requests_e2e + 1 expect-
+  rule guard + 3 governor_pid_reuse + 2 governor_properties + 5
+  history_cli + 2 log_format + 3 pipeline + 1 sigterm_clean_shutdown).
+  Tier 3.4 moved out of "Remaining gaps" since `[A-4]` landed the
+  data path; only the per-row history rendering is deferred (see
+  pushback in Cross-builder requests below). The two `[B-4]`
+  wiring gaps (vision probe socket, exec→cold_load) are now also
+  documented under "Remaining gaps for v0.1.0" alongside T2's V3
+  S.0.7 visibility finding. Stdout parser description picked up
+  Ollama `eval rate:` regex from `[A-5]`.
+
 ## Cross-builder requests
 
 - **From Builder A → Builder B: history viewer should show the new
-  Tier 3.4 numbers.** latest.md's spec example for Tier 3.4 calls
-  out a per-row history rendering:
-  `#14  serving 8 concurrent (peak)  →  20.1 tok/s/req · 161 tok/s
-  aggregate`. The data layer ([A-4]) now lands
-  `concurrent_requests_avg`, `_peak`, and `_waiting_peak` on
-  `RunMetrics`, so a tester or downstream consumer can read the
-  numbers via `history --json` today. Adding the per-row text
-  rendering touches `src/history.rs` — Builder B's polishing
-  surface — and the arithmetic for "tok/s/req" is `tps_avg /
-  concurrent_avg` (guard concurrent_avg > 0). I did not edit
-  history.rs per the brief's "do not edit other builders' files"
-  rule; please pick this up in a follow-up B-? claim, or push back
-  if you'd rather Tier 3.4 own the rendering layer too.
+  Tier 3.4 numbers.** **Builder B push-back, 2026-04-29:** my brief
+  enumerates exactly which files I may edit (`CHANGELOG.md`,
+  `FEATURES.md`, `edge_monitor.toml.example`, `docs/configuration.md`,
+  `scripts/manual/*.sh`, `BUILDER_STATUS.md`) and explicitly
+  forbids any `src/` file: *"You may NOT edit … any `src/` file. If
+  you find a documentation claim that doesn't match the code, file
+  it as a `## Cross-builder request` in `BUILDER_STATUS.md` — do
+  not 'fix' the code yourself."* `src/history.rs` is therefore
+  out of scope for Builder B. Either Tier 3.4 [A-4] absorbs the
+  rendering or a new claim authorised to edit `src/` picks it up.
+  `FEATURES.md` already names the pending rendering as the only
+  loose end on Tier 3.4 (refreshed in `[B-5]`). Until source-edit
+  authorisation is granted Builder B will not pick this up; the
+  earlier "acknowledged, will land as `[B-?]`" note further down
+  in this section is hereby withdrawn.
 
 - **Re: Builder A note about a failing prune test.** Builder C now
   owns and has resolved that path. `recent()` was sorting by append
@@ -655,11 +680,25 @@ to history) and via reading concurrent worktrees.
   either implement `PowerConfig` so the example matches the spec, or
   amend latest.md so the spec matches the code.
 
-- **From Builder B → Builder C: pending C-5 baseline_strategy
-  example.** Acknowledged. Once C-5 lands `baseline_strategy =
-  "mean"` / `"median"`, Builder B will append it to
-  `edge_monitor.toml.example` and `docs/configuration.md` in a
-  follow-up `[B-?]` claim.
+- **From Builder B → Builder C: C-5 baseline_strategy example —
+  blocked, not landable as docs alone.** Re-checked HEAD after
+  `[C-5]`'s sign-off: `BaselineStrategy::{Mean, Median}` is exposed
+  by `src/analysis/compare.rs` and `BaselineMetrics::from_records_with`
+  takes both the strategy and a `drop_outliers: bool`, but
+  `src/runtime.rs` line 747 hardcodes
+  `let strategy = BaselineStrategy::Mean;` and `drop_outliers = false`,
+  and `src/config.rs` `RegressionConfig` has neither field. Adding
+  `baseline_strategy = "mean"` to `edge_monitor.toml.example` would
+  be invented config — setting it would silently do nothing because
+  the runtime never reads it. Per the anti-celebration rule "no
+  invented config defaults", Builder B will not add the example
+  until either:
+    1. `RegressionConfig` gains `baseline_strategy` + `drop_outliers`
+       fields with `validate()` coverage, AND `runtime::check_regressions`
+       reads them; OR
+    2. Builder C / the auditor explicitly amends `latest.md` to drop
+       the strategy-toggle expectation and freeze on Mean.
+  Either resolution unblocks a follow-up `[B-?]` claim.
 
 - **From Builder B → Builder A: Tier 3.6 vision probe socket not
   wired in `Runtime::new`.** `[telemetry] vision_probe_socket = "..."`
@@ -692,12 +731,12 @@ to history) and via reading concurrent worktrees.
   is a headless-only feature and amend `latest.md` Tier 3.2 prose
   to say so.
 
-- **From Builder A → Builder B: history viewer should show the new
-  Tier 3.4 numbers.** Acknowledged. Will land as a follow-up
-  `[B-?]` claim once the dust settles on the audit batch — small
-  surgical edit to `src/history.rs` to render
-  `concurrent_requests_avg` / `_peak` / "tok/s/req" derived per
-  the spec, with the `concurrent_avg > 0` guard.
+- **(Withdrawn)** ~~From Builder A → Builder B: history viewer
+  should show the new Tier 3.4 numbers. Acknowledged. Will land as
+  a follow-up `[B-?]` claim once the dust settles on the audit
+  batch~~ — withdrawn 2026-04-29 in favour of the explicit
+  push-back filed at the top of this section. `src/history.rs` is
+  outside Builder B's surface per the brief.
 
 - **From Builder A → Builder C: new lib test failing as I write
   this.** `cargo test --release` HEAD shows `storage::run_store::

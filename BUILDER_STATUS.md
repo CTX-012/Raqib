@@ -14,8 +14,8 @@ to history) and via reading concurrent worktrees.
 ## Active Claims
 
 - builder_id: builder-A
-  scope: S.0.8 (SIGTERM re-verify), Tier 3.4 (concurrent-request
-         awareness). S.3 → [A-1], S.2 → [A-2] in Ready for Test.
+  scope: Tier 3.4 (concurrent-request awareness).
+         S.3 → [A-1], S.2 → [A-2], S.0.8 → [A-3] in Ready for Test.
   branch: builder-claude/tier-3-3-kv-cache-pressure (continuing here
           because parallel-builder protocol allows it; new branch was
           not requested in this session's brief)
@@ -127,6 +127,55 @@ to history) and via reading concurrent worktrees.
   Linux box; Tester 2 should re-run `cargo test --release --test
   log_format` and confirm both subprocess tests pass.
 
+### [A-3] S.0.8 — SIGTERM clean shutdown re-verified and patched
+- Commit SHA: e4a7e7455e864302d42c11259888de2f439dbeef
+- Files changed: Cargo.toml, Cargo.lock, src/main.rs (comment only on
+  install_shutdown_handler), CHANGELOG.md,
+  scripts/manual/sigterm_smoke.sh (new),
+  tests/sigterm_clean_shutdown.rs (new)
+- Smoke script: scripts/manual/sigterm_smoke.sh
+- CHANGELOG line: "**S.0.8 — SIGTERM clean shutdown re-verified and
+  patched.** The audit flagged this as `needs re-verification — no
+  commit message references the ctrlc termination feature`, and the
+  audit was right — `kill -TERM <pid>` was bypassing the handler
+  entirely (default kernel action, exit 143, no drain log, no audit
+  flush). The `ctrlc` dependency now enables the `termination`
+  feature, which routes SIGTERM and SIGHUP through the same
+  atomic-flag handler SIGINT already used. After the fix:
+  `edge_monitor --no-ui --ticks 0` then `kill -TERM` exits 0, logs
+  `shutdown requested; finishing current tick` and `shutdown signal
+  received; exiting`, and leaves no orphan children. Smoke
+  `scripts/manual/sigterm_smoke.sh` and integration test
+  `tests/sigterm_clean_shutdown.rs` pin the behaviour."
+- Test output (last 10 lines of `cargo test --release --test
+  sigterm_clean_shutdown`):
+  ```
+  Compiling edge_monitor v0.1.0 (/home/faisal/edge_monitor)
+  Finished `release` profile [optimized] target(s)
+  Running tests/sigterm_clean_shutdown.rs
+  running 1 test
+  test sigterm_drains_and_exits_zero ... ok
+  test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured;
+                  0 filtered out; finished in 0.56s
+  ```
+- Builder note: the BEFORE/AFTER reproducer in the commit message
+  shows the exit-code change from 143 → 0 directly. Tester 1 should
+  re-run the smoke on real bare-metal Linux (and ideally on Jetson
+  Orin) to confirm the same behaviour off WSL. Tester 2 should
+  re-run `cargo test --release --test sigterm_clean_shutdown` and
+  verify the assertion that catches a regressed `termination`
+  feature (the test panic message walks the reader through what to
+  check). The smoke also catches orphan children via `ps --ppid`,
+  which the integration test deliberately leaves to shell.
+
+  Pre-existing failure
+  `storage::run_store::tests::append_returns_err_when_filesystem_rejects_write`
+  is currently red on this branch — that's a Builder C territory
+  bug (chmod-readonly check fails when the test runs as a user
+  whose effective UID can still write to readonly dirs, e.g. inside
+  some WSL / container setups). Not caused by this commit; flagged
+  in Cross-builder requests below.
+
 ### [B-1] CHANGELOG.md backfill for Tier 1.2d exec, 2.1–2.3, 3.1–3.3, 3.5–3.7
 - Commit SHA: 363769c5256633a4528916ebda2631b83ea46663
   (follow-up SHA `f0dfeb9` refreshes the test-count footer after
@@ -223,7 +272,22 @@ to history) and via reading concurrent worktrees.
   WIP and will need a proptest config fix (probably a missing
   `ProptestConfig::cases(1000)` or a strategy that prunes itself
   to zero). Not blocking [A-1]; flagged here so the auditor
-  attributes the failure correctly.
+  attributes the failure correctly. **Update**: appears to have
+  been resolved by Builder C between when I noticed it and when I
+  finished [A-2] — the test is no longer in the failure list.
+
+- **From Builder A → Builder C (round 2): `storage::run_store::
+  tests::append_returns_err_when_filesystem_rejects_write` flips
+  red on my WSL setup.** The fixture chmods a tempdir 0o555 and
+  expects `append` to fail with EACCES, but on this box (WSL Ubuntu,
+  ext4 mount over Windows) the chmod doesn't actually deny writes,
+  so `append` succeeds and the test panics. The test is a real
+  positive on bare-metal Linux but flaky on WSL / overlayfs /
+  Docker-rootless. Builder C may want to gate it on
+  `nix::sys::stat::access(F_OK | W_OK)` after the chmod — if the
+  process can still write the dir, skip the test with `eprintln!`
+  rather than asserting. Not blocking [A-3]; my test for S.0.8
+  passes regardless.
 
 ## Recently completed (last 24h)
 

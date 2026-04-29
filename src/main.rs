@@ -292,14 +292,20 @@ fn load_config(path: Option<&std::path::Path>, force_dry_run: bool) -> anyhow::R
     Ok(cfg)
 }
 
-/// Install Ctrl-C / SIGTERM handler. Returns an Arc<AtomicBool> that flips
-/// to true on the first signal. The TUI loop and the headless loop both
-/// poll this flag between iterations.
+/// Install Ctrl-C / SIGTERM / SIGHUP shutdown handler (S.0.8). Returns
+/// an Arc<AtomicBool> that flips to true on the first signal. The TUI
+/// loop and the headless loop both poll this flag between iterations.
+///
+/// `ctrlc`'s `termination` feature is what extends coverage from SIGINT
+/// alone to SIGINT + SIGTERM + SIGHUP (Linux/macOS) and Ctrl-Break
+/// (Windows). Without it, `kill -TERM <pid>` fell through to the
+/// kernel's default action (exit 143, no shutdown log, no flush) — the
+/// audit caught that and S.0.8 fixes it.
 fn install_shutdown_handler() -> anyhow::Result<Arc<AtomicBool>> {
     let flag = Arc::new(AtomicBool::new(false));
     let handler_flag = flag.clone();
     ctrlc::set_handler(move || {
-        // Repeated Ctrl-C while shutting down: exit hard. Better than hanging.
+        // Repeated signal while shutting down: exit hard. Better than hanging.
         if handler_flag.swap(true, Ordering::SeqCst) {
             std::process::exit(130);
         }

@@ -330,6 +330,21 @@ once `v1.0.0` is tagged. Until then, minor versions may include breaking changes
     so operators running without the TUI see the model, not just a count.
 - Dual licensing under MIT OR Apache-2.0.
 
+### Fixed
+- **S.0.8 — SIGTERM clean shutdown re-verified and patched.** The
+  audit flagged this as `needs re-verification — no commit message
+  references the ctrlc termination feature`, and the audit was right
+  — `kill -TERM <pid>` was bypassing the handler entirely (default
+  kernel action, exit 143, no drain log, no audit flush). The
+  `ctrlc` dependency now enables the `termination` feature, which
+  routes SIGTERM and SIGHUP through the same atomic-flag handler
+  SIGINT already used. After the fix: `edge_monitor --no-ui --ticks
+  0` then `kill -TERM` exits 0, logs `shutdown requested; finishing
+  current tick` and `shutdown signal received; exiting`, and leaves
+  no orphan children. Smoke `scripts/manual/sigterm_smoke.sh` and
+  integration test `tests/sigterm_clean_shutdown.rs` pin the
+  behaviour.
+
 ### Added
 - **S.2 — `--log-format json` flag**. Headless and exec runs accept
   `--log-format human` (default, K=V text — backwards-compatible)

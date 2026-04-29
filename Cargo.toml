@@ -26,7 +26,7 @@ clap = { version = "4", features = ["derive"] }
 toml = "0.8"
 ratatui = "0.29"
 crossterm = "0.28"
-ctrlc = "3"
+ctrlc = { version = "3", features = ["termination"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "time", "macros", "sync", "io-util", "process", "net"] }
 async-trait = "0.1"

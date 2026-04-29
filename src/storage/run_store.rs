@@ -307,35 +307,74 @@ pub struct PruneAudit {
     pub limit: usize,
 }
 
+/// Errors raised by [`RunStore`] operations.
+///
+/// Each `Display` impl follows the DESIGN_HANDOFF Gap 14 guidance:
+/// say *what* failed, *what state the system is in now*, and *what the
+/// operator can try next* — in that order, in one sentence each. The
+/// hints are deliberately specific (`df -h`, "delete index.jsonl",
+/// "in-memory state unchanged") rather than generic ("check
+/// permissions"); generic hints rot into noise.
 #[derive(Debug, Error)]
 pub enum RunStoreError {
-    #[error("creating run-store directory {path:?}: {source}")]
+    #[error(
+        "could not create run-store directory at {path:?}: {source}. \
+         Persistent run history will be unavailable until this is \
+         resolved; check the parent directory's write permission and \
+         free disk space (`ls -ld <parent>` and `df -h`)."
+    )]
     CreateDir {
         path: PathBuf,
         #[source]
         source: std::io::Error,
     },
-    #[error("opening run-store index {path:?}: {source}")]
+    #[error(
+        "could not open run-store index at {path:?}: {source}. \
+         The index is rebuildable from the per-record JSON files in \
+         `runs/<date>/`; if the file is corrupt, removing it and \
+         restarting will rebuild on the next append."
+    )]
     OpenIndex {
         path: PathBuf,
         #[source]
         source: std::io::Error,
     },
-    #[error("writing run record {path:?}: {source}")]
+    #[error(
+        "could not write run record to {path:?}: {source}. \
+         The append did not commit and the in-memory store is \
+         unchanged; check `df -h` for free space and `ls -ld` on the \
+         day directory for write permission to diagnose."
+    )]
     WriteRecord {
         path: PathBuf,
         #[source]
         source: std::io::Error,
     },
-    #[error("reading run record {path:?}: {source}")]
+    #[error(
+        "could not read run record from {path:?}: {source}. \
+         Other records for the same model remain queryable and this \
+         run is skipped from `recent()` and `history` output; check \
+         that the file exists, is readable, and is valid JSON."
+    )]
     ReadRecord {
         path: PathBuf,
         #[source]
         source: std::io::Error,
     },
-    #[error("(de)serialising run-store data: {0}")]
+    #[error(
+        "could not (de)serialise run-store data: {0}. \
+         The failing record is skipped and the rest of the store \
+         remains consistent; the on-disk format may have drifted \
+         from this binary's expectations — check the edge_monitor \
+         version that wrote these records, or rotate the run-store \
+         directory if it was produced by an incompatible build."
+    )]
     Serde(#[from] serde_json::Error),
-    #[error("appending to index: {0}")]
+    #[error(
+        "I/O error while appending to the run-store index: {0}. \
+         The write did not commit; in-memory state is consistent and \
+         the next successful append will land cleanly."
+    )]
     Io(#[from] std::io::Error),
 }
 
@@ -653,6 +692,15 @@ impl RunStore {
     /// whole history view because one file is bad.
     pub fn recent(&self, model: &str, n: usize) -> Vec<RunRecord> {
         let Some(ids) = self.by_model.get(model) else {
+            // Empty result for an unknown model is the common case
+            // (operator typo, model retired). Logging it at warn would
+            // be noise; debug is the right level — the CLI surface
+            // ("no history for <model>") is where the user-visible
+            // empty-state message belongs per DESIGN_HANDOFF Gap 14.
+            tracing::debug!(
+                model = %model,
+                "no run records indexed for model; recent() returns empty"
+            );
             return Vec::new();
         };
         let mut loaded: Vec<RunRecord> = ids
@@ -663,7 +711,10 @@ impl RunStore {
                     tracing::warn!(
                         run_id = %id,
                         model = %model,
-                        "run record missing or malformed; skipping in recent()"
+                        recovery = "skipped; other records for this model still load",
+                        "run record missing or malformed; \
+                         remove the matching line in index.jsonl to \
+                         silence on next start"
                     );
                     None
                 }
@@ -752,9 +803,13 @@ impl RunStore {
                     tombstoned.insert(t.tombstone);
                 }
                 Err(e) => tracing::warn!(
+                    path = %index_path.display(),
                     line = i + 1,
                     error = %e,
-                    "skipping malformed run-store index line"
+                    recovery = "line skipped; other records load normally",
+                    "malformed run-store index line; usual cause is a torn \
+                     write at process kill — safe to leave in place, or \
+                     hand-edit the file to remove just this line"
                 ),
             }
         }
@@ -1194,6 +1249,111 @@ mod tests {
         // only structured channel we expose. Failed appends do not
         // populate it because no prune ran; that's the contract.
         assert!(store.prune_audit_log().is_empty());
+    }
+
+    /// Gap 14 (DESIGN_HANDOFF) — every `RunStoreError` `Display` impl
+    /// must carry three things: what failed, what state the system is
+    /// in now, and a concrete next step. We check by substring rather
+    /// than by exact wording so future polish edits stay free as long
+    /// as the contract holds.
+    ///
+    /// "What failed" is implied by the variant being constructed.
+    /// "State after failure" we look for by phrases like "did not
+    /// commit", "in-memory store is unchanged", "skipped from",
+    /// "rebuildable from", or "unavailable".
+    /// "Next step" we look for by phrases like "check", "remove",
+    /// "rotate", or by a path/command in backticks.
+    ///
+    /// Anti-celebration check: temporarily strip the hint clauses
+    /// from `RunStoreError` Display impls and confirm this test fails
+    /// loudly before restoring.
+    #[test]
+    fn run_store_error_messages_carry_state_and_next_step() {
+        fn assert_actionable(label: &str, err: &RunStoreError) {
+            let msg = err.to_string();
+            // "what failed" — at least one of these substrings names
+            // the failing operation.
+            let what = ["could not", "I/O error"]
+                .iter()
+                .any(|s| msg.contains(s));
+            // "state after" — describes whether data was lost / kept.
+            let state = [
+                "did not commit",
+                "in-memory store is unchanged",
+                "remain queryable",
+                "remain visible",
+                "rebuildable",
+                "unavailable",
+                "consistent",
+                "skipped",
+            ]
+            .iter()
+            .any(|s| msg.contains(s));
+            // "next step" — points the operator at something to try.
+            let next = [
+                "check",
+                "remove",
+                "rotate",
+                "restart",
+                "df -h",
+                "ls -ld",
+                "edge_monitor version",
+                "next successful append",
+            ]
+            .iter()
+            .any(|s| msg.contains(s));
+            assert!(
+                what,
+                "{label}: error message lacks a 'what failed' phrase: {msg}"
+            );
+            assert!(
+                state,
+                "{label}: error message does not say what state the \
+                 system is in after the failure: {msg}"
+            );
+            assert!(
+                next,
+                "{label}: error message lacks an actionable next step: {msg}"
+            );
+        }
+
+        let p = std::path::PathBuf::from("/tmp/em-test-fixture");
+        let io_err = || std::io::Error::other("synthetic test cause");
+
+        assert_actionable(
+            "CreateDir",
+            &RunStoreError::CreateDir {
+                path: p.clone(),
+                source: io_err(),
+            },
+        );
+        assert_actionable(
+            "OpenIndex",
+            &RunStoreError::OpenIndex {
+                path: p.clone(),
+                source: io_err(),
+            },
+        );
+        assert_actionable(
+            "WriteRecord",
+            &RunStoreError::WriteRecord {
+                path: p.clone(),
+                source: io_err(),
+            },
+        );
+        assert_actionable(
+            "ReadRecord",
+            &RunStoreError::ReadRecord {
+                path: p,
+                source: io_err(),
+            },
+        );
+        // Serde and Io carry the source error verbatim; build them
+        // with synthetic causes that surface through Display.
+        let serde_err: serde_json::Error =
+            serde_json::from_str::<serde_json::Value>("{ not json").unwrap_err();
+        assert_actionable("Serde", &RunStoreError::Serde(serde_err));
+        assert_actionable("Io", &RunStoreError::Io(io_err()));
     }
 
     /// ExitReason::from_summary matrix.

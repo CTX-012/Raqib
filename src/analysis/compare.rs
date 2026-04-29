@@ -350,6 +350,22 @@ pub fn detect_regressions_with(
     cfg: &RegressionConfig,
 ) -> Vec<Regression> {
     if baseline.sample_size < cfg.min_baseline_samples {
+        // Silent return is the right behaviour (tiny baselines must
+        // not flag regressions) but operators wondering "why didn't
+        // I get an alert?" have nowhere to look. Debug-level keeps
+        // it out of the default log stream while making it
+        // discoverable with `--log-level debug` — DESIGN_HANDOFF
+        // Gap 14 / Principle 6 (empty states teach the product).
+        tracing::debug!(
+            target: "regression",
+            model = %baseline.model,
+            sample_size = baseline.sample_size,
+            min_baseline_samples = cfg.min_baseline_samples,
+            "baseline below the minimum sample size; \
+             no regressions emitted (this is by design — a baseline \
+             of fewer than min_baseline_samples runs cannot \
+             distinguish regression from noise)"
+        );
         return Vec::new();
     }
     let mut out = Vec::new();

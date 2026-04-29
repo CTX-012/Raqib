@@ -352,6 +352,33 @@ once `v1.0.0` is tagged. Until then, minor versions may include breaking changes
     so operators running without the TUI see the model, not just a count.
 - Dual licensing under MIT OR Apache-2.0.
 
+### Changed
+- **UX pass — operator-facing labels rewritten in plain language.**
+  TUI panel titles, headless log lines, and the governor's dry-run
+  reason all dropped jargon-heavy phrasings:
+  * `Registry (AI workloads)` → `AI Workloads`
+  * `Rogues (unmapped framework procs)` → `Framework procs`
+  * `Culprits (top by PID order)` → `All processes`
+  * `Audit (kills + regressions)` → `Recent actions`
+  * `AI run summaries` → `Recent runs`
+  * `GPU: not available (NVML uninitialized)` → `No GPU detected`
+  * `processes: N   AI-classified: M` → `N processes   M AI workloads detected`
+  * Run-summary row now says `RAM 48 MB, GPU memory 4096 MB` instead
+    of `rss=48M vram=4096M`, and drops the GPU memory clause entirely
+    when the run had no GPU allocation.
+  * `model=` is omitted (TUI and headless tracing) when no model name
+    was extracted, instead of rendering `model=-` which read like a
+    sentinel value. Same treatment for `vram=0M` / `peak_vram_mb=0`.
+  * Governor dry-run reason `DRY-RUN: would send SIGTERM to AI
+    process: Inference` → `Would stop ollama (dry-run mode — no
+    action taken)`. Uses the actual process name and stops leaking
+    the `AICategory` Debug variant.
+  Verified by `scripts/manual/ux_rename_smoke.sh` (greps source for
+  every old label, runs the binary headlessly to confirm the
+  placeholder strings are gone) and a new
+  `dry_run_reason_string_uses_process_name_and_plain_english`
+  unit test in `governor::executor`.
+
 ### Fixed
 - **V1 (S1) — Ollama tokens/sec now extracted via stdout parser.**
   Tester 2's V1 ground-truth check found that `edge_monitor`

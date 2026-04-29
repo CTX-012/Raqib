@@ -33,7 +33,7 @@ pub fn render(f: &mut Frame, area: Rect, state: &RuntimeState, app: &App) {
         })
         .collect();
 
-    let block = panel_block("Culprits (top by PID order)", focused);
+    let block = panel_block("All processes", focused);
 
     let list = List::new(items).block(block).highlight_style(
         Style::default()

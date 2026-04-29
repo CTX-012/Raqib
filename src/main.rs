@@ -177,21 +177,51 @@ fn log_tick_summary(state: &RuntimeState) {
         "tick"
     );
     for p in &ai_procs {
-        let vram_mb = p
-            .vram_bytes
-            .map(|b| format!("{}M", b / (1024 * 1024)))
-            .unwrap_or_else(|| "-".into());
-        let model = p.model_name.as_deref().unwrap_or("-");
-        tracing::info!(
-            pid = p.pid,
-            name = %p.name,
-            category = ?p.category,
-            model = %model,
-            cpu_pct = p.cpu_pct,
-            rss_mb = p.rss_mb,
-            vram = %vram_mb,
-            "ai-process"
-        );
+        // Two emission sites: with and without `model=`. Keeps the
+        // structured-log shape clean — when no model name was extracted,
+        // we omit the field entirely instead of emitting `model=-`,
+        // which downstream parsers (jq, fluentd) would have to filter
+        // out by value rather than by key presence.
+        let model = p.model_name.as_deref().filter(|m| !m.is_empty());
+        let vram_mb = p.vram_bytes.filter(|b| *b > 0).map(|b| b / (1024 * 1024));
+        match (model, vram_mb) {
+            (Some(model), Some(vram)) => tracing::info!(
+                pid = p.pid,
+                name = %p.name,
+                category = ?p.category,
+                model = %model,
+                cpu_pct = p.cpu_pct,
+                rss_mb = p.rss_mb,
+                vram_mb = vram,
+                "ai-process"
+            ),
+            (Some(model), None) => tracing::info!(
+                pid = p.pid,
+                name = %p.name,
+                category = ?p.category,
+                model = %model,
+                cpu_pct = p.cpu_pct,
+                rss_mb = p.rss_mb,
+                "ai-process"
+            ),
+            (None, Some(vram)) => tracing::info!(
+                pid = p.pid,
+                name = %p.name,
+                category = ?p.category,
+                cpu_pct = p.cpu_pct,
+                rss_mb = p.rss_mb,
+                vram_mb = vram,
+                "ai-process"
+            ),
+            (None, None) => tracing::info!(
+                pid = p.pid,
+                name = %p.name,
+                category = ?p.category,
+                cpu_pct = p.cpu_pct,
+                rss_mb = p.rss_mb,
+                "ai-process"
+            ),
+        }
     }
     // Operator-facing exit channel: only summarise processes the classifier
     // ever recognised as AI. Short-lived shells, udev workers, etc. still land
@@ -206,7 +236,10 @@ fn log_tick_summary(state: &RuntimeState) {
         .iter()
         .filter(|s| s.category.is_some())
     {
-        let model = summary.model_name.as_deref().unwrap_or("-");
+        let model = summary
+            .model_name
+            .as_deref()
+            .filter(|m| !m.is_empty());
         // Filter above guarantees Some(_); render the variant directly so the
         // exit line matches the live ai-process line (`category=Inference`)
         // instead of leaking `Some(Inference)` through the Debug formatter.
@@ -214,19 +247,58 @@ fn log_tick_summary(state: &RuntimeState) {
             .category
             .map(|c| format!("{:?}", c))
             .unwrap_or_default();
-        tracing::info!(
-            pid = summary.pid,
-            name = %summary.name,
-            category = %category,
-            model = %model,
-            uptime_s = summary.uptime_secs,
-            avg_cpu_pct = summary.avg_cpu_pct,
-            peak_cpu_pct = summary.peak_cpu_pct,
-            peak_rss_mb = summary.peak_rss_mb,
-            peak_vram_mb = summary.peak_vram_mb,
-            samples = summary.samples,
-            "exit"
-        );
+        // Drop `peak_vram_mb` from the structured fields when zero — same
+        // rationale as the live `vram_mb` branch above. Same for `model`.
+        match (model, summary.peak_vram_mb) {
+            (Some(model), vram) if vram > 0 => tracing::info!(
+                pid = summary.pid,
+                name = %summary.name,
+                category = %category,
+                model = %model,
+                uptime_s = summary.uptime_secs,
+                avg_cpu_pct = summary.avg_cpu_pct,
+                peak_cpu_pct = summary.peak_cpu_pct,
+                peak_rss_mb = summary.peak_rss_mb,
+                peak_vram_mb = vram,
+                samples = summary.samples,
+                "exit"
+            ),
+            (Some(model), _) => tracing::info!(
+                pid = summary.pid,
+                name = %summary.name,
+                category = %category,
+                model = %model,
+                uptime_s = summary.uptime_secs,
+                avg_cpu_pct = summary.avg_cpu_pct,
+                peak_cpu_pct = summary.peak_cpu_pct,
+                peak_rss_mb = summary.peak_rss_mb,
+                samples = summary.samples,
+                "exit"
+            ),
+            (None, vram) if vram > 0 => tracing::info!(
+                pid = summary.pid,
+                name = %summary.name,
+                category = %category,
+                uptime_s = summary.uptime_secs,
+                avg_cpu_pct = summary.avg_cpu_pct,
+                peak_cpu_pct = summary.peak_cpu_pct,
+                peak_rss_mb = summary.peak_rss_mb,
+                peak_vram_mb = vram,
+                samples = summary.samples,
+                "exit"
+            ),
+            (None, _) => tracing::info!(
+                pid = summary.pid,
+                name = %summary.name,
+                category = %category,
+                uptime_s = summary.uptime_secs,
+                avg_cpu_pct = summary.avg_cpu_pct,
+                peak_cpu_pct = summary.peak_cpu_pct,
+                peak_rss_mb = summary.peak_rss_mb,
+                samples = summary.samples,
+                "exit"
+            ),
+        }
     }
 }
 

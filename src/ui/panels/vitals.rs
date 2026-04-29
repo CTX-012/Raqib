@@ -65,15 +65,15 @@ pub fn render(f: &mut Frame, area: Rect, state: &RuntimeState) {
             .ratio((pct / 100.0).clamp(0.0, 1.0));
         f.render_widget(gauge, cols[2]);
     } else {
-        let p = Paragraph::new("GPU: not available (NVML uninitialized)")
-            .style(Style::default().fg(Color::DarkGray));
+        let p = Paragraph::new("No GPU detected").style(Style::default().fg(Color::DarkGray));
         f.render_widget(p, cols[2]);
     }
 
+    let ai_count = state.ai_processes().count();
     let proc_line = Paragraph::new(format!(
-        "processes: {}   AI-classified: {}",
+        "{} processes   {} AI workloads detected",
         snap.processes.len(),
-        state.ai_processes().count()
+        ai_count,
     ));
     f.render_widget(proc_line, cols[3]);
 }

@@ -10,7 +10,7 @@ use crate::runtime::RuntimeState;
 use super::panel_block;
 
 pub fn render(f: &mut Frame, area: Rect, state: &RuntimeState) {
-    let block = panel_block("Audit (kills + regressions)", false);
+    let block = panel_block("Recent actions", false);
 
     // Interleave kill entries and regression events by timestamp.
     // Tier 1.3 — `state.regressions` is the rolling buffer fed by the

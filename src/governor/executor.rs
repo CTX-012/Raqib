@@ -94,8 +94,8 @@ impl GovernorExecutor {
                     (
                         KillAction::DryRunTermWould,
                         format!(
-                            "DRY-RUN: would send SIGTERM to AI process: {:?}",
-                            category.unwrap_or(AICategory::NotAi)
+                            "Would stop {} (dry-run mode — no action taken)",
+                            lifecycle.name,
                         ),
                     )
                 }
@@ -424,6 +424,41 @@ mod tests {
         let decisions = executor.evaluate(&snapshot);
         assert_eq!(decisions.len(), 1);
         assert_eq!(decisions[0].1, KillAction::DryRunTermWould);
+    }
+
+    /// Dry-run reason string is operator-facing (lands in the Audit
+    /// panel and stderr). It must name the actual process by name and
+    /// state plainly that no action was taken — the prior phrasing
+    /// shouted "DRY-RUN" in caps and leaked the `AICategory` Debug
+    /// variant. Pinning the new format here prevents accidental
+    /// regression when the executor logic gets restructured.
+    #[test]
+    fn dry_run_reason_string_uses_process_name_and_plain_english() {
+        let policy = GovernorPolicy::safe_default();
+        let mut executor = GovernorExecutor::new(policy);
+
+        let mut snapshot = crate::lifecycle::LifecycleSnapshot::new();
+        snapshot.processes.insert(
+            42,
+            make_lifecycle(42, "ollama", Some(AICategory::Inference), false),
+        );
+
+        let decisions = executor.evaluate(&snapshot);
+        assert_eq!(decisions.len(), 1);
+        let (_pid, action, reason) = &decisions[0];
+        assert_eq!(*action, KillAction::DryRunTermWould);
+        assert_eq!(
+            reason,
+            "Would stop ollama (dry-run mode — no action taken)",
+        );
+        assert!(
+            !reason.contains("DRY-RUN"),
+            "old shouty `DRY-RUN:` prefix must not return"
+        );
+        assert!(
+            !reason.contains("Inference"),
+            "category Debug variant must not leak into operator-facing text"
+        );
     }
 
     #[test]

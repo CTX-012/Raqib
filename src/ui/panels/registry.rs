@@ -29,14 +29,17 @@ pub fn render(f: &mut Frame, area: Rect, state: &RuntimeState, app: &App) {
         .iter()
         .filter_map(|pid| state.annotated.iter().find(|p| p.pid == *pid))
         .map(|p| {
-            // Prefer the extracted model name when present; fall back to "-"
-            // so rogue-style matches (keyword / script-sniff) still render in
-            // the same column layout.
-            let model = p.model_name.as_deref().unwrap_or("-");
-            let vram = p
-                .vram_bytes
-                .map(|b| format!("{:>4}M", b / (1024 * 1024)))
-                .unwrap_or_else(|| "   -".into());
+            // Show model when extracted; leave the column blank rather than
+            // a dash when nothing's resolved — a dash invites the reader to
+            // think there is a special "unknown" model called "-".
+            let model = p.model_name.as_deref().unwrap_or("");
+            // Hide GPU memory when the host has no GPU or the process has
+            // no GPU allocation — printing "0M" implies a measurement we
+            // didn't actually take. An empty column communicates absence.
+            let vram = match p.vram_bytes {
+                Some(b) if b > 0 => format!("{:>4}M", b / (1024 * 1024)),
+                _ => "    ".into(),
+            };
             let head = format!(
                 "{:>6} {:<9?} {:>5.1}% {:>5}M {} {:<18} {}",
                 p.pid,
@@ -70,7 +73,7 @@ pub fn render(f: &mut Frame, area: Rect, state: &RuntimeState, app: &App) {
         })
         .collect();
 
-    let block = panel_block("Registry (AI workloads)", focused);
+    let block = panel_block("AI Workloads", focused);
 
     let list = List::new(items).block(block).highlight_style(
         Style::default()

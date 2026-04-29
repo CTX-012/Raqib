@@ -32,7 +32,7 @@ pub fn render(f: &mut Frame, area: Rect, state: &RuntimeState, app: &App) {
         })
         .collect();
 
-    let block = panel_block("Rogues (unmapped framework procs)", focused);
+    let block = panel_block("Framework procs", focused);
 
     let list = List::new(items).block(block).highlight_style(
         Style::default()

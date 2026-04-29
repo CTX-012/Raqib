@@ -150,6 +150,21 @@ pub struct RunMetrics {
     /// counter for this PID.
     pub kv_cache_evictions_total: Option<u64>,
     pub concurrent_requests_peak: Option<u32>,
+    /// Tier 3.4 — time-weighted average of `vllm:num_requests_running`
+    /// across the run. Distinct from `_peak`: a server that briefly
+    /// touched 16 concurrent but ran at 2 most of the time should
+    /// report `avg ≈ 2`, `peak = 16`. None when fewer than 2 telemetry
+    /// samples spanned >0 wall-clock seconds (single-sample runs have
+    /// no weight to average against — see
+    /// `telemetry::concurrent_requests::TimeWeightedGauge`).
+    pub concurrent_requests_avg: Option<f32>,
+    /// Tier 3.4 — peak `vllm:num_requests_waiting` (queue depth)
+    /// observed during the run. A non-zero value here means the
+    /// server was rejecting / queuing under the offered load — a
+    /// saturation signal that's invisible if you only watch
+    /// `concurrent_requests_peak` (running). None when the sampler
+    /// never reported a queue value (llama.cpp / Ollama don't).
+    pub concurrent_requests_waiting_peak: Option<u32>,
 
     /// Tier 3.2 — same `tokens_per_sec_avg` arithmetic but restricted
     /// to samples after cold-load completed. None when cold-load never
@@ -1080,6 +1095,92 @@ mod tests {
             2,
             "pruned records should not be revived on reopen"
         );
+    }
+
+    /// F.1.7 — disk-full / write-rejection path on `RunStore::append`.
+    ///
+    /// **Mock note.** TEST.md asks for a real ENOSPC. Producing an honest
+    /// `ErrorKind::StorageFull` portably across CI environments would
+    /// require either mounting a sized tmpfs (root-only on the WSL dev
+    /// box where this runs) or filling the temp partition (slow and
+    /// unfriendly to whoever else uses /tmp). Instead this test mocks
+    /// "the filesystem rejected the write" at the cheapest equivalent
+    /// boundary: chmod the per-day record directory to read-only after
+    /// a successful append, so the next `OpenOptions::create_new` call
+    /// inside `append` returns `ErrorKind::PermissionDenied` from the
+    /// kernel. The code path being exercised is the same one ENOSPC
+    /// would hit — `RunStoreError::WriteRecord { source: io::Error, … }`
+    /// — so the contract under test (Err-not-panic, message names the
+    /// path, in-memory state stays consistent, `recent` does not show
+    /// the failed record) is identical.
+    ///
+    /// Unix-only because `fs::Permissions::set_mode` is. Restored at
+    /// the end so tempfile's drop can clean up.
+    #[test]
+    #[cfg(unix)]
+    fn append_returns_err_when_filesystem_rejects_write() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = RunStore::open(dir.path()).unwrap();
+
+        // Happy-path append establishes the per-day dir under runs/.
+        let ok_id = store
+            .append(fixture_record(1, "diskfull-test", 30.0))
+            .unwrap();
+
+        // Find the day directory the previous append created.
+        let runs_root = dir.path().join("runs");
+        let day_dir = fs::read_dir(&runs_root)
+            .unwrap()
+            .next()
+            .expect("expected one day-subdir after first append")
+            .unwrap()
+            .path();
+
+        // Lock down write permission on the day directory so the next
+        // create_new(true) call inside append fails with EACCES — the
+        // OS-level "this write cannot proceed" signal that ENOSPC also
+        // delivers on a full disk.
+        let mut readonly = fs::metadata(&day_dir).unwrap().permissions();
+        readonly.set_mode(0o555);
+        fs::set_permissions(&day_dir, readonly).unwrap();
+
+        let result = store.append(fixture_record(2, "diskfull-test", 30.0));
+        // Always restore perms before any assertion so a panic still
+        // lets tempfile clean up the directory tree.
+        let mut writable = fs::metadata(&day_dir).unwrap().permissions();
+        writable.set_mode(0o755);
+        fs::set_permissions(&day_dir, writable).unwrap();
+
+        let err = result.expect_err("append should fail when the day dir is read-only");
+        let msg = err.to_string();
+        // Useful message: the user-visible string must name what was
+        // being written. The other RunStoreError variants are also
+        // acceptable here (CreateDir, OpenIndex) since the rejection
+        // can land at any of the three IO sites; whichever fires, the
+        // wrapped path must appear so the operator can diagnose.
+        assert!(
+            msg.contains("run-")
+                || msg.contains("runs")
+                || msg.contains("index"),
+            "error string lacks the failing path context: {msg}"
+        );
+        // In-memory state is consistent: the only record visible to
+        // queries is the one that succeeded before the chmod.
+        let recent = store.recent("diskfull-test", 100);
+        assert_eq!(
+            recent.len(),
+            1,
+            "recent() must not surface a failed append; got {recent:?}"
+        );
+        assert_eq!(recent[0].run_id, ok_id);
+        // Audit log records the failure at warn level via tracing —
+        // tests can't assert on tracing output without a custom
+        // subscriber, but the prune audit log (in-memory ring) is the
+        // only structured channel we expose. Failed appends do not
+        // populate it because no prune ran; that's the contract.
+        assert!(store.prune_audit_log().is_empty());
     }
 
     /// ExitReason::from_summary matrix.

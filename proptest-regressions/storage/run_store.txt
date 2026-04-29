@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 706da41a755e0e2f53ceccb9f85f2b3480b60da6dd7e918225f61cff64a4b81e # shrinks to ops = [Append { model: "alpha", spawn_offset: -11 }, Append { model: "alpha", spawn_offset: 0 }, Recent { model: "alpha", n: 2 }], keep_limit = 2

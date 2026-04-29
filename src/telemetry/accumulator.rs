@@ -8,6 +8,7 @@
 use std::collections::HashMap;
 
 use crate::storage::run_store::RunMetrics;
+use crate::telemetry::concurrent_requests::TimeWeightedGauge;
 use crate::telemetry::source::TelemetryFrame;
 
 /// Running aggregates for one PID. Reset on PID reuse (the dispatcher
@@ -52,8 +53,12 @@ pub struct PerPidStats {
     kv_evictions_first: Option<u64>,
     kv_evictions_last: Option<u64>,
 
-    // Concurrent requests.
-    concurrent_peak: u32,
+    // Concurrent requests (Tier 3.4). Two time-weighted gauges so peak
+    // and average answer different questions: peak = "how high did
+    // load get", avg = "what was the typical concurrency". Waiting
+    // gauge tracks vLLM's queue-depth metric (saturation signal).
+    concurrent_running: TimeWeightedGauge,
+    concurrent_waiting: TimeWeightedGauge,
 
     // Power & thermals (Tier 2.1). Sums for averages, peaks for the
     // tail, and a running joules counter computed by trapezoidal
@@ -155,10 +160,11 @@ impl PerPidStats {
                 _ => {}
             }
         }
-        if let Some(c) = f.concurrent_requests
-            && c > self.concurrent_peak
-        {
-            self.concurrent_peak = c;
+        if let Some(c) = f.concurrent_requests {
+            self.concurrent_running.record(c, now);
+        }
+        if let Some(w) = f.num_requests_waiting {
+            self.concurrent_waiting.record(w, now);
         }
 
         // Power: sum-of-readings + peak; integrate energy by
@@ -234,11 +240,15 @@ impl PerPidStats {
                 (Some(first), Some(last)) => Some(last.saturating_sub(first)),
                 _ => None,
             },
-            concurrent_requests_peak: if self.concurrent_peak > 0 {
-                Some(self.concurrent_peak)
-            } else {
-                None
-            },
+            // Peak from the gauge surfaces 0 vs None correctly: a run
+            // that saw `num_requests_running = 0` consistently still
+            // reports Some(0) (we did observe the metric) rather than
+            // None (we never observed it). Pre-3.4 semantics treated
+            // peak=0 as "no data" and emitted None; the new shape is
+            // strictly more informative.
+            concurrent_requests_peak: self.concurrent_running.peak(),
+            concurrent_requests_avg: self.concurrent_running.average(),
+            concurrent_requests_waiting_peak: self.concurrent_waiting.peak(),
 
             frames_total: None,
             fps_avg: avg(self.fps_sum, self.fps_samples),

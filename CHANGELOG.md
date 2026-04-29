@@ -9,6 +9,28 @@ once `v1.0.0` is tagged. Until then, minor versions may include breaking changes
 ## [Unreleased]
 
 ### Added
+- **Tier 3.4 — concurrent-request awareness**
+  (`src/telemetry/concurrent_requests.rs`). New
+  `TimeWeightedGauge` primitive folds `(value, instant)` samples into
+  a step-function integral so we can answer "what was the typical
+  concurrency" — distinct from the existing peak. The accumulator
+  uses two gauges per PID (running + waiting) so a server that
+  briefly touched 16 concurrent but spent most of its time at 2
+  reports `peak=16, avg≈2`, not just `peak=16`. vLLM sampler now
+  reads `vllm:num_requests_waiting` (queue depth, saturation
+  signal). `RunMetrics` gains `concurrent_requests_avg: Option<f32>`
+  (time-weighted) and `concurrent_requests_waiting_peak:
+  Option<u32>`; existing `concurrent_requests_peak` semantics
+  tighten — peak is `Some(value)` whenever any sample was observed,
+  including peak=0, instead of collapsing peak=0 to None. Spec
+  example "1 req for 10 s, 8 for 50 s" lands the textbook
+  `(1·10 + 8·50)/60 ≈ 6.833` average. 7 unit tests cover the
+  gauge edge cases (single sample, zero-Δt, all-zero values,
+  backwards-time, 1000-sample precision); 3 integration tests in
+  `tests/concurrent_requests_e2e.rs` cover the accumulator path.
+  Smoke `scripts/manual/concurrent_requests_smoke.sh` runs the
+  targeted tests and prints the spec calculation done two ways.
+
 - **Tier 3.7 — `edge_monitor compare` CLI** (`src/compare.rs`, commit
   `0e3b518`). New subcommand `edge_monitor compare MODEL [MODEL ...]
   [--runs N] [--json]` folds the most recent N records per model into

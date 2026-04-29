@@ -43,6 +43,14 @@ pub struct TelemetryFrame {
     /// and not pre-difference it.
     pub kv_cache_evictions: Option<u64>,
     pub concurrent_requests: Option<u32>,
+    /// Tier 3.4 — current size of the runtime's "queued / waiting"
+    /// requests counter. vLLM exposes `vllm:num_requests_waiting`;
+    /// llama.cpp / Ollama do not. None when the sampler can't
+    /// observe the queue. Distinguishes "running 4 requests with
+    /// nothing waiting" (healthy) from "running 4 with 30 waiting"
+    /// (saturated and dropping latency on the floor).
+    #[serde(default)]
+    pub num_requests_waiting: Option<u32>,
 
     /// Power & thermal (Tier 2.1). Watts at instant. Accumulator turns
     /// per-frame readings into avg / peak; an integrator turns them

@@ -198,6 +198,15 @@ pub fn frame_from_metrics(pid: u32, m: &HashMap<String, f64>) -> TelemetryFrame 
     if let Some(v) = m.get("vllm:num_requests_running") {
         frame.concurrent_requests = Some(*v as u32);
     }
+    // Tier 3.4 — vLLM's queue depth. Negative / non-finite values are
+    // dropped so a malformed scrape can't poison the time-weighted
+    // gauge with garbage.
+    if let Some(v) = m.get("vllm:num_requests_waiting")
+        && v.is_finite()
+        && *v >= 0.0
+    {
+        frame.num_requests_waiting = Some(*v as u32);
+    }
     // Tier 3.3 — vLLM exposes `vllm:num_preemptions_total`, a monotonic
     // counter of requests preempted because the KV cache filled. We
     // surface it as the run's eviction count. Negative or non-finite

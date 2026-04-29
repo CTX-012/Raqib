@@ -23,6 +23,7 @@
 
 pub mod accumulator;
 pub mod cold_load;
+pub mod concurrent_requests;
 pub mod dispatcher;
 pub mod exporter;
 pub mod rapl;

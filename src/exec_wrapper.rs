@@ -240,8 +240,8 @@ pub async fn run_exec(
     if let Some(path) = config.storage.run_store() {
         match RunStore::open(&path) {
             Ok(store) => {
-                let mut store = store
-                    .with_keep_limit(Some(config.storage.keep_runs_per_model as usize));
+                let mut store =
+                    store.with_keep_limit(Some(config.storage.keep_runs_per_model as usize));
                 if let Err(e) = store.append(record) {
                     eprintln!("edge_monitor: failed to persist run record: {}", e);
                 }

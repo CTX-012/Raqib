@@ -59,9 +59,7 @@ pub fn render(f: &mut Frame, area: Rect, state: &RuntimeState, app: &App) {
             {
                 let kv_text = format!("  KV {:>4.0}%", kv);
                 let style = if kv >= KV_HOT_PCT {
-                    Style::default()
-                        .fg(Color::Red)
-                        .add_modifier(Modifier::BOLD)
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
                 } else {
                     cyan
                 };

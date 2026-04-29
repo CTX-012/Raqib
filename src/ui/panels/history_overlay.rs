@@ -98,8 +98,7 @@ fn body_list(overlay: &HistoryOverlay) -> List<'_> {
                 r.summary.peak_vram_mb,
                 exit,
             );
-            let mut spans: Vec<Span<'_>> =
-                vec![Span::styled(row, Style::default().fg(color))];
+            let mut spans: Vec<Span<'_>> = vec![Span::styled(row, Style::default().fg(color))];
 
             // Tier 3.3 — saturation badge. Independent of exit colour
             // so a clean-exit run that maxed KV still gets flagged.
@@ -108,9 +107,7 @@ fn body_list(overlay: &HistoryOverlay) -> List<'_> {
             {
                 spans.push(Span::styled(
                     "  KV!",
-                    Style::default()
-                        .fg(Color::Red)
-                        .add_modifier(Modifier::BOLD),
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
                 ));
             }
 

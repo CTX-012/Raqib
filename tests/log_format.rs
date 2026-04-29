@@ -96,7 +96,9 @@ fn human_format_is_not_json_shaped() {
         // regression at PR time.
         if line.starts_with('{') {
             // Try to parse — if it's a real object, that's a bug.
-            if let Ok(serde_json::Value::Object(_)) = serde_json::from_str::<serde_json::Value>(line) {
+            if let Ok(serde_json::Value::Object(_)) =
+                serde_json::from_str::<serde_json::Value>(line)
+            {
                 panic!("human-format line parsed as a JSON object: {line}");
             }
         }

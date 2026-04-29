@@ -149,11 +149,10 @@ mod tests {
         g.record(1, at(t0, 0));
         g.record(8, at(t0, 10));
         g.record(8, at(t0, 60));
-        let avg = g.average().expect("average defined for ≥2 samples spanning >0s");
-        assert!(
-            (avg - 6.833_333).abs() < 1e-3,
-            "expected ≈6.833, got {avg}"
-        );
+        let avg = g
+            .average()
+            .expect("average defined for ≥2 samples spanning >0s");
+        assert!((avg - 6.833_333).abs() < 1e-3, "expected ≈6.833, got {avg}");
         assert_eq!(g.peak(), Some(8));
     }
 
@@ -215,8 +214,8 @@ mod tests {
         let t0 = Instant::now();
         let mut g = TimeWeightedGauge::new();
         g.record(3, at(t0, 0));
-        g.record(7, at(t0, 10));   // contributes 3 · 10 = 30
-        g.record(9, t0);           // backwards: dt clamped to 0
+        g.record(7, at(t0, 10)); // contributes 3 · 10 = 30
+        g.record(9, t0); // backwards: dt clamped to 0
         let avg = g.average().expect("average defined");
         // After 3 samples: integral = 30 + 7*0 = 30; total_time = 10 + 0 = 10
         // avg = 30/10 = 3.0

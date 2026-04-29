@@ -132,19 +132,16 @@ impl BaselineMetrics {
         let outliers = identify_outliers(records);
         let kept: Vec<&RunRecord> = if drop_outliers && !outliers.is_empty() {
             let drop: HashSet<Uuid> = outliers.iter().copied().collect();
-            records.iter().filter(|r| !drop.contains(&r.run_id)).collect()
+            records
+                .iter()
+                .filter(|r| !drop.contains(&r.run_id))
+                .collect()
         } else {
             records.iter().collect()
         };
         let metrics = BaselineMetrics {
-            avg_cpu_pct: stat(
-                kept.iter().map(|r| Some(r.summary.avg_cpu_pct)),
-                strategy,
-            ),
-            peak_cpu_pct: stat(
-                kept.iter().map(|r| Some(r.summary.peak_cpu_pct)),
-                strategy,
-            ),
+            avg_cpu_pct: stat(kept.iter().map(|r| Some(r.summary.avg_cpu_pct)), strategy),
+            peak_cpu_pct: stat(kept.iter().map(|r| Some(r.summary.peak_cpu_pct)), strategy),
             peak_rss_mb: stat(
                 kept.iter().map(|r| Some(r.summary.peak_rss_mb as f32)),
                 strategy,
@@ -157,15 +154,9 @@ impl BaselineMetrics {
                 kept.iter().map(|r| Some(r.summary.uptime_secs as f32)),
                 strategy,
             ),
-            tokens_per_sec_avg: stat(
-                kept.iter().map(|r| r.metrics.tokens_per_sec_avg),
-                strategy,
-            ),
+            tokens_per_sec_avg: stat(kept.iter().map(|r| r.metrics.tokens_per_sec_avg), strategy),
             fps_avg: stat(kept.iter().map(|r| r.metrics.fps_avg), strategy),
-            gpu_watts_avg: stat(
-                kept.iter().map(|r| r.metrics.gpu_watts_avg),
-                strategy,
-            ),
+            gpu_watts_avg: stat(kept.iter().map(|r| r.metrics.gpu_watts_avg), strategy),
         };
         (metrics, outliers)
     }
@@ -236,7 +227,11 @@ fn identify_outliers(records: &[RunRecord]) -> Vec<Uuid> {
     for extractor in extractors {
         let values: Vec<(Uuid, f32)> = records
             .iter()
-            .filter_map(|r| extractor(r).filter(|v| v.is_finite()).map(|v| (r.run_id, v)))
+            .filter_map(|r| {
+                extractor(r)
+                    .filter(|v| v.is_finite())
+                    .map(|v| (r.run_id, v))
+            })
             .collect();
         if values.len() < 2 {
             continue;
@@ -614,7 +609,11 @@ mod tests {
             ("10.01% (just above warn)", 89.99, Some(Severity::Warn)),
             ("12% (mid warn band)", 88.0, Some(Severity::Warn)),
             ("19.99% (just below critical)", 80.01, Some(Severity::Warn)),
-            ("20.01% (just at/above critical)", 79.99, Some(Severity::Critical)),
+            (
+                "20.01% (just at/above critical)",
+                79.99,
+                Some(Severity::Critical),
+            ),
         ];
 
         for (label, current_tps, expected) in cases {
@@ -737,8 +736,7 @@ mod tests {
         // Sanity: when no outliers exist, both strategies agree and the
         // outlier list is empty.
         let clean: Vec<RunRecord> = (0..6).map(|_| record_with_tps(50.0)).collect();
-        let (mc, mo) =
-            BaselineMetrics::from_records_with(&clean, BaselineStrategy::Mean, false);
+        let (mc, mo) = BaselineMetrics::from_records_with(&clean, BaselineStrategy::Mean, false);
         let (med_c, med_o) =
             BaselineMetrics::from_records_with(&clean, BaselineStrategy::Median, false);
         assert!(mo.is_empty() && med_o.is_empty());

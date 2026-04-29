@@ -276,14 +276,24 @@ mod tests {
         assert!((t1[0] - 6.97).abs() < 1e-3, "trial 1: got {}", t1[0]);
 
         let t2 = extract(&trial_2);
-        assert_eq!(t2.len(), 1, "trial 2 should yield exactly one tok/s, got {:?}", t2);
+        assert_eq!(
+            t2.len(),
+            1,
+            "trial 2 should yield exactly one tok/s, got {:?}",
+            t2
+        );
         assert!((t2[0] - 2.82).abs() < 1e-3, "trial 2: got {}", t2[0]);
 
         // Trial 3's prompt eval rate (60.37) is HIGHER than its eval
         // rate (2.34). If the regex ever loosens to match prompt eval
         // rate by accident, this assertion catches it loudly.
         let t3 = extract(&trial_3);
-        assert_eq!(t3.len(), 1, "trial 3 should yield exactly one tok/s, got {:?}", t3);
+        assert_eq!(
+            t3.len(),
+            1,
+            "trial 3 should yield exactly one tok/s, got {:?}",
+            t3
+        );
         assert!(
             (t3[0] - 2.34).abs() < 1e-3,
             "trial 3: got {} — if this is 60.37, the regex matched prompt eval rate",

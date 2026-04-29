@@ -514,11 +514,7 @@ impl RunStore {
         // driven. `get` performs disk I/O — acceptable because this
         // path only fires when the cap was just crossed (typically
         // O(1) per append once steady state is reached).
-        let ids: Vec<RunId> = self
-            .by_model
-            .get(model_key)
-            .cloned()
-            .unwrap_or_default();
+        let ids: Vec<RunId> = self.by_model.get(model_key).cloned().unwrap_or_default();
         let mut with_time: Vec<(RunId, DateTime<Utc>)> = ids
             .iter()
             .filter_map(|id| {
@@ -713,8 +709,7 @@ impl RunStore {
             return None;
         }
         let strategy = crate::analysis::compare::BaselineStrategy::Mean;
-        let (metrics, outliers) =
-            BaselineMetrics::from_records_with(&records, strategy, false);
+        let (metrics, outliers) = BaselineMetrics::from_records_with(&records, strategy, false);
         Some(Baseline {
             model: model.to_string(),
             sample_size: records.len(),
@@ -745,8 +740,7 @@ impl RunStore {
         // append code never produces that order today, but the parser
         // is the natural place to be defensive.
         let mut entries: Vec<IndexEntry> = Vec::new();
-        let mut tombstoned: std::collections::HashSet<RunId> =
-            std::collections::HashSet::new();
+        let mut tombstoned: std::collections::HashSet<RunId> = std::collections::HashSet::new();
         for (i, line) in BufReader::new(file).lines().enumerate() {
             let line = line?;
             if line.trim().is_empty() {
@@ -972,9 +966,7 @@ mod tests {
     #[test]
     fn prune_keeps_three_newest_by_spawn_time() {
         let dir = tempfile::tempdir().unwrap();
-        let mut store = RunStore::open(dir.path())
-            .unwrap()
-            .with_keep_limit(Some(3));
+        let mut store = RunStore::open(dir.path()).unwrap().with_keep_limit(Some(3));
 
         let base = Utc::now() - chrono::Duration::seconds(100);
         // Spawn timestamps deliberately *out of order* vs append order.
@@ -1000,12 +992,9 @@ mod tests {
             recent.len(),
             recent.iter().map(|r| r.run_id).collect::<Vec<_>>()
         );
-        let kept_ids: std::collections::HashSet<RunId> =
-            recent.iter().map(|r| r.run_id).collect();
-        let expected_kept: std::collections::HashSet<RunId> = [2, 3, 4]
-            .iter()
-            .map(|i| id_by_idx[i])
-            .collect();
+        let kept_ids: std::collections::HashSet<RunId> = recent.iter().map(|r| r.run_id).collect();
+        let expected_kept: std::collections::HashSet<RunId> =
+            [2, 3, 4].iter().map(|i| id_by_idx[i]).collect();
         assert_eq!(
             kept_ids, expected_kept,
             "kept set should be the three newest by spawn_time"
@@ -1020,8 +1009,10 @@ mod tests {
         // Prune audit log: 2 prune actions fired (one per cap-crossing
         // append). Together they account for the two evicted ids.
         let audit = store.prune_audit_log();
-        let all_deleted: std::collections::HashSet<RunId> =
-            audit.iter().flat_map(|a| a.deleted.iter().copied()).collect();
+        let all_deleted: std::collections::HashSet<RunId> = audit
+            .iter()
+            .flat_map(|a| a.deleted.iter().copied())
+            .collect();
         let expected_deleted: std::collections::HashSet<RunId> =
             [0, 1].iter().map(|i| id_by_idx[i]).collect();
         assert_eq!(
@@ -1040,16 +1031,12 @@ mod tests {
     #[test]
     fn prune_with_limit_two_leaves_two_files_on_disk() {
         let dir = tempfile::tempdir().unwrap();
-        let mut store = RunStore::open(dir.path())
-            .unwrap()
-            .with_keep_limit(Some(2));
+        let mut store = RunStore::open(dir.path()).unwrap().with_keep_limit(Some(2));
 
         let base = Utc::now() - chrono::Duration::seconds(1_000);
         for i in 0..10u32 {
             let ts = base + chrono::Duration::seconds(i as i64);
-            store
-                .append(fixture_record_at(i, "qwen", ts))
-                .unwrap();
+            store.append(fixture_record_at(i, "qwen", ts)).unwrap();
         }
 
         // Walk the runs/ tree and count *.json files.
@@ -1080,15 +1067,11 @@ mod tests {
     fn pruned_ids_stay_pruned_after_reopen() {
         let dir = tempfile::tempdir().unwrap();
         {
-            let mut store = RunStore::open(dir.path())
-                .unwrap()
-                .with_keep_limit(Some(2));
+            let mut store = RunStore::open(dir.path()).unwrap().with_keep_limit(Some(2));
             let base = Utc::now() - chrono::Duration::seconds(50);
             for i in 0..5u32 {
                 let ts = base + chrono::Duration::seconds(i as i64);
-                store
-                    .append(fixture_record_at(i, "llama", ts))
-                    .unwrap();
+                store.append(fixture_record_at(i, "llama", ts)).unwrap();
             }
             assert_eq!(store.recent("llama", 100).len(), 2);
         }
@@ -1193,9 +1176,7 @@ mod tests {
         // can land at any of the three IO sites; whichever fires, the
         // wrapped path must appear so the operator can diagnose.
         assert!(
-            msg.contains("run-")
-                || msg.contains("runs")
-                || msg.contains("index"),
+            msg.contains("run-") || msg.contains("runs") || msg.contains("index"),
             "error string lacks the failing path context: {msg}"
         );
         // In-memory state is consistent: the only record visible to
@@ -1308,10 +1289,11 @@ mod prop_tests {
 
     fn op_strategy() -> impl Strategy<Value = Op> {
         prop_oneof![
-            (model_strategy(), -50i32..50i32)
-                .prop_map(|(model, spawn_offset)| Op::Append { model, spawn_offset }),
-            (model_strategy(), 0usize..15)
-                .prop_map(|(model, n)| Op::Recent { model, n }),
+            (model_strategy(), -50i32..50i32).prop_map(|(model, spawn_offset)| Op::Append {
+                model,
+                spawn_offset
+            }),
+            (model_strategy(), 0usize..15).prop_map(|(model, n)| Op::Recent { model, n }),
         ]
     }
 

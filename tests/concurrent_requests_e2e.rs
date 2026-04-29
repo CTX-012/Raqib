@@ -38,11 +38,11 @@ fn step_function_reports_time_weighted_average_and_running_peak() {
     let pid: u32 = 4242;
 
     let starts = [
-        (1u32, 0u64),    // t = 0 ms
-        (1, 100),        // t = 100 ms
-        (1, 200),        // t = 200 ms (still 1; gives us the 200 ms of "1" weight)
-        (8, 200),        // jump immediately afterwards
-        (8, 700),        // hold 8 for 500 ms
+        (1u32, 0u64), // t = 0 ms
+        (1, 100),     // t = 100 ms
+        (1, 200),     // t = 200 ms (still 1; gives us the 200 ms of "1" weight)
+        (8, 200),     // jump immediately afterwards
+        (8, 700),     // hold 8 for 500 ms
     ];
 
     let begin = Instant::now();

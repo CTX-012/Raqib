@@ -75,3 +75,38 @@ baseline_window = 10
 # noisy false-positives. Set to u32::MAX (4294967295) to disable
 # regression detection without removing this section.
 min_baseline_samples = 3
+
+[telemetry]
+# Toggles for the optional samplers driven by `telemetry::Dispatcher`.
+# All on by default; sampling is cheap on idle (HTTP scrapers fail fast
+# on connection refused) and the dispatcher's `applies_to` gate keeps
+# non-AI processes from being touched.
+
+# vLLM Prometheus scraper (latest.md Tier 1.2a). Detects vllm processes
+# by cmdline (`vllm serve`, `vllm.entrypoints.*`, `python -m vllm`) or
+# `VLLM_*` env vars; scrapes `http://127.0.0.1:<port>/metrics`. Set
+# `false` to disable on hosts that never run vLLM.
+vllm_scrape = true
+
+# llama.cpp `llama-server` scraper (latest.md Tier 1.2b). Same shape as
+# vLLM, defaults to port 8080. Set `false` to disable.
+llamacpp_scrape = true
+
+# Ollama `/api/ps` poller (latest.md Tier 1.2c). Confirms which model
+# is loaded so the dispatcher can promote the model name onto the
+# RunRecord even when the classifier saw only `ollama runner`.
+ollama_api = true
+
+# Built-in Prometheus exporter (latest.md Tier 2.3). Empty string
+# disables; otherwise `host:port` (e.g. "127.0.0.1:9472"). Bind to
+# loopback and put a reverse proxy in front for auth / TLS — the
+# exporter does no auth itself. Disabled by default.
+prometheus_bind = ""
+
+# Vision probe Unix-domain socket (latest.md Tier 3.6). Empty disables;
+# otherwise a filesystem path the vision-inference loop can connect to
+# and push line-delimited `{"pid": <u32>, "frame_at_ns": <u64>}` JSON
+# events. Each event aggregates into a per-PID rolling 1s window and
+# instantaneous fps flows into the telemetry accumulator. Disabled by
+# default.
+vision_probe_socket = ""

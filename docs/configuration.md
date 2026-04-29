@@ -66,6 +66,27 @@ runs for the same model.
 | `baseline_window`        | u32  | `10`    | Number of prior runs (per model) folded into the rolling baseline. Larger → smoother but slower to track real drift. Must be `> 0`. |
 | `min_baseline_samples`   | u32  | `3`     | Minimum prior runs required before the detector fires. Below this the detector stays silent (small samples produce noisy false positives). Set to `u32::MAX` (`4294967295`) to disable regression detection without removing the section. |
 
+## `[telemetry]`
+
+Toggles for the optional samplers driven by `telemetry::Dispatcher`
+(latest.md Tier 1.2 + 2.3 + 3.6). All HTTP samplers fail fast on
+connection refused, and the dispatcher's `applies_to` gate keeps
+non-AI processes from being touched, so the defaults are safe even
+on hosts that don't run any of these runtimes.
+
+| Field                  | Type   | Default | Meaning |
+|------------------------|--------|---------|---------|
+| `vllm_scrape`          | bool   | `true`  | vLLM Prometheus scraper (Tier 1.2a). Detects `vllm serve` / `vllm.entrypoints.*` / `python -m vllm` / `VLLM_*` env vars; scrapes `http://127.0.0.1:<port>/metrics`. |
+| `llamacpp_scrape`      | bool   | `true`  | llama.cpp `llama-server` scraper (Tier 1.2b). Default port 8080. |
+| `ollama_api`           | bool   | `true`  | Ollama `/api/ps` poller (Tier 1.2c). Confirms which model is loaded so the dispatcher can promote the model name onto the `RunRecord`. |
+| `prometheus_bind`      | String | `""`    | Built-in Prometheus exporter (Tier 2.3). Empty disables. Otherwise `host:port` (e.g. `127.0.0.1:9472`). The exporter does no auth or TLS itself; bind to loopback and put a reverse proxy in front for either. |
+| `vision_probe_socket`  | String | `""`    | Vision probe Unix-domain socket (Tier 3.6). Empty disables. Otherwise a filesystem path the vision-inference loop can push line-delimited `{"pid": <u32>, "frame_at_ns": <u64>}` JSON events to. Each event aggregates into a per-PID rolling 1s window and instantaneous fps flows into the telemetry accumulator. |
+
+NVML GPU power/°C and Intel RAPL CPU power are unconditionally read
+when the underlying interface is present (latest.md Tier 2.1). There
+is no `[power]` config section today; the dispatcher falls through to
+`None` watts on hosts where neither interface is available.
+
 ## Minimal production example
 
 ```toml

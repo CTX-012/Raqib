@@ -1,21 +1,31 @@
 # FEATURES.md
 
-A snapshot of what `edge_monitor` actually does today (Phase 0 + Phase 1).
-For audience and product framing see [VISION.md](VISION.md); for the build
-plan see [HANDOFF.md](HANDOFF.md).
+A snapshot of what `edge_monitor` actually does today. Phase 0 + Phase 1
+are complete; latest.md Tier 1, Tier 2, and most of Tier 3 are shipped.
+For audience and product framing see [VISION.md](VISION.md); for the
+build plan and remaining queue see [latest.md](latest.md).
 
 ## At a glance
 
 `edge_monitor` is a single Rust binary that watches every process on a
 Linux box, decides which ones are AI workloads, tracks their resource
-footprint, and (optionally) kills runaway ones — all on a one-second tick.
+footprint and runtime telemetry (tokens/sec, fps, latency, KV cache,
+GPU/CPU power, cold-load I/O, model fingerprint), regresses each new
+run against a rolling baseline, and (optionally) kills runaways — all
+on a one-second tick.
 
 ```
-Platform  →  Classifier  →  Lifecycle  →  Governor  →  UI
-/proc        keyword +       peaks +       allowlist    ratatui
-sysinfo      script +        run             + dry-run    or
-nvml         model           summaries      + rate       headless
-                                              limit
+Platform  →  Classifier  →  Lifecycle  →  Telemetry  →  Governor  →  UI
+/proc        keyword +       peaks +       vLLM /        allowlist    ratatui
+sysinfo      script +        run           llama.cpp /     + dry-run    or
+nvml         model           summaries     Ollama /        + rate       headless
+rapl                                       stdout +        limit
+                                           probe socket
+                                           +
+                                           cold-load +
+                                           power +
+                                           fingerprint +
+                                           exit classify
 ```
 
 ---
@@ -29,8 +39,9 @@ nvml         model           summaries      + rate       headless
   by design).
 - **NVIDIA backend** ([src/platform/gpu_nvidia.rs](src/platform/gpu_nvidia.rs))
   attaches to NVML when available and reports per-process VRAM,
-  utilisation, and total GPU memory. Returns `Option<GpuSnapshot>`;
-  WSL/no-GPU hosts gracefully fall through to "no VRAM data".
+  utilisation, total GPU memory, **per-board power (W)** and
+  **temperature (°C)**. Returns `Option<GpuSnapshot>`; WSL/no-GPU hosts
+  gracefully fall through to "no VRAM data" without panicking.
 - Permission-denied on `/proc/<pid>/environ` does **not** drop the
   process — root daemons and PID 1 still appear in the snapshot with an
   empty environ map.
@@ -80,7 +91,10 @@ to exit and folds each tick's reading into a rolling `ResourceStats`:
 When a process exits, a `LifecycleSummary` is emitted carrying:
 `pid, name, category, model_name, spawn_time, exit_time, uptime_secs,
 exit_code, signal, avg_cpu_pct, peak_cpu_pct, peak_rss_mb, peak_vram_mb,
-samples`.
+samples`. AI-classified summaries are wrapped into a typed
+[`RunRecord`](src/storage/run_store.rs) (run_id + telemetry +
+fingerprint + cold-start stats + classified `ExitReason`) and persisted
+to the run store.
 
 Summaries land in three places:
 
@@ -88,6 +102,127 @@ Summaries land in three places:
 - The **Completed TUI panel** (same filter).
 - The **persistent run-summary JSONL** at `summary_log_path` (no filter
   — every exit is archived for forensic replay).
+
+## AI-runtime telemetry (Tier 1.2 + 2.x + 3.x)
+
+[src/telemetry/](src/telemetry/) is a Tokio-based dispatcher that
+samples per-PID metrics in parallel with the 1 Hz tick loop:
+
+- **vLLM Prometheus sampler** (1.2a, [vllm_prometheus.rs](src/telemetry/samplers/vllm_prometheus.rs))
+  — detects `vllm serve` / `vllm.entrypoints.*` / `python -m vllm` /
+  `VLLM_*` env, scrapes `http://127.0.0.1:<port>/metrics` (port from
+  `--port`, default 8000) with a 500 ms timeout. Maps
+  `vllm:avg_generation_throughput_toks_per_s` → `tokens_per_sec`,
+  `vllm:gpu_cache_usage_perc` → `kv_cache_pct` (×100), and
+  `vllm:num_requests_running` → `concurrent_requests`. Tier 3.3 also
+  pulls `vllm:num_preemptions_total` for KV-cache eviction counts.
+- **llama.cpp server sampler** (1.2b, [llama_cpp_server.rs](src/telemetry/samplers/llama_cpp_server.rs))
+  — detects `llama-server`, scrapes `:<port>/metrics` (default 8080),
+  derives tok/s from the monotonic `llama_server_n_decode_total`
+  counter when no direct gauge is exposed, and maps
+  `llama_server_n_busy_slots` → `concurrent_requests` and
+  `llama_server_kv_cache_usage` (0..1) → `kv_cache_pct` (×100).
+- **Ollama API sampler** (1.2c, [ollama_api.rs](src/telemetry/samplers/ollama_api.rs))
+  — confirms which model is loaded via `/api/ps`; the dispatcher
+  promotes the model name onto `RunRecord` even when the classifier
+  saw only `ollama runner`.
+- **Stdout regex parser** (1.2d, [stdout_parser.rs](src/telemetry/samplers/stdout_parser.rs))
+  — pure-function `parse_line()` extracts tokens/sec, fps, and
+  latency from llama.cpp `eval time` lines, vLLM `Avg generation
+  throughput` lines, and Ultralytics `Speed: ...preprocess,
+  ...inference, ...postprocess` lines. Strict — refuses partial
+  matches so noise lines never produce 0.0 readings.
+- **`edge_monitor exec` wrapper** (1.2d, [exec_wrapper.rs](src/exec_wrapper.rs))
+  — `edge_monitor exec [--name LABEL] -- COMMAND ARGS...` forks
+  `COMMAND` with piped stdio, tees both streams to your terminal AND
+  through the stdout parser, and writes a `RunRecord` on exit. Ctrl-C
+  forwards SIGINT to the child; a second Ctrl-C hard-exits 130 so a
+  stuck child can't trap the user. Stderr tail (capped at 64 lines)
+  flows into the Tier 3.5 exit-reason context.
+- **Vision probe Unix socket** (3.6, [vision_probe.rs](src/telemetry/vision_probe.rs))
+  — listens on the path configured by `[telemetry] vision_probe_socket`
+  for line-delimited `{"pid": ..., "frame_at_ns": ...}` JSON; each
+  event aggregates into a per-PID rolling 1-second window and
+  instantaneous fps flows into the accumulator. Disabled when the
+  config value is empty.
+
+The dispatcher applies a per-sample timeout (default 1 s) so a hung
+HTTP scrape can't pile up; a panicking sampler is isolated so the
+runtime keeps ticking. Frames flow through an unbounded mpsc channel
+into the per-PID `TelemetryAccumulator` and are merged onto the
+`RunRecord` at exit.
+
+### Cold-load detection (Tier 2.2)
+
+[src/telemetry/cold_load.rs](src/telemetry/cold_load.rs) watches
+`/proc/<pid>/io` `read_bytes` per AI process. Heuristic: 16 MiB floor
+plus 2 consecutive ≤1 MiB/s ticks ⇒ load complete (hard timeout 60 s
+for streaming inference). The resulting `ColdStartStats`
+(`duration_seconds`, `bytes_read`, `avg_throughput_mbps`,
+`peak_throughput_mbps`) lands on `RunRecord.cold_start`.
+
+### Cold-start vs steady-state separation (Tier 3.2)
+
+The moment cold-load completes, `TelemetryAccumulator::mark_steady_state(pid)`
+flips a watermark; frames recorded after that contribute to BOTH the
+overall sums AND new `_steady` aggregates: `tokens_per_sec_avg_steady`,
+`fps_avg_steady`, `gpu_watts_avg_steady`. History comparison should
+prefer the steady value because it ignores model-load warm-up noise.
+
+### Power & thermals (Tier 2.1)
+
+- **NVML** — per-board GPU watts and °C from
+  `nvmlDeviceGetPowerUsage` and `nvmlDeviceGetTemperature(GPU)`. NVML
+  errors swallow into `None` rather than failing the whole read.
+- **RAPL** ([src/telemetry/rapl.rs](src/telemetry/rapl.rs)) — sums
+  package energy across `intel-rapl:N` sysfs entries; Δ-based wattage
+  with wraparound handled via `max_energy_range_uj`. Permission-gated
+  hosts emit a single warn log then degrade to `None` watts (no
+  log spam).
+- `Dispatcher::record_system_power` divides totals across AI processes
+  to apportion. `RunMetrics` carries `gpu_watts_avg`, `gpu_watts_peak`,
+  `cpu_watts_avg`, and `energy_joules_total` (trapezoidal integration
+  of the wattage stream). `tegrastats` for Jetson is not yet wired —
+  see "remaining gaps" below.
+
+### KV cache pressure (Tier 3.3)
+
+`RunMetrics` gains `kv_cache_avg_pct` and `kv_cache_evictions_total`.
+The accumulator tracks per-PID KV avg via sum/count and evictions via
+first/last counter delta; counter resets snap forward so the delta
+stays non-negative. The TUI registry row appends a `KV NN%` segment
+that turns red+bold at ≥80%; the history overlay flags runs whose
+peak hit ≥99.5% with a `KV!` badge so saturation events are visible
+at a glance.
+
+### Model fingerprinting (Tier 3.1)
+
+[src/fingerprint.rs](src/fingerprint.rs) hashes
+`len_le_bytes || head[0..1MiB] || tail[len-64KiB..]` into SHA-256,
+prefixed `sha256-head1m-tail64k:`. Partial by design — a full hash of
+a 40 GB Llama-70B would dwarf the 1 s tick. Head+tail differentiates
+quantization variants and distinct fine-tunes in <50 ms even on slow
+disks. Documented collision: middle-only modifications share the same
+fingerprint (asserted by a test). Cached at the path configured by
+`storage.fingerprint_cache` (keyed on `(dev, inode, mtime_secs, len)`)
+so repeat runs of the same weights file are instant.
+
+### Exit-reason classification (Tier 3.5)
+
+[src/exit_classify.rs](src/exit_classify.rs) is a pure-function
+classifier on top of `ExitReason::from_summary`. Variants:
+`CleanExit`, `UserSignal { signal }`, `GovernorKill { reason }`,
+`Segfault`, `OutOfMemory { ram, vram }`, `CudaError { last_msg }`,
+`Crash { exit_code }`, `Unknown`. Precedence (highest first):
+governor → SIGSEGV → OOM (kernel via dmesg PID match, OR CUDA via
+stderr) → CUDA error → bare signal / exit code / Unknown. The dmesg
+match keys on `process <PID>` / `pid=<PID>` patterns ONLY (never on
+truncated process names — kernel truncates to 15 chars and `python`
+is shared by every ML workload). `read_recent_kernel_log(secs)` wraps
+`journalctl -k --since=-Ns` and returns `Vec::new()` on any failure
+so the classifier degrades gracefully on hosts without journald.
+`history::format_exit_short` renders compact tokens (`segfault`,
+`oom(ram)`, `oom(vram)`, `oom(ram+vram)`, `cuda_error`).
 
 ## Governor (decide → act)
 
@@ -132,6 +267,13 @@ appender shared by the audit log and the run-summary log. Both files are
 append-only, line-delimited, and survive restarts. Either log is
 disabled by setting its config path to `""` (the default).
 
+[src/storage/run_store.rs](src/storage/run_store.rs) is the typed run
+store: `<root>/runs/<YYYY-MM-DD>/run-<uuid>.json` per record + an
+append-only `index.jsonl` for O(N) startup scan. Crash-safe: the record
+file is fsynced before the index entry is appended, so a partial write
+leaves an orphaned file (recoverable) rather than a dangling index
+pointer.
+
 ## TUI (ratatui)
 
 [src/ui/](src/ui/) renders a six-row layout at ~10 Hz off cached state
@@ -140,21 +282,22 @@ disabled by setting its config path to `""` (the default).
 | Row | Panel | Source |
 |---|---|---|
 | 1 | Status bar — mode (DRY-RUN/ENFORCE), tick #, focus, filter, ARMED kill | `app::App` |
-| 2 | **Vitals** — CPU/RAM/GPU aggregate | `vitals.rs` |
-| 3 | **Registry / Rogues / Culprits** — three-column process row | `registry.rs`, `rogues.rs`, `culprits.rs` |
-| 4 | **AI run summaries** — recent exits with model + peaks | `completed.rs` |
-| 5 | **Audit** — recent governor decisions | `audit.rs` |
+| 2 | **Vitals** — CPU/RAM/GPU aggregate (incl. GPU watts and temp) | `vitals.rs` |
+| 3 | **Registry / Rogues / Culprits** — three-column process row, with `KV NN%` segment when present | `registry.rs`, `rogues.rs`, `culprits.rs` |
+| 4 | **AI run summaries** — recent exits with model + peaks + classified exit | `completed.rs` |
+| 5 | **Audit (kills + regressions)** — interleaved newest-first, critical regressions red, warnings yellow | `audit.rs` |
 | 6 | Hint footer | `mod.rs` |
 
 `?` opens an overlay help panel. `Tab` rotates focus across the three
 process panels. `/` enters filter mode (case-insensitive substring
-against name/model). `j`/`k` move the selection. `d` toggles dry-run.
-`q` quits.
+against name/model). `j`/`k` move the selection. `h` opens the
+**history overlay** for the focused row's model (last 20 runs, with
+`KV!` badge on saturation events). `d` toggles dry-run. `q` quits.
 
 ## Headless mode (`--no-ui`)
 
 For SSH boxes, CI smoke tests, and Jetson side-loads. Logs three line
-types via `tracing`:
+types via `tracing` (stderr — stdout reserved for subcommand JSON):
 
 - `tick` — per-tick aggregate (`tick=N ai_processes=K exits=M`)
 - `ai-process` — one line per live AI process with pid/name/category/
@@ -180,12 +323,16 @@ built-in safe defaults. Schema (see
   `rate_limit_window_secs`
 - `[storage]` — `run_store_path` (default
   `~/.local/share/edge_monitor`), `fingerprint_cache`,
-  `keep_runs_per_model` (default 200)
+  `keep_runs_per_model`
 - `[regression]` — `warn_pct` (10), `critical_pct` (25),
   `baseline_window` (10), `min_baseline_samples` (3)
+- `[telemetry]` — `vllm_scrape` (true), `llamacpp_scrape` (true),
+  `ollama_api` (true), `prometheus_bind` (empty disables the Tier 2.3
+  exporter), `vision_probe_socket` (empty disables the Tier 3.6
+  vision probe)
 
 `config.validate()` rejects nonsense (e.g. zero tick interval, grace
-period < 1s) before the runtime starts.
+period < 1s, `critical_pct < warn_pct`) before the runtime starts.
 
 ## CLI
 
@@ -196,6 +343,7 @@ edge_monitor [OPTIONS] [COMMAND]
   --no-ui             Headless mode; one line per tick to stderr
   --ticks <N>         Headless tick budget (0 = run until killed)
   --log-level <LEVEL> trace | debug | info | warn | error
+  --log-format <FMT>  text | json
   -h, --help / -V, --version
 
 Subcommands:
@@ -204,30 +352,57 @@ Subcommands:
                       With no model: per-model summary table.
                       With model: most-recent runs with peak metrics.
                       --json emits structured output for piping.
+
+  compare MODEL [MODEL ...] [--runs N] [--json]
+                      Side-by-side baseline comparison across models
+                      (latest.md Tier 3.7). Folds the most recent N
+                      records per model into a Foundation-C Baseline,
+                      prints tok/s avg ± stddev, peak VRAM, W/token,
+                      cold load.
+
+  exec [--name LABEL] -- COMMAND ARGS...
+                      Run a workload under instrumentation
+                      (latest.md Tier 1.2d). Tees stdout/stderr to
+                      your terminal AND through the stdout regex
+                      parser, writes a RunRecord on exit.
 ```
 
 `--dry-run` is an extra safety belt on top of `policy.enforce` —
 specifying it can never make the governor more aggressive than the
-config says. Tracing logs route to **stderr**, so `history --json` on
-stdout stays clean for `jq`.
+config says. Tracing logs route to **stderr**, so `history --json` /
+`compare --json` on stdout stay clean for `jq`.
+
+## Prometheus exporter (Tier 2.3)
+
+[src/telemetry/exporter.rs](src/telemetry/exporter.rs) exposes a
+hand-rolled `text/plain; version=0.0.4` endpoint at
+`[telemetry] prometheus_bind` (e.g. `127.0.0.1:9472`). Disabled by
+default. Per-request 8 KiB header cap + 5 s read timeout protect
+against slowloris / memory-exhaust scrapes. Output is sorted by label
+so golden-file diffing and Grafana caching are stable. Metrics:
+
+- `edge_monitor_processes_total{category}` — gauge.
+- `edge_monitor_run_tokens_per_sec{model,pid}` — gauge.
+- `edge_monitor_run_fps{model,pid}` — gauge.
+- `edge_monitor_run_vram_bytes{model,pid}` — gauge.
+- `edge_monitor_run_gpu_watts{model,pid}` — gauge.
+- `edge_monitor_run_cpu_watts{model,pid}` — gauge.
+- `edge_monitor_governor_kills_total{reason}` — counter.
+- `edge_monitor_regressions_total{model,metric}` — counter.
+- `edge_monitor_tick_count` — counter.
 
 ## Run history (Tier 1.1)
 
-[src/history.rs](src/history.rs) + [src/storage/run_store.rs](src/storage/run_store.rs)
-form the backbone:
+[src/history.rs](src/history.rs) + the run store form the backbone:
 
-- **`RunStore`** persists every AI-classified completed run as a
-  `RunRecord` (a `LifecycleSummary` plus run-id, model fingerprint
-  slot, telemetry slot, exit reason, cold-start slot). On-disk:
-  `<root>/runs/<YYYY-MM-DD>/run-<uuid>.json` per record + an
-  append-only `index.jsonl` for O(N) startup scan.
 - **CLI `history`** queries the store from any shell and renders to a
   table (default) or JSON (`--json`).
 - **TUI history overlay** opens with `h` on a focused row; loads up to
-  20 recent runs of the row's model. Esc / q dismisses.
+  20 recent runs of the row's model. Esc / q dismisses. Saturation
+  events (KV peak ≥99.5%) carry a `KV!` badge.
 - Default store path: `~/.local/share/edge_monitor`. Set
-  `storage.run_store_path = ""` to disable persistence (in-memory ring
-  buffer still feeds the Completed panel).
+  `storage.run_store_path = ""` to disable persistence (the in-memory
+  ring buffer still feeds the Completed panel).
 
 ## Baseline + regression detection (Tier 1.3)
 
@@ -253,26 +428,58 @@ The runtime's exit hook ([src/runtime.rs](src/runtime.rs)
 Configurable in `[regression]`: `warn_pct`, `critical_pct`,
 `baseline_window`, `min_baseline_samples`.
 
+## Side-by-side comparison (Tier 3.7)
+
+`edge_monitor compare phi3-mini llama-3.1-8b --runs 10` folds the
+most recent N records per model into a Foundation-C `Baseline` and
+prints them in side-by-side columns:
+
+```
+              phi3-mini (n=5)        llama-3.1-8b (n=10)
+tok/s avg     38.4 ± 2.1            21.7 ± 0.8
+peak VRAM     4.0 GB                15.0 GB
+W/token       0.082                 0.341
+cold load     3.2 s                 18.6 s
+```
+
+W/token is computed mean-of-ratios (per-record `energy_joules_total /
+tokens_total`, averaged across the window) so a single 1000-token run
+with 100 J doesn't outweigh five 100-token runs. Returns `None` when
+neither field is populated. `--json` emits a `Vec<ComparisonColumn>`
+for piping into `jq`.
+
 ## Test surface
 
-208 tests pass (198 unit + 5 history-CLI integration + 3 pipeline
-integration + 2 proptest):
+`cargo test --release` reports **312 lib unit + 5 history-CLI + 3
+pipeline + 2 governor proptest = 322 tests** today. 311 of the 312
+lib unit tests pass; one — `storage::run_store::tests::
+prune_keeps_three_newest_by_spawn_time` — is failing and is filed
+against `src/storage/run_store.rs` for the auditor in
+`BUILDER_STATUS.md`. The failure is in a pruning-policy test, not a
+safety invariant; the 5 history-CLI integration tests, 3 pipeline
+integration tests, and 2 governor proptest tests all pass.
 
-- Unit tests cover every classifier strategy, lifecycle peak/avg
-  arithmetic, governor decisions across allowlist/blocklist/dry-run/
-  rate-limit, audit-log replay, and config validation.
-- [tests/pipeline_end_to_end.rs](tests/pipeline_end_to_end.rs) drives
-  fake `ProcessSample` streams through the whole pipeline.
-- [tests/governor_properties.rs](tests/governor_properties.rs) is a
-  proptest that fuzzes governor inputs and asserts the safety
-  invariants above.
+`cargo clippy --all-targets -- -D warnings` is part of CI. The
+release binary now weighs ~7.4 MB (was ~2.7 MB pre-Tier-1.2) — the
+growth comes from `tokio` (rt-multi-thread + time + sync + io-util +
+process + net) and `reqwest` (rustls-tls + http2). Trimming back
+under the 5 MB budget (cargo feature to disable HTTP samplers
+entirely, or switching to `native-tls`) is deferred until v0.1.0 is
+out the door.
 
-`cargo clippy --all-targets -- -D warnings` is part of CI; release
-binary weighs ~2.7 MB.
+## Remaining gaps for v0.1.0
 
-## What this does **not** do (Phase 2+)
+The single in-flight tier is **Tier 3.4 — concurrent-request
+awareness**: pull `vllm:num_requests_running` and
+`vllm:num_requests_waiting`, track peaks and time-weighted averages,
+distinguish "serving 8 concurrent → 161 tok/s aggregate" from
+"serving 1 concurrent → 158 tok/s/req" in the history view. In
+progress for v0.1.0; no committed date.
 
-Out of scope until launch is done: tegrastats, thermal zones, ROS2 node
-detection, Prometheus exporter, OOM post-mortem, Intel NPU, AMD ROCm,
-Hailo, web UI, Windows support, cgroup-based enforcement, rosbag
-correlation. See [VISION.md](VISION.md) for why.
+Genuinely off the roadmap (anti-goals from `latest.md` + `CLAUDE.md`):
+ROS2 node detection, Intel NPU, AMD ROCm, Hailo, web UI, Windows
+support, cgroup-based enforcement, rosbag correlation, cloud cost
+tracking, ML-based anomaly detection, automatic regression
+remediation. `tegrastats` for Jetson is named in latest.md Tier 2.1
+as in-scope but not yet implemented; the Jetson AGX Orin target has
+not yet been validated end-to-end.

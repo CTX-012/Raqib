@@ -1151,6 +1151,33 @@ mod tests {
         readonly.set_mode(0o555);
         fs::set_permissions(&day_dir, readonly).unwrap();
 
+        // Some filesystems (overlayfs, ext4-over-9p in some WSL setups,
+        // Docker-rootless) and some user contexts (CAP_DAC_OVERRIDE,
+        // root in a container) honour chmod metadata while still
+        // allowing writes through. Confirm chmod actually denies writes
+        // before asserting — if it doesn't, the test environment can't
+        // reproduce the contract and skipping is honest. Probed by
+        // creating a sentinel file inside the day-dir; success means
+        // the chmod did not stick and the test cannot exercise the
+        // write-rejection path.
+        let probe = day_dir.join(".write-probe");
+        let chmod_actually_denies_writes = fs::write(&probe, b"x").is_err();
+        if !chmod_actually_denies_writes {
+            // Restore perms and skip cleanly — flagged by Builder A as
+            // a real WSL/overlayfs corner case in BUILDER_STATUS.md.
+            let _ = fs::remove_file(&probe);
+            let mut writable = fs::metadata(&day_dir).unwrap().permissions();
+            writable.set_mode(0o755);
+            fs::set_permissions(&day_dir, writable).unwrap();
+            eprintln!(
+                "skipping append_returns_err_when_filesystem_rejects_write: \
+                 chmod 0o555 on {} did not deny writes in this environment \
+                 (CAP_DAC_OVERRIDE, overlayfs, or rootless container)",
+                day_dir.display()
+            );
+            return;
+        }
+
         let result = store.append(fixture_record(2, "diskfull-test", 30.0));
         // Always restore perms before any assertion so a panic still
         // lets tempfile clean up the directory tree.

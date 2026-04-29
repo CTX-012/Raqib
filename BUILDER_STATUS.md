@@ -22,22 +22,13 @@ to history) and via reading concurrent worktrees.
   started: 2026-04-29
 
 - builder_id: builder-C
-  scope: TEST.md gap closure
-    - C-1 F.1.10 keep_runs_per_model prune logic + test (run_store)
-    - C-2 F.1 1000-iter property test (run_store)
-    - C-3 F.3.4 Warn-tier (12%) + boundary regression tests (compare)
-    - C-4 F.1.7 ENOSPC disk-full test (run_store)
-    - C-5 F.3.8 robust baseline median + outlier flag (compare)
-  branch: builder-claude/tier-3-3-kv-cache-pressure
-  started: 2026-04-29
-  files: src/storage/run_store.rs, src/analysis/compare.rs,
-         src/runtime.rs (run_store wiring only),
-         src/exec_wrapper.rs (run_store wiring only),
-         tests/, Cargo.toml (proptest dev-dep already present).
-  cross-builder-request:
-    - Builder B: edge_monitor.toml.example needs a [regression]
-      baseline_strategy = "mean" example commented "or \"median\""
-      once C-5 lands. I will not edit toml.example per the brief.
+  scope: TEST.md gap closure — ALL DONE, see [C-1] through [C-5]
+         in Ready for Test.
+  branch: audit/2026-04-29 (was builder-claude/tier-3-3-kv-cache-
+          pressure; the working tree was renamed mid-session by
+          something in the harness, all five C-* commits are on
+          the renamed branch).
+  finished: 2026-04-29
 
 ## Ready for Test
 
@@ -217,6 +208,179 @@ to history) and via reading concurrent worktrees.
   "Remaining gaps for v0.1.0"; everything else has moved out of
   "what this does not do".
 
+### [C-1] F.1.10 — `keep_runs_per_model` prune logic on `RunStore::append`
+- Commit SHA: 5c3ec5cc734c08b9885fb0f3f60152fb49dabaf9
+- Files changed: src/storage/run_store.rs, src/runtime.rs (one-line
+  wiring of config.storage.keep_runs_per_model into the opened store),
+  src/exec_wrapper.rs (same one-line wiring), BUILDER_STATUS.md
+- New tests added:
+    - storage::run_store::tests::prune_keeps_three_newest_by_spawn_time
+    - storage::run_store::tests::prune_with_limit_two_leaves_two_files_on_disk
+    - storage::run_store::tests::pruned_ids_stay_pruned_after_reopen
+- Test output proving the new tests ran:
+  ```
+  $ cargo test --release --lib storage::run_store::tests::prune
+  Finished `release` profile [optimized] target(s) in 0.15s
+       Running unittests src/lib.rs (target/release/deps/edge_monitor-6cd854fb5988a928)
+
+  running 3 tests
+  test storage::run_store::tests::prune_keeps_three_newest_by_spawn_time ... ok
+  test storage::run_store::tests::pruned_ids_stay_pruned_after_reopen ... ok
+  test storage::run_store::tests::prune_with_limit_two_leaves_two_files_on_disk ... ok
+
+  test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 321 filtered out; finished in 0.00s
+  ```
+- Builder note: the spec required spawn_time-driven eviction, so
+  `recent()` now sorts loaded records by `summary.spawn_time` desc.
+  That fixed the pre-existing failing-test report Builder A filed
+  before claiming [A-1]. Tombstones in `index.jsonl` keep pruned
+  ids out across reopens (otherwise the in-memory `by_model` would
+  re-include every id). No breaking change to Baseline / RunRecord
+  serde format. Manual scenario in
+  `prune_with_limit_two_leaves_two_files_on_disk` confirms 10
+  appends with limit=2 leave exactly 2 record files on disk.
+
+### [C-2] F.1 — 1000-iteration property test for `RunStore`
+- Commit SHA: 78697712e7ce2128d2835b391d76b84adeaeaa78
+- Files changed: src/storage/run_store.rs (new `prop_tests` module),
+  proptest-regressions/storage/run_store.txt (added in [C-4] commit
+  along with the ENOSPC test — proptest auto-generated seed for
+  the C-2 sort-bug verification, kept as a permanent regression
+  pin)
+- New tests added:
+    - storage::run_store::prop_tests::append_recent_invariants
+- Test output proving the new test ran:
+  ```
+  $ cargo test --release --lib storage::run_store::prop_tests::append_recent_invariants -- --nocapture
+  Finished `release` profile [optimized] target(s) in 0.13s
+       Running unittests src/lib.rs (target/release/deps/edge_monitor-6cd854fb5988a928)
+
+  running 1 test
+  proptest::append_recent_invariants passed 1000 cases
+  test storage::run_store::prop_tests::append_recent_invariants ... ok
+
+  test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 323 filtered out; finished in 0.68s
+  ```
+- For F.1: the line proving 1000 cases ran:
+  ```
+  proptest::append_recent_invariants passed 1000 cases
+  ```
+- Builder note: the line is emitted by an `eprintln!` from inside
+  the proptest body on the final case (counted via a static
+  `AtomicUsize`), so a future shrink of the configured `cases`
+  value would silently stop emitting it — that's the failure mode
+  the brief warned about ("sub-millisecond runtime means the test
+  isn't doing what you think"). Wallclock for 1000 cases on this
+  WSL box is ~0.5–0.7 s — about 500–700 µs per case, plausible for
+  tempdir + a few file writes on tmpfs. Anti-celebration check:
+  deliberately commented out the `recent()` sort and confirmed the
+  proptest fails with a shrunk 2-append-+-Recent counterexample;
+  restored. The shrunk seed is now in
+  `proptest-regressions/storage/run_store.txt` and re-runs first on
+  every future invocation.
+
+### [C-3] F.3.4 — Warn-tier (12%) + boundary regression matrix
+- Commit SHA: 3ec02724ffa827ded3948b3139571eed43e4dcad
+- Files changed: src/analysis/compare.rs (tests only)
+- New tests added:
+    - analysis::compare::tests::twelve_percent_drop_is_warn_not_critical
+    - analysis::compare::tests::warn_critical_boundary_matrix
+- Test output proving the new tests ran:
+  ```
+  $ cargo test --release --lib analysis::compare
+  Finished `release` profile [optimized] target(s) in 0.13s
+       Running unittests src/lib.rs (target/release/deps/edge_monitor-6cd854fb5988a928)
+
+  running 9 tests
+  test analysis::compare::tests::higher_rss_is_a_regression ... ok
+  test analysis::compare::tests::baseline_metrics_per_metric_n ... ok
+  test analysis::compare::tests::faster_run_is_not_a_regression ... ok
+  test analysis::compare::tests::matching_record_no_regressions ... ok
+  test analysis::compare::tests::slow_run_is_critical ... ok
+  test analysis::compare::tests::tiny_baseline_emits_no_regressions ... ok
+  test analysis::compare::tests::twelve_percent_drop_is_warn_not_critical ... ok
+  test analysis::compare::tests::warn_critical_boundary_matrix ... ok
+  ```
+- Builder note: all five boundary cases (9.99 / 10.01 / 12 / 19.99
+  / 20.01 percent slowdown) run as part of
+  `warn_critical_boundary_matrix`. The 19.99 / 20.01 split needs
+  `RegressionConfig { critical_pct: 20.0, .. }` to land on the
+  intended side of the threshold (defaults are warn=10 / crit=25);
+  the 12% mid-band still uses defaults. Anti-celebration: changed
+  `if delta_pct < cfg.warn_pct` to `cfg.critical_pct` in the
+  comparator and confirmed the boundary test reports
+  `10.01% (just above warn): expected regression, got none` —
+  exactly the kind of message a reviewer can act on.
+
+### [C-4] F.1.7 — write-rejection / disk-full path on `append`
+- Commit SHA: c6a832ac8363d73d1ff5ba36266c2a80e3eb264e
+  (follow-up SHA in HEAD adds a runtime probe that skips the test
+  cleanly on filesystems where chmod doesn't actually deny writes
+  — addresses Builder A's flag in Cross-builder requests below)
+- Files changed: src/storage/run_store.rs,
+  proptest-regressions/storage/run_store.txt (new — proptest
+  auto-saved C-2 shrink seed)
+- New tests added:
+    - storage::run_store::tests::append_returns_err_when_filesystem_rejects_write
+- Test output proving the new test ran:
+  ```
+  $ cargo test --release --lib storage::run_store::tests::append_returns_err
+  Finished `release` profile [optimized] target(s) in 0.10s
+       Running unittests src/lib.rs (target/release/deps/edge_monitor-6cd854fb5988a928)
+
+  running 1 test
+  test storage::run_store::tests::append_returns_err_when_filesystem_rejects_write ... ok
+
+  test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 323 filtered out; finished in 0.00s
+  ```
+- Builder note: the test mocks ENOSPC at the cheapest portable
+  boundary — chmod 0o555 on the per-day record dir, so the next
+  `OpenOptions::create_new` returns EACCES. The `RunStoreError::
+  WriteRecord { source: io::Error, path }` codepath under test is
+  the same one ENOSPC would hit, so the contract (Err-not-panic,
+  message names the failing path, in-memory state stays
+  consistent) is identical. Mock approach is documented in the
+  test's doc comment per the brief. Re: Builder A's WSL/overlayfs
+  flag — the follow-up commit probes write access *after* the
+  chmod and skips the test (with a clear `eprintln!` reason)
+  rather than asserting on environments where chmod metadata
+  doesn't actually deny writes. Anti-celebration: deliberately
+  made `append` swallow the open error and pretend success;
+  confirmed the test fails with `"append should fail when the day
+  dir is read-only: <uuid>"`; restored.
+
+### [C-5] F.3.8 — Robust baseline (median + outlier flag)
+- Commit SHA: b4ddd150e512d0c72694dea0d7a4c8882c0f0ef5
+- Files changed: src/analysis/compare.rs (impl + test),
+  src/storage/run_store.rs, src/runtime.rs, src/compare.rs (the
+  three Baseline-literal call sites; threading the strategy and
+  outlier list through, defaults preserved)
+- New tests added:
+    - analysis::compare::tests::robust_baseline_median_unaffected_by_outlier
+- Test output proving the new test ran:
+  ```
+  $ cargo test --release --lib analysis::compare::tests::robust_baseline
+  Finished `release` profile [optimized] target(s) in 0.12s
+       Running unittests src/lib.rs (target/release/deps/edge_monitor-6cd854fb5988a928)
+
+  running 1 test
+  test analysis::compare::tests::robust_baseline_median_unaffected_by_outlier ... ok
+
+  test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 323 filtered out; finished in 0.00s
+  ```
+- Builder note: API is opt-in —
+  `BaselineMetrics::from_records(records)` still uses Mean +
+  outliers-included for source compatibility; the new behaviour
+  comes through `from_records_with(records, strategy,
+  drop_outliers)`. Outlier flag rule is fixed to the brief's
+  "> 2 stddev from the median" and is independent of the chosen
+  strategy — both branches of the test get the same outlier set,
+  only the centre moves. Baseline gained `outlier_run_ids` and
+  `strategy` with `serde(default)` so older serialised baselines
+  still parse. Cross-builder request to Builder B for an
+  `edge_monitor.toml.example` line is in the section below — I
+  did not edit toml.example per the brief.
+
 ### [B-3] edge_monitor.toml.example + docs/configuration.md [telemetry] section
 - Commit SHA: 3d65df22e16f65835f2000044bfe583cb57fefdf
 - Files changed: edge_monitor.toml.example, docs/configuration.md
@@ -288,6 +452,16 @@ to history) and via reading concurrent worktrees.
   process can still write the dir, skip the test with `eprintln!`
   rather than asserting. Not blocking [A-3]; my test for S.0.8
   passes regardless.
+
+  **Resolved by Builder C** (HEAD of `audit/2026-04-29`): the
+  test now writes a sentinel `.write-probe` file inside the
+  chmodded day-dir before asserting; if the write succeeds (CAP_
+  DAC_OVERRIDE, overlayfs that ignores chmod, rootless container
+  …), perms are restored and the test returns early with a clear
+  `eprintln!` naming the dir and the suspected cause. On
+  environments where chmod actually denies writes (this box —
+  vanilla WSL ext4, plus all bare-metal Linux), the test
+  exercises the EACCES path as before. See [C-4] handoff.
 
 ## Recently completed (last 24h)
 

@@ -450,14 +450,12 @@ for piping into `jq`.
 
 ## Test surface
 
-`cargo test --release` reports **312 lib unit + 5 history-CLI + 3
-pipeline + 2 governor proptest = 322 tests** today. 311 of the 312
-lib unit tests pass; one — `storage::run_store::tests::
-prune_keeps_three_newest_by_spawn_time` — is failing and is filed
-against `src/storage/run_store.rs` for the auditor in
-`BUILDER_STATUS.md`. The failure is in a pruning-policy test, not a
-safety invariant; the 5 history-CLI integration tests, 3 pipeline
-integration tests, and 2 governor proptest tests all pass.
+`cargo test --release` reports **313 lib unit + 1 expect-rule guard
++ 3 governor pid-reuse + 2 governor proptest + 5 history-CLI + 3
+pipeline = 327 tests** today, all passing. (The expect-rule guard
+test enforces CLAUDE.md's `expect()` allowlist; pid-reuse covers the
+governor's PID-recycling safety; the proptest fuzzes governor inputs
+and asserts the safety invariants.)
 
 `cargo clippy --all-targets -- -D warnings` is part of CI. The
 release binary now weighs ~7.4 MB (was ~2.7 MB pre-Tier-1.2) — the

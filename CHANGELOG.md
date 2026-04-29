@@ -351,11 +351,9 @@ once `v1.0.0` is tagged. Until then, minor versions may include breaking changes
 ### Notes
 - Developed on WSL Ubuntu; NVML returns `None` gracefully without GPU
   passthrough. Real target (Jetson AGX Orin) not yet validated end-to-end.
-- 312 unit + 5 history-CLI integration + 3 pipeline integration + 2
-  proptest tests in the suite (`cargo test --release` — 311/312 lib
-  unit currently passing; one `storage::run_store::tests::
-  prune_keeps_three_newest_by_spawn_time` regression is filed for
-  the auditor in `BUILDER_STATUS.md`).
+- 313 lib unit + 1 expect-rule guard + 3 governor pid-reuse + 2
+  governor proptest + 5 history-CLI + 3 pipeline = 327 tests pass on
+  release (`cargo test --release`).
 - No release artifact yet. `v0.1.0` will be tagged once Phase 1 launch
   checklist (CI, demo GIF, `.deb`, crates.io name reservation) is complete.
 

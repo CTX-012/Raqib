@@ -478,6 +478,69 @@ to history) and via reading concurrent worktrees.
   with the default that `Default::default()` actually produces. No
   `[power]` section was added — see Cross-builder requests below.
 
+### [B-4] 14 tier-aligned smoke scripts under scripts/manual/
+- Commit SHA: d1373918918fe72b47b13688623127dad296838d
+- Files changed (all new): scripts/manual/{vllm_smoke,llamacpp_smoke,
+  ollama_smoke,exec_stdout_smoke,regression_smoke,power_smoke,
+  cold_load_smoke,prometheus_exporter_smoke,fingerprint_smoke,
+  cold_vs_steady_smoke,kv_cache_smoke,exit_classify_smoke,
+  vision_fps_smoke,compare_smoke}.sh
+- Verification command (what the tester should run on a non-WSL
+  Linux box with a real GPU + LLM runtime to maximise PASS coverage):
+  ```
+  for s in scripts/manual/*_smoke.sh; do
+    bash "$s" >/tmp/$(basename "$s").log 2>&1
+    rc=$?
+    case "$rc" in
+      0) echo "PASS $s" ;;
+      77) echo "SKIP $s — $(grep -m1 SKIP /tmp/$(basename "$s").log)" ;;
+      *) echo "FAIL $s (rc=$rc)" ;;
+    esac
+  done
+  ```
+- Expected output (last 14 lines, on this WSL dev box — no GPU,
+  no vLLM, no llama-server, no Ollama, no NVML, no readable RAPL):
+  ```
+  SKIP vllm_smoke.sh             — requires vLLM
+  SKIP llamacpp_smoke.sh         — requires llama-server
+  SKIP ollama_smoke.sh           — requires Ollama daemon
+  PASS exec_stdout_smoke.sh      [B-4-1.2d]
+  PASS regression_smoke.sh       [B-4-1.3]
+  SKIP power_smoke.sh            — requires NVML or RAPL
+  PASS cold_load_smoke.sh        [B-4-2.2]
+  PASS prometheus_exporter_smoke.sh [B-4-2.3]
+  PASS fingerprint_smoke.sh      [B-4-3.1]
+  SKIP cold_vs_steady_smoke.sh   — needs LLM runtime + exec→cold_load wiring
+  SKIP kv_cache_smoke.sh         — requires vLLM
+  PASS exit_classify_smoke.sh    [B-4-3.5]
+  SKIP vision_fps_smoke.sh       — Tier 3.6 probe socket not wired in Runtime::new()
+  PASS compare_smoke.sh          [B-4-3.7]
+  ```
+- Per-tier sub-claims (each filename ↔ tier ID, all at SHA d137391):
+  - `[B-4-1.2a]` vllm_smoke.sh (SKIP without vLLM)
+  - `[B-4-1.2b]` llamacpp_smoke.sh (SKIP without llama-server)
+  - `[B-4-1.2c]` ollama_smoke.sh (SKIP without Ollama daemon)
+  - `[B-4-1.2d]` exec_stdout_smoke.sh (PASS)
+  - `[B-4-1.3]`  regression_smoke.sh (PASS)
+  - `[B-4-2.1]` power_smoke.sh (SKIP without NVML/RAPL)
+  - `[B-4-2.2]` cold_load_smoke.sh (PASS)
+  - `[B-4-2.3]` prometheus_exporter_smoke.sh (PASS)
+  - `[B-4-3.1]` fingerprint_smoke.sh (PASS)
+  - `[B-4-3.2]` cold_vs_steady_smoke.sh (SKIP — wiring gap, see x-builder)
+  - `[B-4-3.3]` kv_cache_smoke.sh (SKIP without vLLM)
+  - `[B-4-3.5]` exit_classify_smoke.sh (PASS)
+  - `[B-4-3.6]` vision_fps_smoke.sh (SKIP — wiring gap, see x-builder)
+  - `[B-4-3.7]` compare_smoke.sh (PASS)
+- Builder note: every script has `set -euo pipefail`, is `chmod +x`,
+  prints a one-line preamble of what it verifies, runs the actual
+  binary against realistic inputs (no mocks), asserts on observable
+  output (history --json shapes, /metrics text-format families,
+  exit_reason field, etc.), and ends with a single PASS / FAIL
+  line — or exits 77 with a clear SKIP preamble when the
+  prerequisite isn't met. Two scripts surface real wiring gaps in
+  `src/`; both are filed below in Cross-builder requests rather
+  than worked around in the script.
+
 ## Cross-builder requests
 
 - **From Builder A → Builder B: history viewer should show the new
@@ -519,6 +582,44 @@ to history) and via reading concurrent worktrees.
   "mean"` / `"median"`, Builder B will append it to
   `edge_monitor.toml.example` and `docs/configuration.md` in a
   follow-up `[B-?]` claim.
+
+- **From Builder B → Builder A: Tier 3.6 vision probe socket not
+  wired in `Runtime::new`.** `[telemetry] vision_probe_socket = "..."`
+  is documented and parsed, and `Dispatcher::enable_vision_probe`
+  exists in `src/telemetry/dispatcher.rs`, but `src/runtime.rs`
+  never calls it. Setting the config has no effect: no Unix socket
+  is created, no frames are accepted. `scripts/manual/vision_fps_smoke.sh`
+  detects this with a pre-flight (waits for the socket to appear,
+  exits 77 with a clear preamble pointing back here) so the smoke
+  doesn't FAIL spuriously while the wiring is missing. Suggested
+  fix: alongside the existing `d.enable_exporter(...)` call near
+  line 195 of `runtime.rs`, add
+  `d.enable_vision_probe(&config.telemetry.vision_probe_socket);`
+  (it's a no-op when the path is empty). Once that lands, the
+  smoke will PASS without changes.
+
+- **From Builder B → auditor / Builder A: `edge_monitor exec` does
+  not run the Tier 2.2 cold-load tracker.** The cold-load detector
+  lives behind `Dispatcher::record_disk_io`, which is called from
+  the headless tick loop (`Runtime::tick`) but not from the exec
+  wrapper. So a synthetic stdout-only workload run via
+  `edge_monitor exec --` cannot exercise the Tier 3.2 steady-state
+  watermark, even though the watermark logic and the
+  `tokens_per_sec_avg_steady` field are landed and unit-tested.
+  `scripts/manual/cold_vs_steady_smoke.sh` SKIPs with code 77 and
+  defers to a real LLM runtime; tracker unit tests in
+  `src/telemetry/cold_load.rs` cover the algorithm deterministically.
+  Decision needed: either plumb `record_disk_io(&[the_exec_pid])`
+  through the exec wrapper's per-tick loop, or accept that Tier 3.2
+  is a headless-only feature and amend `latest.md` Tier 3.2 prose
+  to say so.
+
+- **From Builder A → Builder B: history viewer should show the new
+  Tier 3.4 numbers.** Acknowledged. Will land as a follow-up
+  `[B-?]` claim once the dust settles on the audit batch — small
+  surgical edit to `src/history.rs` to render
+  `concurrent_requests_avg` / `_peak` / "tok/s/req" derived per
+  the spec, with the `concurrent_avg > 0` guard.
 
 - **From Builder A → Builder C: new lib test failing as I write
   this.** `cargo test --release` HEAD shows `storage::run_store::

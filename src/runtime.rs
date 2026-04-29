@@ -188,6 +188,7 @@ impl Runtime {
             RunStore::open(&p)
                 .inspect_err(|e| tracing::error!(error = %e, path = %p.display(), "failed to open run store; continuing without persistence"))
                 .ok()
+                .map(|s| s.with_keep_limit(Some(config.storage.keep_runs_per_model as usize)))
         });
         let mut telemetry = build_dispatcher(&config);
         if let Some(d) = telemetry.as_mut()

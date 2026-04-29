@@ -259,6 +259,39 @@ struct IndexEntry {
     relative_path: String,
 }
 
+/// Tombstone line written when `keep_runs_per_model` pruning deletes a
+/// record. On reopen, `load_index` collects tombstones and filters out
+/// the matching `IndexEntry`s — without this the in-memory index would
+/// resurrect pruned ids on every restart.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct IndexTombstone {
+    tombstone: RunId,
+}
+
+/// One line in the on-disk index file. Untagged enum so existing entries
+/// (no `tombstone` field) still parse; tombstones (`{"tombstone": uuid}`)
+/// distinguish themselves by field presence. Order matters for serde
+/// untagged: try `Entry` first, then `Tombstone`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+enum IndexLine {
+    Entry(IndexEntry),
+    Tombstone(IndexTombstone),
+}
+
+/// One row in `RunStore::prune_audit_log`. Built every time
+/// [`RunStore::append`] triggers a `keep_runs_per_model` prune. Held in
+/// memory only — the durable trail is the tombstone lines in the index
+/// file plus the structured `tracing::info!` event emitted alongside.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PruneAudit {
+    pub timestamp: DateTime<Utc>,
+    pub model_key: String,
+    pub deleted: Vec<RunId>,
+    pub kept: usize,
+    pub limit: usize,
+}
+
 #[derive(Debug, Error)]
 pub enum RunStoreError {
     #[error("creating run-store directory {path:?}: {source}")]
@@ -304,6 +337,16 @@ pub struct RunStore {
     /// directory scan.
     by_id: HashMap<RunId, String>,
     index_writer: BufWriter<File>,
+    /// Hard cap on records per `model_key`, enforced inside `append`.
+    /// `None` disables pruning entirely (the historical default and what
+    /// every existing test still expects). Wired up from
+    /// `StorageConfig::keep_runs_per_model` at runtime construction.
+    keep_runs_per_model: Option<usize>,
+    /// In-memory audit log of every prune action — one entry per
+    /// `append` call that crossed the cap. Tests assert against this;
+    /// production callers can inspect via [`Self::prune_audit_log`] if
+    /// they want to surface "x runs aged out" in the UI later.
+    prune_audit: Vec<PruneAudit>,
 }
 
 impl RunStore {
@@ -340,12 +383,30 @@ impl RunStore {
             by_model,
             by_id,
             index_writer: BufWriter::new(index_file),
+            keep_runs_per_model: None,
+            prune_audit: Vec::new(),
         })
     }
 
     /// Public root path — useful for tests and the manual smoke script.
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// Configure the per-model record cap. `None` disables pruning;
+    /// `Some(n)` keeps at most `n` records per model, evicting the
+    /// oldest by `RunRecord::summary.spawn_time` whenever a fresh
+    /// `append` would otherwise exceed the cap. Builder-style so callers
+    /// can chain: `RunStore::open(p)?.with_keep_limit(Some(200))`.
+    pub fn with_keep_limit(mut self, limit: Option<usize>) -> Self {
+        self.keep_runs_per_model = limit;
+        self
+    }
+
+    /// Read the prune audit ring. Each entry corresponds to a single
+    /// `append` that crossed the configured cap, in chronological order.
+    pub fn prune_audit_log(&self) -> &[PruneAudit] {
+        &self.prune_audit
     }
 
     /// Append a new run record. Writes the per-record JSON file *first*,
@@ -388,22 +449,178 @@ impl RunStore {
 
         // Step 2: append the index entry. Flush so a tail-following
         // process sees it immediately.
-        let entry = IndexEntry {
+        let entry = IndexLine::Entry(IndexEntry {
             run_id,
             model_key: model_key.clone(),
             exit_time: record.summary.exit_time,
             relative_path: relative_path.clone(),
-        };
+        });
         let line = serde_json::to_string(&entry)?;
         self.index_writer.write_all(line.as_bytes())?;
         self.index_writer.write_all(b"\n")?;
         self.index_writer.flush()?;
 
         // Step 3: reflect in memory.
-        self.by_model.entry(model_key).or_default().push(run_id);
+        self.by_model
+            .entry(model_key.clone())
+            .or_default()
+            .push(run_id);
         self.by_id.insert(run_id, relative_path);
 
+        // Step 4: best-effort prune. Failures here are logged but never
+        // bubble up — the user-visible operation is the append. If a
+        // file refuses to delete (read-only mount, race with another
+        // writer, …) we keep the in-memory entry so the next append
+        // retries the same prune; the bounded retry beats silently
+        // losing the pruned id forever.
+        self.prune_if_needed(&model_key);
+
         Ok(run_id)
+    }
+
+    /// Drop oldest records for `model_key` until the in-memory count
+    /// matches `keep_runs_per_model`. "Oldest" is by
+    /// `summary.spawn_time` not by file order — record imports, system
+    /// clock drift, or out-of-order appends would all desync those.
+    ///
+    /// Best-effort: per the spec, a delete failure is logged at warn
+    /// level and the append still succeeds. The prune is housekeeping;
+    /// the append is the user-visible operation.
+    fn prune_if_needed(&mut self, model_key: &str) {
+        let Some(limit) = self.keep_runs_per_model else {
+            return;
+        };
+        let count = self.by_model.get(model_key).map_or(0, Vec::len);
+        if count <= limit {
+            return;
+        }
+
+        // Collect (id, spawn_time) so the eviction order is timestamp-
+        // driven. `get` performs disk I/O — acceptable because this
+        // path only fires when the cap was just crossed (typically
+        // O(1) per append once steady state is reached).
+        let ids: Vec<RunId> = self
+            .by_model
+            .get(model_key)
+            .cloned()
+            .unwrap_or_default();
+        let mut with_time: Vec<(RunId, DateTime<Utc>)> = ids
+            .iter()
+            .filter_map(|id| {
+                let rec = self.get(*id)?;
+                Some((*id, rec.summary.spawn_time))
+            })
+            .collect();
+        // Records that failed to load (already pruned, corrupt, missing
+        // file) get an effective `spawn_time` of "infinitely old" so
+        // they're the first to be evicted from the in-memory index — we
+        // can't honour their real timestamp and there's no value in
+        // keeping a dead pointer alive.
+        let known_ids: std::collections::HashSet<RunId> =
+            with_time.iter().map(|(id, _)| *id).collect();
+        for id in &ids {
+            if !known_ids.contains(id) {
+                with_time.push((*id, DateTime::<Utc>::MIN_UTC));
+            }
+        }
+        with_time.sort_by_key(|(_, t)| *t);
+        let evict_count = count.saturating_sub(limit);
+        let candidates: Vec<RunId> = with_time
+            .iter()
+            .take(evict_count)
+            .map(|(id, _)| *id)
+            .collect();
+
+        let mut deleted: Vec<RunId> = Vec::new();
+        for id in &candidates {
+            let rel = match self.by_id.get(id).cloned() {
+                Some(p) => p,
+                None => {
+                    // Already absent — drop the in-memory pointer.
+                    self.remove_from_index(model_key, *id);
+                    deleted.push(*id);
+                    continue;
+                }
+            };
+            let abs = self.root.join(&rel);
+            match fs::remove_file(&abs) {
+                Ok(()) => {
+                    self.remove_from_index(model_key, *id);
+                    deleted.push(*id);
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    // File vanished underneath us — still safe to drop
+                    // the index pointer.
+                    self.remove_from_index(model_key, *id);
+                    deleted.push(*id);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        run_id = %id,
+                        path = %abs.display(),
+                        model = %model_key,
+                        "best-effort prune: failed to delete record file; \
+                         keeping index entry so a later append retries"
+                    );
+                }
+            }
+        }
+
+        if deleted.is_empty() {
+            return;
+        }
+
+        // Tombstone every successfully deleted id so the next reopen
+        // does not resurrect it from `index.jsonl`. A failure to write
+        // the tombstone is *not* fatal — the file is gone, the in-
+        // memory state is consistent, and the worst case is a "ghost"
+        // entry on the next reopen that `recent()` already filters out.
+        for id in &deleted {
+            let line = match serde_json::to_string(&IndexLine::Tombstone(IndexTombstone {
+                tombstone: *id,
+            })) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!(error = %e, run_id = %id, "failed to encode prune tombstone");
+                    continue;
+                }
+            };
+            if let Err(e) = self
+                .index_writer
+                .write_all(line.as_bytes())
+                .and_then(|()| self.index_writer.write_all(b"\n"))
+            {
+                tracing::warn!(error = %e, run_id = %id, "failed to write prune tombstone");
+            }
+        }
+        if let Err(e) = self.index_writer.flush() {
+            tracing::warn!(error = %e, "failed to flush prune tombstones");
+        }
+
+        let kept = self.by_model.get(model_key).map_or(0, Vec::len);
+        tracing::info!(
+            target: "run_store_prune",
+            model = %model_key,
+            deleted = deleted.len(),
+            kept = kept,
+            limit = limit,
+            "pruned oldest run records to honour keep_runs_per_model"
+        );
+        self.prune_audit.push(PruneAudit {
+            timestamp: Utc::now(),
+            model_key: model_key.to_string(),
+            deleted,
+            kept,
+            limit,
+        });
+    }
+
+    fn remove_from_index(&mut self, model_key: &str, id: RunId) {
+        if let Some(v) = self.by_model.get_mut(model_key) {
+            v.retain(|x| *x != id);
+        }
+        self.by_id.remove(&id);
     }
 
     /// Sorted list of model keys with at least one stored run.
@@ -413,9 +630,12 @@ impl RunStore {
         models
     }
 
-    /// Up to `n` most recent runs of `model`, newest first. Loads each
-    /// matching record file from disk; cheap enough for `n ≤ ~100`,
-    /// which is the only call site Tier 1.1 plans.
+    /// Up to `n` most recent runs of `model`, newest first by
+    /// `summary.spawn_time`. Sorting by timestamp (rather than append
+    /// order) means imported records, clock drift, or out-of-order
+    /// writes still land where the caller expects. Loads every record
+    /// for the model from disk — cheap when `keep_runs_per_model` caps
+    /// the per-model count, which it does in production.
     ///
     /// Records that fail to deserialise (e.g. format drift, truncation)
     /// are logged at warn and skipped — the operator should not lose a
@@ -424,9 +644,8 @@ impl RunStore {
         let Some(ids) = self.by_model.get(model) else {
             return Vec::new();
         };
-        ids.iter()
-            .rev()
-            .take(n)
+        let mut loaded: Vec<RunRecord> = ids
+            .iter()
             .filter_map(|id| match self.get(*id) {
                 Some(r) => Some(r),
                 None => {
@@ -438,7 +657,12 @@ impl RunStore {
                     None
                 }
             })
-            .collect()
+            .collect();
+        // Newest first. Stable sort keeps tie-broken append order
+        // intact for fixtures that share a timestamp.
+        loaded.sort_by_key(|r| std::cmp::Reverse(r.summary.spawn_time));
+        loaded.truncate(n);
+        loaded
     }
 
     /// Load a single record by id. Returns `None` if the id is unknown
@@ -494,18 +718,24 @@ impl RunStore {
                 });
             }
         };
+
+        // Two-pass: collect entries and tombstones, then drop any entry
+        // whose id was tombstoned. Single-pass is possible but a
+        // tombstone written before its entry would be missed; the
+        // append code never produces that order today, but the parser
+        // is the natural place to be defensive.
+        let mut entries: Vec<IndexEntry> = Vec::new();
+        let mut tombstoned: std::collections::HashSet<RunId> =
+            std::collections::HashSet::new();
         for (i, line) in BufReader::new(file).lines().enumerate() {
             let line = line?;
             if line.trim().is_empty() {
                 continue;
             }
-            match serde_json::from_str::<IndexEntry>(&line) {
-                Ok(entry) => {
-                    by_model
-                        .entry(entry.model_key.clone())
-                        .or_default()
-                        .push(entry.run_id);
-                    by_id.insert(entry.run_id, entry.relative_path);
+            match serde_json::from_str::<IndexLine>(&line) {
+                Ok(IndexLine::Entry(entry)) => entries.push(entry),
+                Ok(IndexLine::Tombstone(t)) => {
+                    tombstoned.insert(t.tombstone);
                 }
                 Err(e) => tracing::warn!(
                     line = i + 1,
@@ -513,6 +743,16 @@ impl RunStore {
                     "skipping malformed run-store index line"
                 ),
             }
+        }
+        for entry in entries {
+            if tombstoned.contains(&entry.run_id) {
+                continue;
+            }
+            by_model
+                .entry(entry.model_key.clone())
+                .or_default()
+                .push(entry.run_id);
+            by_id.insert(entry.run_id, entry.relative_path);
         }
         Ok((by_model, by_id))
     }
@@ -674,14 +914,172 @@ mod tests {
         // Walk the index and assert each referenced file exists.
         let index = std::fs::read_to_string(dir.path().join("index.jsonl")).unwrap();
         for line in index.lines() {
-            let entry: IndexEntry = serde_json::from_str(line).unwrap();
-            let abs = dir.path().join(&entry.relative_path);
-            assert!(
-                abs.exists(),
-                "index points at missing file: {}",
-                abs.display()
-            );
+            match serde_json::from_str::<IndexLine>(line).unwrap() {
+                IndexLine::Entry(entry) => {
+                    let abs = dir.path().join(&entry.relative_path);
+                    assert!(
+                        abs.exists(),
+                        "index points at missing file: {}",
+                        abs.display()
+                    );
+                }
+                IndexLine::Tombstone(_) => {
+                    // No prune limit set in this test so tombstones
+                    // should never appear. If one does, surface it.
+                    panic!("unexpected tombstone in index without keep limit");
+                }
+            }
         }
+    }
+
+    /// Build a record at a fixed `spawn_time` for prune tests.
+    /// The 5-record prune scenario needs distinct timestamps to verify
+    /// "oldest by timestamp, not by file order".
+    fn fixture_record_at(pid: u32, model: &str, spawn: DateTime<Utc>) -> RunRecord {
+        let mut s = fixture_summary(pid, model, 30.0);
+        s.spawn_time = spawn;
+        // exit_time must follow spawn_time in real life; bump by 1s.
+        s.exit_time = spawn + chrono::Duration::seconds(1);
+        RunRecord::from_summary(s)
+    }
+
+    /// Spec: with `keep_runs_per_model = 3`, append 5 records and
+    /// observe (a) `recent` returns the three newest by `spawn_time`
+    /// (b) the prune audit log lists the two evicted ids.
+    /// Records are appended in *non-monotonic* timestamp order so the
+    /// test fails if pruning relies on file order rather than the
+    /// declared spawn_time.
+    #[test]
+    fn prune_keeps_three_newest_by_spawn_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = RunStore::open(dir.path())
+            .unwrap()
+            .with_keep_limit(Some(3));
+
+        let base = Utc::now() - chrono::Duration::seconds(100);
+        // Spawn timestamps deliberately *out of order* vs append order.
+        let ts: Vec<DateTime<Utc>> = (0..5)
+            .map(|i| base + chrono::Duration::seconds(i))
+            .collect();
+        // Append order: 4 (newest), 0 (oldest), 2, 1, 3.
+        let order: [usize; 5] = [4, 0, 2, 1, 3];
+        let mut id_by_idx: std::collections::HashMap<usize, RunId> =
+            std::collections::HashMap::new();
+        for &i in &order {
+            let id = store
+                .append(fixture_record_at(i as u32, "phi3-mini", ts[i]))
+                .unwrap();
+            id_by_idx.insert(i, id);
+        }
+
+        let recent = store.recent("phi3-mini", 100);
+        assert_eq!(
+            recent.len(),
+            3,
+            "kept count should equal the limit, got {}: {:?}",
+            recent.len(),
+            recent.iter().map(|r| r.run_id).collect::<Vec<_>>()
+        );
+        let kept_ids: std::collections::HashSet<RunId> =
+            recent.iter().map(|r| r.run_id).collect();
+        let expected_kept: std::collections::HashSet<RunId> = [2, 3, 4]
+            .iter()
+            .map(|i| id_by_idx[i])
+            .collect();
+        assert_eq!(
+            kept_ids, expected_kept,
+            "kept set should be the three newest by spawn_time"
+        );
+        // recent() also asserts the newest-first ordering invariant —
+        // the previously-kept tests cover that, but make sure the
+        // prune path didn't break it.
+        assert_eq!(recent[0].run_id, id_by_idx[&4]);
+        assert_eq!(recent[1].run_id, id_by_idx[&3]);
+        assert_eq!(recent[2].run_id, id_by_idx[&2]);
+
+        // Prune audit log: 2 prune actions fired (one per cap-crossing
+        // append). Together they account for the two evicted ids.
+        let audit = store.prune_audit_log();
+        let all_deleted: std::collections::HashSet<RunId> =
+            audit.iter().flat_map(|a| a.deleted.iter().copied()).collect();
+        let expected_deleted: std::collections::HashSet<RunId> =
+            [0, 1].iter().map(|i| id_by_idx[i]).collect();
+        assert_eq!(
+            all_deleted, expected_deleted,
+            "audit should record exactly the two evicted ids; got {audit:?}"
+        );
+        for a in audit {
+            assert_eq!(a.kept, 3);
+            assert_eq!(a.limit, 3);
+            assert_eq!(a.model_key, "phi3-mini");
+        }
+    }
+
+    /// Manual scenario from the spec: limit=2, append 10 records,
+    /// observe disk has 2 record files at the end.
+    #[test]
+    fn prune_with_limit_two_leaves_two_files_on_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = RunStore::open(dir.path())
+            .unwrap()
+            .with_keep_limit(Some(2));
+
+        let base = Utc::now() - chrono::Duration::seconds(1_000);
+        for i in 0..10u32 {
+            let ts = base + chrono::Duration::seconds(i as i64);
+            store
+                .append(fixture_record_at(i, "qwen", ts))
+                .unwrap();
+        }
+
+        // Walk the runs/ tree and count *.json files.
+        let runs_dir = dir.path().join("runs");
+        let mut json_count = 0usize;
+        for day in fs::read_dir(&runs_dir).unwrap() {
+            let day = day.unwrap();
+            for f in fs::read_dir(day.path()).unwrap() {
+                let f = f.unwrap();
+                if f.path().extension().is_some_and(|e| e == "json") {
+                    json_count += 1;
+                }
+            }
+        }
+        assert_eq!(
+            json_count, 2,
+            "expected exactly 2 record files on disk after prune to limit=2"
+        );
+        // And recent() agrees.
+        assert_eq!(store.recent("qwen", 100).len(), 2);
+    }
+
+    /// Tombstones survive a reopen: pruned ids do not resurrect when
+    /// the index.jsonl is replayed. Without the tombstone marker, the
+    /// in-memory `by_model` would re-include every pruned id, and
+    /// `recent()` would emit None-loading filter_map warnings forever.
+    #[test]
+    fn pruned_ids_stay_pruned_after_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let mut store = RunStore::open(dir.path())
+                .unwrap()
+                .with_keep_limit(Some(2));
+            let base = Utc::now() - chrono::Duration::seconds(50);
+            for i in 0..5u32 {
+                let ts = base + chrono::Duration::seconds(i as i64);
+                store
+                    .append(fixture_record_at(i, "llama", ts))
+                    .unwrap();
+            }
+            assert_eq!(store.recent("llama", 100).len(), 2);
+        }
+        // Reopen with no limit — tombstones from the previous run
+        // should keep the pruned ids out.
+        let store = RunStore::open(dir.path()).unwrap();
+        assert_eq!(
+            store.recent("llama", 100).len(),
+            2,
+            "pruned records should not be revived on reopen"
+        );
     }
 
     /// ExitReason::from_summary matrix.

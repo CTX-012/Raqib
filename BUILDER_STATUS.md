@@ -391,6 +391,73 @@ to history) and via reading concurrent worktrees.
     communicates absence of measurement, which `model=-` didn't.
     Worth a release-note callout if downstream consumers show up.
 
+### [A-7] TUI detail-mode toggle (`v`) — closes the deferred half of [A-6]
+- Commit SHA: a0a9c19d261e972bf566729f9c501d88d8b885d8
+- Files changed: src/ui/app.rs (detail_mode state + toggle method,
+  focus_next/prev no-op in default mode, 4 new tests),
+  src/ui/input.rs (`v` keybinding + 1 new test), src/ui/mod.rs
+  (Action dispatch), src/ui/panels/mod.rs (split render into
+  render_default + render_detail, footer hint differs by mode),
+  CHANGELOG.md, scripts/manual/detail_mode_smoke.sh (new)
+- Smoke script: scripts/manual/detail_mode_smoke.sh
+- CHANGELOG line: "**TUI detail-mode toggle (`v`).** The default
+  view drops three panels — Framework procs, All processes, Recent
+  actions — and shows just AI Workloads (full-width) plus Recent
+  runs. Hit `v` to flip into detail mode and get the legacy
+  six-panel layout back; hit `v` again to return. Tab focus-cycling
+  is suppressed in default mode. Leaving detail mode snaps focus
+  back to AI Workloads and disarms any pending manual kill — an
+  armed kill against a row the user can no longer see is a footgun.
+  The footer hint also updates per mode so the listed keys match
+  the actions actually available."
+- Test output (last 10 lines of `cargo test --release`):
+  ```
+  test result: ok. 336 passed; 0 failed (lib)
+  test result: ok. 0 passed; 0 failed (compare_proptests)
+  test result: ok. 3 passed; 0 failed (concurrent_requests_e2e)
+  test result: ok. 1 passed; 0 failed (expect_rule_guard)
+  test result: ok. 3 passed; 0 failed (governor_pid_reuse)
+  test result: ok. 2 passed; 0 failed (governor_properties)
+  test result: ok. 5 passed; 0 failed (history_cli)
+  test result: ok. 2 passed; 0 failed (log_format)
+  test result: ok. 3 passed; 0 failed (pipeline_end_to_end)
+  test result: ok. 1 passed; 0 failed (sigterm_clean_shutdown)
+  ```
+  Smoke output:
+  ```
+  test ui::input::tests::v_toggles_detail_mode ... ok
+  test ui::app::tests::default_mode_locks_focus_to_registry ... ok
+  test ui::app::tests::toggle_detail_mode_flips_the_flag_and_resets_focus ... ok
+  test ui::app::tests::leaving_detail_mode_disarms_pending_kill ... ok
+  [smoke] all 4 detail-mode tests pass
+  [smoke] both layouts present and footer differs by mode
+  [smoke] action wired through input → run-loop → App
+  PASS: detail-mode toggle is in place; default view hides Framework procs / All processes / Recent actions.
+  ```
+- Builder note:
+  * **Keybinding choice — `v` for "view".** Function keys (F1–F12)
+    are unreliable across terminal emulators and SSH transports;
+    Ctrl-shifted letters collide with TUI conventions in some
+    terminals; the lowercase letter `v` was unused. T2's V3
+    walkthrough should add a probe sending `v` after launch and
+    re-counting that exactly three panes are visible by default and
+    six in detail mode.
+  * **One pre-existing test required a small update.**
+    `ui::app::tests::focus_change_disarms_kill_for_safety` armed a
+    kill, called `focus_next()`, and asserted the kill was disarmed
+    — but `focus_next()` is now a no-op in default mode. Fixed by
+    calling `toggle_detail_mode()` first so the test exercises the
+    mode where `focus_next` is meaningful. Behavioural contract
+    (focus changes disarm pending kills) intact.
+  * **PTY-level verification deferred to T2 V3a.** The detail-mode
+    toggle is data-path correct. The actual visual "panes count
+    drops from 6 to 3" assertion needs a PTY test runner; T2 V3
+    already drives one for the existing layout, so extending it
+    with a `v` keypress + re-count is the natural follow-up.
+    Until that lands, V3 (signed off PASS at SHA `1b13d97`) should
+    be re-run on this SHA — the default-mode panel-count check
+    will need updating from 6 to 3.
+
 ### [B-1] CHANGELOG.md backfill for Tier 1.2d exec, 2.1–2.3, 3.1–3.3, 3.5–3.7
 - Commit SHA: 363769c5256633a4528916ebda2631b83ea46663
   (follow-up SHA `f0dfeb9` refreshes the test-count footer after
@@ -886,21 +953,13 @@ to history) and via reading concurrent worktrees.
 
 ## Cross-builder requests
 
-- **From Builder A → next-claimant: detail-mode panel toggle (deferred
-  out of [A-6]).** The original UX feedback for [A-6] asked that
-  Rogues / Culprits / Audit panels move out of the default view and
-  into a "detail mode". Adding a real mode toggle is a feature (new
-  keybinding in `src/ui/input.rs`, mode state on `App`, render-routing
-  branch in `src/ui/mod.rs`'s `draw` path). [A-6] only handled the
-  rename + placeholder cleanup that the user's "rename all" follow-up
-  scoped me to. Whoever picks this up: best entry point is
-  `src/ui/mod.rs`'s layout split — three sub-frames in default mode
-  (Vitals + AI Workloads + Recent runs), a fourth row of {Framework
-  procs, All processes, Recent actions} only when the operator
-  presses, e.g., `F2`. T2's V3 walkthrough already covers the
-  six-panel layout; the detail-mode test would be a new V3a probe
-  asserting that the three secondary panels are absent until F2 is
-  pressed.
+- **(Resolved)** From Builder A → next-claimant: detail-mode panel
+  toggle. **Resolved by `[A-7]`** at SHA `a0a9c19`. The toggle is
+  bound to lowercase `v` (not `F2` as I'd originally suggested —
+  function keys are unreliable across terminals / SSH). T2's V3
+  walkthrough panel-count probe should be re-run on this SHA: the
+  default mode now shows three panes (Vitals + AI Workloads +
+  Recent runs), six when `v` has been pressed.
 
 - **(Resolved)** From Builder A → Builder B: history viewer should
   show the new Tier 3.4 numbers. **Resolved by `[B-7]`** at SHA

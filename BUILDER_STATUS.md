@@ -319,6 +319,76 @@ to history) and via reading concurrent worktrees.
     regex layer but not the exec→parser→accumulator wire. The L1
     re-run is the launch-readiness gate.
 
+### [A-6] UX rename — operator-facing labels in plain language
+- Commit SHA: 6f7b2298567dcd4646a4893dfcce3956a709087f
+- Files changed: src/ui/panels/{registry,rogues,culprits,audit,
+  completed,vitals}.rs, src/main.rs (headless tracing — drops
+  `model=-` / `vram=0M` placeholders), src/governor/executor.rs
+  (dry-run reason rewrite + new pinning unit test), CHANGELOG.md,
+  scripts/manual/ux_rename_smoke.sh (new)
+- Smoke script: scripts/manual/ux_rename_smoke.sh
+- CHANGELOG line: "**UX pass — operator-facing labels rewritten in
+  plain language.** TUI panel titles, headless log lines, and the
+  governor's dry-run reason all dropped jargon-heavy phrasings:
+  `Registry (AI workloads)` → `AI Workloads`, `Rogues (unmapped
+  framework procs)` → `Framework procs`, `Culprits (top by PID
+  order)` → `All processes`, `Audit (kills + regressions)` →
+  `Recent actions`, `AI run summaries` → `Recent runs`, `GPU: not
+  available (NVML uninitialized)` → `No GPU detected`,
+  `processes: N   AI-classified: M` → `N processes   M AI workloads
+  detected`. Run-summary row now says `RAM 48 MB, GPU memory 4096
+  MB` instead of `rss=48M vram=4096M`, and drops the GPU memory
+  clause entirely when the run had no GPU allocation. `model=` is
+  omitted (TUI and headless tracing) when no model name was
+  extracted, instead of rendering `model=-` which read like a
+  sentinel value. Same treatment for `vram=0M` / `peak_vram_mb=0`.
+  Governor dry-run reason `DRY-RUN: would send SIGTERM to AI
+  process: Inference` → `Would stop ollama (dry-run mode — no
+  action taken)`. Uses the actual process name and stops leaking
+  the `AICategory` Debug variant."
+- Test output (last 10 lines of `cargo test --release`):
+  ```
+  test result: ok. 327 passed; 0 failed (lib)
+  test result: ok. 0 passed; 0 failed (compare_proptests)
+  test result: ok. 3 passed; 0 failed (concurrent_requests_e2e)
+  test result: ok. 1 passed; 0 failed (expect_rule_guard)
+  test result: ok. 3 passed; 0 failed (governor_pid_reuse)
+  test result: ok. 2 passed; 0 failed (governor_properties)
+  test result: ok. 5 passed; 0 failed (history_cli)
+  test result: ok. 2 passed; 0 failed (log_format)
+  test result: ok. 3 passed; 0 failed (pipeline_end_to_end)
+  test result: ok. 1 passed; 0 failed (sigterm_clean_shutdown)
+  ```
+  Smoke output:
+  ```
+  [smoke] dry-run format unit test
+  test dry_run_reason_string_uses_process_name_and_plain_english ... ok
+  [smoke] all old labels gone from src/
+  [smoke] all new labels present in src/
+  [smoke] headless stderr is clean of the old placeholders
+  PASS: UX rename pass landed end-to-end.
+  ```
+- Builder note:
+  * **Internal `FocusedPanel::{Registry,Rogues,Culprits}` enum
+    names kept intact** — they are identifiers, not user-visible
+    — so input.rs and app.rs focus-cycling logic stays untouched
+    and T2's existing V3 PTY walkthrough's keybinding tests don't
+    move.
+  * **Panel structure not changed.** The user's original message
+    also asked to "delete from default view; move to detail mode"
+    for Rogues / Culprits / Audit. The follow-up "rename all"
+    message scoped me out of detail-mode work for this pass —
+    adding a real mode toggle is a feature (new keybinding + mode
+    state + render routing). T2's V3 walkthrough still sees six
+    panels, just with new titles. Filed below in Cross-builder
+    requests for a future detail-mode pass.
+  * **Headless log shape is mildly breaking.** Anyone grepping
+    stderr for `model=-` or `vram=0M` (no consumer in this repo,
+    but possible in operator scripts) would now miss rows. The new
+    shape is strictly more informative — absence of field
+    communicates absence of measurement, which `model=-` didn't.
+    Worth a release-note callout if downstream consumers show up.
+
 ### [B-1] CHANGELOG.md backfill for Tier 1.2d exec, 2.1–2.3, 3.1–3.3, 3.5–3.7
 - Commit SHA: 363769c5256633a4528916ebda2631b83ea46663
   (follow-up SHA `f0dfeb9` refreshes the test-count footer after
@@ -643,6 +713,22 @@ to history) and via reading concurrent worktrees.
   Ollama `eval rate:` regex from `[A-5]`.
 
 ## Cross-builder requests
+
+- **From Builder A → next-claimant: detail-mode panel toggle (deferred
+  out of [A-6]).** The original UX feedback for [A-6] asked that
+  Rogues / Culprits / Audit panels move out of the default view and
+  into a "detail mode". Adding a real mode toggle is a feature (new
+  keybinding in `src/ui/input.rs`, mode state on `App`, render-routing
+  branch in `src/ui/mod.rs`'s `draw` path). [A-6] only handled the
+  rename + placeholder cleanup that the user's "rename all" follow-up
+  scoped me to. Whoever picks this up: best entry point is
+  `src/ui/mod.rs`'s layout split — three sub-frames in default mode
+  (Vitals + AI Workloads + Recent runs), a fourth row of {Framework
+  procs, All processes, Recent actions} only when the operator
+  presses, e.g., `F2`. T2's V3 walkthrough already covers the
+  six-panel layout; the detail-mode test would be a new V3a probe
+  asserting that the three secondary panels are absent until F2 is
+  pressed.
 
 - **From Builder A → Builder B: history viewer should show the new
   Tier 3.4 numbers.** **Builder B push-back, 2026-04-29:** my brief

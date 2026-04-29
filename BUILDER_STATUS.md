@@ -14,9 +14,8 @@ to history) and via reading concurrent worktrees.
 ## Active Claims
 
 - builder_id: builder-A
-  scope: S.2 (--log-format flag), S.0.8 (SIGTERM re-verify),
-         Tier 3.4 (concurrent-request awareness). S.3 has moved to
-         Ready for Test below as [A-1].
+  scope: S.0.8 (SIGTERM re-verify), Tier 3.4 (concurrent-request
+         awareness). S.3 → [A-1], S.2 → [A-2] in Ready for Test.
   branch: builder-claude/tier-3-3-kv-cache-pressure (continuing here
           because parallel-builder protocol allows it; new branch was
           not requested in this session's brief)
@@ -87,6 +86,46 @@ to history) and via reading concurrent worktrees.
   is sub-millisecond because the repo is small (~50 .rs files), but
   it does walk every file — the deliberate-violation check verified
   it isn't a stub. No production behaviour changed.
+
+### [A-2] S.2 — `--log-format json` flag
+- Commit SHA: 84e413390df7f24587e05d143c122e7543fb377a
+- Files changed: CHANGELOG.md, scripts/manual/log_format_smoke.sh
+  (new), tests/log_format.rs (new). Note: the clap field and
+  `init_tracing` JSON branch on `src/main.rs` were already in place
+  from a prior session; this commit closes the test + smoke +
+  CHANGELOG gap the audit called out.
+- Smoke script: scripts/manual/log_format_smoke.sh
+- CHANGELOG line: "**S.2 — `--log-format json` flag**. Headless and
+  exec runs accept `--log-format human` (default, K=V text —
+  backwards-compatible) or `--log-format json` (one JSON object per
+  stderr line, all structured fields flattened onto the root).
+  Produced by `tracing_subscriber::fmt().json().flatten_event(true)`
+  so downstream tooling (jq, fluentd, vector, python `json.loads`)
+  can consume it without further parsing. Smoke
+  (`scripts/manual/log_format_smoke.sh`) validates 100+ stderr lines
+  parse as JSON; integration test (`tests/log_format.rs`) spawns the
+  binary in both modes and asserts shape per format. Clap restricts
+  the flag to those two values so a typo fails fast at parse time."
+- Test output (last 10 lines of `cargo test --release`):
+  ```
+  test json_format_emits_one_json_object_per_stderr_line ... ok
+  test human_format_is_not_json_shaped ... ok
+  test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured
+  Running tests/pipeline_end_to_end.rs
+  test ai_process_with_model_path_is_tracked_and_killed_in_enforce_mode ... ok
+  test exited_ai_process_generates_summary_with_resource_stats ... ok
+  test persistent_summary_round_trips_through_log_store ... ok
+  test result: ok. 3 passed; 0 failed
+  Doc-tests edge_monitor
+  test result: ok. 0 passed; 0 failed
+  ```
+- Builder note: smoke output on my WSL box was "PASS: --log-format
+  json is jq-clean over 100+ lines; human format remains text." with
+  103 stderr lines captured. The smoke writes a tempdir config that
+  sets `tick_interval_ms = 100` so 100 ticks complete in ~10 s
+  rather than 100 s. Tester 1 should re-run the smoke on a real
+  Linux box; Tester 2 should re-run `cargo test --release --test
+  log_format` and confirm both subprocess tests pass.
 
 ### [B-1] CHANGELOG.md backfill for Tier 1.2d exec, 2.1–2.3, 3.1–3.3, 3.5–3.7
 - Commit SHA: 363769c5256633a4528916ebda2631b83ea46663

@@ -14,12 +14,11 @@ to history) and via reading concurrent worktrees.
 ## Active Claims
 
 - builder_id: builder-A
-  scope: Tier 3.4 (concurrent-request awareness).
-         S.3 → [A-1], S.2 → [A-2], S.0.8 → [A-3] in Ready for Test.
-  branch: builder-claude/tier-3-3-kv-cache-pressure (continuing here
-          because parallel-builder protocol allows it; new branch was
-          not requested in this session's brief)
-  started: 2026-04-29
+  scope: ALL DONE — S.3 → [A-1], S.2 → [A-2], S.0.8 → [A-3],
+         Tier 3.4 → [A-4] in Ready for Test.
+  branch: audit/2026-04-29 (renamed mid-session; all four A-*
+          commits land here).
+  finished: 2026-04-29
 
 - builder_id: builder-C
   scope: TEST.md gap closure — ALL DONE, see [C-1] through [C-5]
@@ -166,6 +165,83 @@ to history) and via reading concurrent worktrees.
   whose effective UID can still write to readonly dirs, e.g. inside
   some WSL / container setups). Not caused by this commit; flagged
   in Cross-builder requests below.
+
+### [A-4] Tier 3.4 — concurrent-request awareness
+- Commit SHA: 959c477b53e62cc6c732b35f1ac1f28f37a6b4bd
+- Files changed: CHANGELOG.md, src/telemetry/concurrent_requests.rs
+  (new module), src/telemetry/mod.rs (export), src/telemetry/source.rs
+  (added `num_requests_waiting` to TelemetryFrame),
+  src/telemetry/samplers/vllm_prometheus.rs (parse
+  `vllm:num_requests_waiting`), src/telemetry/accumulator.rs
+  (replaced `concurrent_peak: u32` with two TimeWeightedGauges),
+  tests/concurrent_requests_e2e.rs (new),
+  scripts/manual/concurrent_requests_smoke.sh (new). The
+  `RunMetrics::concurrent_requests_avg` and `_waiting_peak` fields
+  on `src/storage/run_store.rs` were authored by [A-4] but landed
+  via [C-4]'s commit (Builder C absorbed an uncommitted edit when
+  they staged run_store changes in a parallel worktree). Net effect
+  is identical and Tier 3.4's tests cover the behaviour.
+- Smoke script: scripts/manual/concurrent_requests_smoke.sh
+- CHANGELOG line: "**Tier 3.4 — concurrent-request awareness**
+  (`src/telemetry/concurrent_requests.rs`). New `TimeWeightedGauge`
+  primitive folds `(value, instant)` samples into a step-function
+  integral so we can answer \"what was the typical concurrency\" —
+  distinct from the existing peak. The accumulator uses two gauges
+  per PID (running + waiting) so a server that briefly touched 16
+  concurrent but spent most of its time at 2 reports `peak=16,
+  avg≈2`, not just `peak=16`. vLLM sampler now reads
+  `vllm:num_requests_waiting` (queue depth, saturation signal).
+  `RunMetrics` gains `concurrent_requests_avg: Option<f32>`
+  (time-weighted) and `concurrent_requests_waiting_peak:
+  Option<u32>`; existing `concurrent_requests_peak` semantics
+  tighten — peak is `Some(value)` whenever any sample was observed,
+  including peak=0, instead of collapsing peak=0 to None. Spec
+  example \"1 req for 10 s, 8 for 50 s\" lands the textbook
+  `(1·10 + 8·50)/60 ≈ 6.833` average. 7 unit tests cover the gauge
+  edge cases (single sample, zero-Δt, all-zero values,
+  backwards-time, 1000-sample precision); 3 integration tests in
+  `tests/concurrent_requests_e2e.rs` cover the accumulator path.
+  Smoke `scripts/manual/concurrent_requests_smoke.sh` runs the
+  targeted tests and prints the spec calculation done two ways."
+- Test output (last 10 lines of `cargo test --release`):
+  ```
+  test result: ok. 324 passed; 0 failed; 0 ignored; 0 measured
+  test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured (compare proptests)
+  test result: ok. 3 passed; 0 failed (concurrent_requests_e2e — NEW)
+  test result: ok. 1 passed; 0 failed (expect_rule_guard — A-1)
+  test result: ok. 3 passed; 0 failed (governor_pid_reuse)
+  test result: ok. 2 passed; 0 failed (governor_properties)
+  test result: ok. 5 passed; 0 failed (history_cli)
+  test result: ok. 2 passed; 0 failed (log_format — A-2)
+  test result: ok. 3 passed; 0 failed (pipeline_end_to_end)
+  test result: ok. 1 passed; 0 failed (sigterm_clean_shutdown — A-3)
+  ```
+- Builder note:
+  * **Spec interpretation is documented at the top of
+    `src/telemetry/concurrent_requests.rs`** (lines 1–56). The
+    brief said "if the spec is ambiguous, write down your
+    interpretation as a comment block at the top of the new module";
+    latest.md's "track both peaks and time-weighted averages" left
+    open whether single-sample runs should report the lone value as
+    the average. I picked **None** for those — averaging over zero
+    elapsed time is undefined, and surfacing the value as both peak
+    and avg would let it double-count against later samples that
+    arrive after a snapshot. Same call applies when every sample
+    arrived at the same `Instant` (zero Δt). Peak still reports in
+    those cases (it's a separate statistic with no time dimension).
+  * **`concurrent_requests_peak` semantic shift.** Previously the
+    accumulator surfaced `None` when the running peak landed on
+    exactly 0 (an idle vLLM server polled at the wrong moment). Now
+    it surfaces `Some(0)` because we *did* observe data. Distinct
+    from `None` (no data ever arrived for this PID). The old shape
+    was lossy and no test pinned it.
+  * **Did NOT extend the history viewer.** latest.md's example
+    output `#14  serving 8 concurrent (peak)  →  20.1 tok/s/req`
+    is a UI rendering concern that touches `src/history.rs` —
+    `history.rs` is on Builder B's surface for a parallel
+    polishing pass and rendering arithmetic is a separate
+    concern from the data path I shipped. Cross-builder request
+    filed below.
 
 ### [B-1] CHANGELOG.md backfill for Tier 1.2d exec, 2.1–2.3, 3.1–3.3, 3.5–3.7
 - Commit SHA: 363769c5256633a4528916ebda2631b83ea46663
@@ -403,6 +479,21 @@ to history) and via reading concurrent worktrees.
   `[power]` section was added — see Cross-builder requests below.
 
 ## Cross-builder requests
+
+- **From Builder A → Builder B: history viewer should show the new
+  Tier 3.4 numbers.** latest.md's spec example for Tier 3.4 calls
+  out a per-row history rendering:
+  `#14  serving 8 concurrent (peak)  →  20.1 tok/s/req · 161 tok/s
+  aggregate`. The data layer ([A-4]) now lands
+  `concurrent_requests_avg`, `_peak`, and `_waiting_peak` on
+  `RunMetrics`, so a tester or downstream consumer can read the
+  numbers via `history --json` today. Adding the per-row text
+  rendering touches `src/history.rs` — Builder B's polishing
+  surface — and the arithmetic for "tok/s/req" is `tps_avg /
+  concurrent_avg` (guard concurrent_avg > 0). I did not edit
+  history.rs per the brief's "do not edit other builders' files"
+  rule; please pick this up in a follow-up B-? claim, or push back
+  if you'd rather Tier 3.4 own the rendering layer too.
 
 - **Re: Builder A note about a failing prune test.** Builder C now
   owns and has resolved that path. `recent()` was sorting by append

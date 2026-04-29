@@ -185,8 +185,52 @@ fn render_runs(w: &mut impl Write, model: &str, records: &[RunRecord]) -> std::i
             r.summary.peak_vram_mb,
             format_exit_short(&r.exit_reason)
         )?;
+        if let Some(line) = format_concurrent_line(r) {
+            writeln!(w, "     {}", line)?;
+        }
     }
     Ok(())
+}
+
+/// Tier 3.4 — second-line annotation per latest.md spec example
+/// `serving 8 concurrent (peak)  →  20.1 tok/s/req · 161 tok/s aggregate`.
+///
+/// Returns `None` for runs that never observed concurrency data (Ollama,
+/// llama.cpp without busy-slot exposure, vision workloads, etc) so the
+/// table stays compact for non-LLM history.
+///
+/// The "tok/s/req" arithmetic guards `concurrent_avg > 0`: dividing the
+/// aggregate throughput by the time-weighted average concurrency yields
+/// per-request throughput. When `concurrent_avg` is missing or zero we
+/// fall back to the peak — the spec example uses `(peak)` annotation for
+/// that case, so we print whichever divisor we used.
+pub(crate) fn format_concurrent_line(r: &RunRecord) -> Option<String> {
+    let peak = r.metrics.concurrent_requests_peak?;
+    let aggregate_tps = r.metrics.tokens_per_sec_avg?;
+    let avg = r.metrics.concurrent_requests_avg;
+
+    let (per_req, divisor_label) = match avg {
+        Some(a) if a > 0.0 => (Some(aggregate_tps / a), format!("{a:.1} avg")),
+        _ if peak > 0 => (
+            Some(aggregate_tps / peak as f32),
+            format!("{peak} peak"),
+        ),
+        _ => (None, "0".into()),
+    };
+    let waiting_suffix = match r.metrics.concurrent_requests_waiting_peak {
+        Some(w) if w > 0 => format!(" · queue peak {w}"),
+        _ => String::new(),
+    };
+    match per_req {
+        Some(per) => Some(format!(
+            "serving {peak} concurrent (peak; {divisor_label})  →  \
+             {per:.1} tok/s/req · {aggregate_tps:.1} tok/s aggregate{waiting_suffix}"
+        )),
+        None => Some(format!(
+            "serving {peak} concurrent (peak)  →  \
+             {aggregate_tps:.1} tok/s aggregate{waiting_suffix}"
+        )),
+    }
 }
 
 fn truncate(s: &str, max: usize) -> &str {
@@ -355,5 +399,99 @@ mod tests {
             "crash(139)"
         );
         assert_eq!(format_exit_short(&ExitReason::Unknown), "unknown");
+    }
+
+    /// Helper to build a record with concurrency telemetry populated —
+    /// used by the Tier 3.4 history-rendering tests below.
+    fn record_with_concurrency(
+        peak: Option<u32>,
+        avg: Option<f32>,
+        tps: Option<f32>,
+        waiting_peak: Option<u32>,
+    ) -> RunRecord {
+        let mut r = record_for("phi3-mini", None);
+        r.metrics.concurrent_requests_peak = peak;
+        r.metrics.concurrent_requests_avg = avg;
+        r.metrics.tokens_per_sec_avg = tps;
+        r.metrics.concurrent_requests_waiting_peak = waiting_peak;
+        r
+    }
+
+    /// Tier 3.4 — spec example numbers exactly:
+    /// "1 req for 10 s, 8 for 50 s" → time-weighted avg ≈ 6.833,
+    /// aggregate 161 tok/s ÷ 6.833 avg ≈ 23.6 tok/s/req.
+    /// Spec headline phrasing also requires the words "concurrent"
+    /// "tok/s/req" and "tok/s aggregate" to appear.
+    #[test]
+    fn tier_34_format_concurrent_line_uses_avg_when_present() {
+        let r = record_with_concurrency(Some(8), Some(6.833), Some(161.0), None);
+        let line = format_concurrent_line(&r).expect("concurrency populated");
+        assert!(line.contains("8 concurrent (peak"), "got: {line}");
+        assert!(line.contains("avg"), "got: {line}"); // names the divisor
+        assert!(line.contains("tok/s/req"), "got: {line}");
+        assert!(line.contains("tok/s aggregate"), "got: {line}");
+        // 161.0 / 6.833 ≈ 23.6
+        assert!(line.contains("23.6"), "got: {line}");
+        assert!(line.contains("161.0"), "got: {line}");
+    }
+
+    /// When the time-weighted avg is missing we fall back to peak as
+    /// the divisor — but the line must say so explicitly so a reader
+    /// doesn't confuse "8 (avg)" with "8 (peak)".
+    #[test]
+    fn tier_34_format_concurrent_line_falls_back_to_peak_divisor() {
+        let r = record_with_concurrency(Some(1), None, Some(158.0), None);
+        let line = format_concurrent_line(&r).unwrap();
+        assert!(line.contains("1 peak"), "got: {line}");
+        // 158 / 1 = 158.0 tok/s/req
+        assert!(line.contains("158.0 tok/s/req"), "got: {line}");
+    }
+
+    /// Concurrency=0 with non-null peak (idle vLLM scraped at the
+    /// wrong moment): we still show `0 concurrent` but skip the
+    /// per-request divisor — a tok/s/req of "inf" or "NaN" would be
+    /// misleading.
+    #[test]
+    fn tier_34_zero_peak_skips_per_request_divisor() {
+        let r = record_with_concurrency(Some(0), Some(0.0), Some(12.0), None);
+        let line = format_concurrent_line(&r).unwrap();
+        assert!(line.contains("0 concurrent"), "got: {line}");
+        assert!(!line.contains("tok/s/req"), "must not divide by zero: {line}");
+        assert!(line.contains("12.0 tok/s aggregate"), "got: {line}");
+    }
+
+    /// No concurrency telemetry → no second line. Vision / Ollama /
+    /// llama.cpp without busy-slot exposure end up here. The whole
+    /// idea is that the table stays compact for non-LLM history.
+    #[test]
+    fn tier_34_no_telemetry_renders_no_extra_line() {
+        let r = record_with_concurrency(None, None, None, None);
+        assert!(format_concurrent_line(&r).is_none());
+    }
+
+    /// Queue depth surfaces only when non-zero, and only as a suffix
+    /// on the existing line (not a separate row).
+    #[test]
+    fn tier_34_waiting_peak_appended_when_nonzero() {
+        let r = record_with_concurrency(Some(8), Some(6.833), Some(161.0), Some(4));
+        let line = format_concurrent_line(&r).unwrap();
+        assert!(line.contains("queue peak 4"), "got: {line}");
+
+        let r2 = record_with_concurrency(Some(8), Some(6.833), Some(161.0), Some(0));
+        let line2 = format_concurrent_line(&r2).unwrap();
+        assert!(!line2.contains("queue peak"), "0 must be suppressed: {line2}");
+    }
+
+    /// End-to-end: render_runs emits the second line below the row.
+    #[test]
+    fn tier_34_render_runs_emits_concurrent_line_under_row() {
+        let r = record_with_concurrency(Some(8), Some(6.833), Some(161.0), Some(2));
+        let mut buf = Vec::new();
+        render_runs(&mut buf, "phi3-mini", &[r]).unwrap();
+        let out = String::from_utf8(buf).unwrap();
+        // The second line is indented under the row.
+        assert!(out.contains("8 concurrent (peak"), "got:\n{out}");
+        assert!(out.contains("23.6 tok/s/req"), "got:\n{out}");
+        assert!(out.contains("queue peak 2"), "got:\n{out}");
     }
 }

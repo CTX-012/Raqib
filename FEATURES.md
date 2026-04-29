@@ -129,9 +129,13 @@ samples per-PID metrics in parallel with the 1 Hz tick loop:
 - **Stdout regex parser** (1.2d, [stdout_parser.rs](src/telemetry/samplers/stdout_parser.rs))
   — pure-function `parse_line()` extracts tokens/sec, fps, and
   latency from llama.cpp `eval time` lines, vLLM `Avg generation
-  throughput` lines, and Ultralytics `Speed: ...preprocess,
-  ...inference, ...postprocess` lines. Strict — refuses partial
-  matches so noise lines never produce 0.0 readings.
+  throughput` lines, Ollama `eval rate: NN.NN tokens/s` lines (the
+  fall-through path documented for Tier 1.2c — added by [A-5] to
+  close T2's V1 ground-truth gap; explicitly does NOT match Ollama's
+  `prompt eval rate:` line which reports a separate quantity), and
+  Ultralytics `Speed: ...preprocess, ...inference, ...postprocess`
+  lines. Strict — refuses partial matches so noise lines never
+  produce 0.0 readings.
 - **`edge_monitor exec` wrapper** (1.2d, [exec_wrapper.rs](src/exec_wrapper.rs))
   — `edge_monitor exec [--name LABEL] -- COMMAND ARGS...` forks
   `COMMAND` with piped stdio, tees both streams to your terminal AND
@@ -450,12 +454,18 @@ for piping into `jq`.
 
 ## Test surface
 
-`cargo test --release` reports **313 lib unit + 1 expect-rule guard
-+ 3 governor pid-reuse + 2 governor proptest + 5 history-CLI + 3
-pipeline = 327 tests** today, all passing. (The expect-rule guard
-test enforces CLAUDE.md's `expect()` allowlist; pid-reuse covers the
-governor's PID-recycling safety; the proptest fuzzes governor inputs
-and asserts the safety invariants.)
+`cargo test --release` reports **327 lib unit + 3 concurrent-request
+e2e + 1 expect-rule guard + 3 governor pid-reuse + 2 governor
+proptest + 5 history-CLI + 2 log-format + 3 pipeline + 1 SIGTERM
+clean-shutdown = 347 tests** today, all passing. (Recently added:
+the expect-rule guard enforces CLAUDE.md's `expect()` allowlist
+[A-1]; `--log-format json` integration tests [A-2]; SIGTERM
+clean-shutdown integration test [A-3]; concurrent-request awareness
+end-to-end coverage [A-4]; Ollama `eval rate:` regex unit tests
+[A-5]; pid-reuse covers the governor's PID-recycling safety; the
+governor proptest fuzzes the safety invariants; new run-store
+property test (1000 cases) and write-rejection / robust-baseline
+tests landed via [C-2]/[C-4]/[C-5].)
 
 `cargo clippy --all-targets -- -D warnings` is part of CI. The
 release binary now weighs ~7.4 MB (was ~2.7 MB pre-Tier-1.2) — the
@@ -467,12 +477,38 @@ out the door.
 
 ## Remaining gaps for v0.1.0
 
-The single in-flight tier is **Tier 3.4 — concurrent-request
-awareness**: pull `vllm:num_requests_running` and
-`vllm:num_requests_waiting`, track peaks and time-weighted averages,
-distinguish "serving 8 concurrent → 161 tok/s aggregate" from
-"serving 1 concurrent → 158 tok/s/req" in the history view. In
-progress for v0.1.0; no committed date.
+Tier 3.4 — concurrent-request awareness — has landed [A-4]:
+`vllm:num_requests_running` and `vllm:num_requests_waiting` are
+parsed, `RunMetrics` carries `concurrent_requests_avg` (time-
+weighted), `concurrent_requests_peak`, and
+`concurrent_requests_waiting_peak`. The data is queryable via
+`history --json` today. The remaining loose end is the per-row text
+rendering called out by `latest.md` Tier 3.4 spec example
+("`#14  serving 8 concurrent (peak)  →  20.1 tok/s/req · 161 tok/s
+aggregate`") in `src/history.rs`; flagged in `BUILDER_STATUS.md`
+cross-builder requests, ownership not yet assigned.
+
+Two known wiring gaps surfaced by the smoke-script audit (filed in
+`BUILDER_STATUS.md` cross-builder requests):
+
+- **Tier 3.6 vision probe socket** — `Dispatcher::enable_vision_probe`
+  exists but `Runtime::new` never calls it, so
+  `[telemetry] vision_probe_socket = "..."` is currently a no-op.
+  Fix is one line in `runtime.rs` next to the existing
+  `enable_exporter` call.
+- **Tier 3.2 cold-start vs steady-state via `exec`** — the cold-load
+  tracker only runs from the headless tick loop; `edge_monitor exec`
+  doesn't plumb `record_disk_io(...)`, so a workload run under the
+  exec wrapper cannot transition to steady-state. Either plumb it
+  or scope Tier 3.2 to headless mode in `latest.md`.
+
+One UX rough edge surfaced by Tester 2's V3 walkthrough:
+
+- **Headless no-GPU visibility** (S3) — when NVML init fails on a
+  no-GPU host, the failure is logged at `DEBUG` level only; default
+  `info` shows nothing. The TUI displays the message correctly;
+  headless users see silent operation. Fix is a one-line
+  log-level bump in the NVML init path.
 
 Genuinely off the roadmap (anti-goals from `latest.md` + `CLAUDE.md`):
 ROS2 node detection, Intel NPU, AMD ROCm, Hailo, web UI, Windows

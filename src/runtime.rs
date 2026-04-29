@@ -744,9 +744,9 @@ fn check_regressions(
     if history.len() < cfg.min_baseline_samples as usize {
         return;
     }
-    let strategy = crate::analysis::compare::BaselineStrategy::Mean;
+    let strategy = cfg.strategy();
     let (metrics, outliers) =
-        crate::analysis::BaselineMetrics::from_records_with(&history, strategy, false);
+        crate::analysis::BaselineMetrics::from_records_with(&history, strategy, cfg.drop_outliers);
     let baseline = crate::analysis::Baseline {
         model: model.to_string(),
         sample_size: history.len(),

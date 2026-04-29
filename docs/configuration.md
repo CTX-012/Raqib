@@ -65,6 +65,8 @@ runs for the same model.
 | `critical_pct`           | f32  | `25.0`  | Same idea for `Critical` severity. Must be finite, ≥0, and ≥`warn_pct`. |
 | `baseline_window`        | u32  | `10`    | Number of prior runs (per model) folded into the rolling baseline. Larger → smoother but slower to track real drift. Must be `> 0`. |
 | `min_baseline_samples`   | u32  | `3`     | Minimum prior runs required before the detector fires. Below this the detector stays silent (small samples produce noisy false positives). Set to `u32::MAX` (`4294967295`) to disable regression detection without removing the section. |
+| `baseline_strategy`      | String | `"mean"` | Per-metric central-tendency strategy. `"mean"` (historical default) or `"median"` (robust to a single bad run). Case-insensitive; any other value is rejected at load time. |
+| `drop_outliers`          | bool | `false` | Drop runs whose key metric is >2σ from the median before computing the baseline. The flagged run ids still surface on `Baseline.outlier_run_ids` for review. Most useful paired with `baseline_strategy = "median"` on noisy fleets. |
 
 ## `[telemetry]`
 

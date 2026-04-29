@@ -76,6 +76,15 @@ pub struct RegressionConfig {
     pub critical_pct: f32,
     pub baseline_window: u32,
     pub min_baseline_samples: u32,
+    /// Per-metric central-tendency strategy (latest.md / [C-5]).
+    /// `"mean"` (default, historical) or `"median"` (robust to a single
+    /// bad run). Validated case-insensitively at load time.
+    pub baseline_strategy: String,
+    /// Drop runs whose key metric is >2σ from the median before
+    /// computing the baseline. The flagged ids still surface on
+    /// `Baseline.outlier_run_ids` so a reviewer can see them. Default
+    /// `false` (historical).
+    pub drop_outliers: bool,
 }
 
 impl Default for RegressionConfig {
@@ -85,6 +94,21 @@ impl Default for RegressionConfig {
             critical_pct: 25.0,
             baseline_window: 10,
             min_baseline_samples: 3,
+            baseline_strategy: "mean".to_string(),
+            drop_outliers: false,
+        }
+    }
+}
+
+impl RegressionConfig {
+    /// Resolve the string-form `baseline_strategy` into the typed
+    /// enum from `analysis::compare`. Returns the historical default
+    /// (`Mean`) on validation failure; `validate()` is the gate that
+    /// rejects bad input early.
+    pub fn strategy(&self) -> crate::analysis::compare::BaselineStrategy {
+        match self.baseline_strategy.to_ascii_lowercase().as_str() {
+            "median" => crate::analysis::compare::BaselineStrategy::Median,
+            _ => crate::analysis::compare::BaselineStrategy::Mean,
         }
     }
 }
@@ -287,6 +311,14 @@ impl Config {
                 "regression.baseline_window must be > 0".into(),
             ));
         }
+        match self.regression.baseline_strategy.to_ascii_lowercase().as_str() {
+            "mean" | "median" => {}
+            other => {
+                return Err(ConfigError::Invalid(format!(
+                    "regression.baseline_strategy must be \"mean\" or \"median\", got {other:?}"
+                )));
+            }
+        }
         Ok(())
     }
 
@@ -417,5 +449,44 @@ mod tests {
         let mut cfg = Config::default();
         cfg.regression.baseline_window = 0;
         assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn regression_baseline_strategy_default_is_mean() {
+        let cfg = Config::default();
+        assert_eq!(cfg.regression.baseline_strategy, "mean");
+        assert!(!cfg.regression.drop_outliers);
+        assert_eq!(
+            cfg.regression.strategy(),
+            crate::analysis::compare::BaselineStrategy::Mean
+        );
+    }
+
+    #[test]
+    fn regression_baseline_strategy_median_resolves() {
+        let mut cfg = Config::default();
+        cfg.regression.baseline_strategy = "median".to_string();
+        cfg.validate().expect("median is a valid strategy");
+        assert_eq!(
+            cfg.regression.strategy(),
+            crate::analysis::compare::BaselineStrategy::Median
+        );
+    }
+
+    #[test]
+    fn regression_baseline_strategy_is_case_insensitive() {
+        let mut cfg = Config::default();
+        cfg.regression.baseline_strategy = "MEDIAN".to_string();
+        cfg.validate().expect("MEDIAN normalises to median");
+        cfg.regression.baseline_strategy = "Mean".to_string();
+        cfg.validate().expect("Mean normalises to mean");
+    }
+
+    #[test]
+    fn regression_unknown_strategy_rejected() {
+        let mut cfg = Config::default();
+        cfg.regression.baseline_strategy = "harmonic".to_string();
+        let err = cfg.validate().expect_err("unknown strategy must error");
+        assert!(format!("{err}").contains("baseline_strategy"));
     }
 }

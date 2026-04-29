@@ -76,6 +76,20 @@ baseline_window = 10
 # regression detection without removing this section.
 min_baseline_samples = 3
 
+# Per-metric central-tendency strategy used to compute the baseline
+# (latest.md F.3.8). "mean" is the historical default and is right when
+# baseline runs are tightly clustered. "median" is robust to a single
+# bad run and is right for noisy baselines (canary fleets, dev boxes,
+# freshly imported data). Validated case-insensitively at load time.
+baseline_strategy = "mean"
+
+# Drop runs whose key metric is >2σ from the median before computing
+# the baseline. The flagged ids still surface on
+# `Baseline.outlier_run_ids` so a reviewer can see them. Default false
+# (historical). Setting true is most useful with `baseline_strategy =
+# "median"` on noisy fleets.
+drop_outliers = false
+
 [telemetry]
 # Toggles for the optional samplers driven by `telemetry::Dispatcher`.
 # All on by default; sampling is cheap on idle (HTTP scrapers fail fast

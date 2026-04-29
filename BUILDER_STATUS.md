@@ -14,9 +14,11 @@ to history) and via reading concurrent worktrees.
 ## Active Claims
 
 - builder_id: builder-A
-  scope: ALL DONE — S.3 → [A-1], S.2 → [A-2], S.0.8 → [A-3],
-         Tier 3.4 → [A-4] in Ready for Test.
-  branch: audit/2026-04-29 (renamed mid-session; all four A-*
+  scope: V1 (S1 Ollama tok/s gap, post-T2 sign-off) → [A-5] in
+         Ready for Test.
+         Earlier slices: S.3 → [A-1], S.2 → [A-2], S.0.8 → [A-3],
+         Tier 3.4 → [A-4] (all already T2-PASS).
+  branch: audit/2026-04-29 (renamed mid-session; all five A-*
           commits land here).
   finished: 2026-04-29
 
@@ -242,6 +244,82 @@ to history) and via reading concurrent worktrees.
     polishing pass and rendering arithmetic is a separate
     concern from the data path I shipped. Cross-builder request
     filed below.
+
+### [A-5] V1 fix — Ollama tokens/sec via stdout_parser `eval rate` regex
+- Commit SHA: b33fd28093f9fe3b328e9b2c4cbdf1b840f40c38
+- Files changed: src/telemetry/samplers/stdout_parser.rs (new
+  regex factory + parse-line wiring + 2 new unit tests),
+  CHANGELOG.md, scripts/manual/ollama_tps_smoke.sh (new)
+- Smoke script: scripts/manual/ollama_tps_smoke.sh (also greps
+  T2's captured fixtures at `/tmp/v1_trial_{1,2,3}.out` when
+  present)
+- CHANGELOG line: "**V1 (S1) — Ollama tokens/sec now extracted
+  via stdout parser.** Tester 2's V1 ground-truth check found
+  that `edge_monitor` reported no `tokens_per_sec_avg` for any of
+  three real `ollama run --verbose phi3` trials, even though
+  Ollama itself printed `eval rate: 6.97 tokens/s` (etc) on
+  stdout. Root cause: `stdout_parser.rs` had regexes for
+  llama.cpp and vLLM tokens/sec output but no Ollama pattern, so
+  the design's documented Tier 1.2c fallthrough (\"Ollama tok/s
+  falls through to stdout parsing\") dead-ended. New regex
+  `r\"^\\s*eval rate:\\s+([0-9]+(?:\\.[0-9]+)?)\\s+tokens?/s\\b\"`
+  matches Ollama's generation rate while explicitly NOT matching
+  `prompt eval rate:` (a different, often higher number — trial 3
+  had `prompt eval rate = 60.37` vs `eval rate = 2.34`). Verified
+  against T2's captured trial outputs at
+  `/tmp/v1_trial_{1,2,3}.out` by
+  `scripts/manual/ollama_tps_smoke.sh`. Two new unit tests guard
+  the fix: one asserts the three trial values parse correctly, one
+  asserts the new regex does not poach existing vLLM / llama.cpp
+  lines."
+- Test output (last 10 lines of `cargo test --release --lib
+  telemetry::samplers::stdout_parser`):
+  ```
+  test ollama_eval_rate_extracts_tps_and_ignores_prompt_eval_rate ... ok
+  test strict_parser_does_not_match_partial_lines ... ok
+  test unrelated_line_yields_nothing ... ok
+  test vllm_avg_throughput_line_yields_tps ... ok
+  test line_to_frame_returns_none_on_no_match ... ok
+  test llama_cpp_eval_time_line_yields_tps ... ok
+  test ultralytics_speed_line_yields_latency_and_fps ... ok
+  test line_to_frame_populates_telemetry_fields ... ok
+  test ollama_regex_does_not_match_vllm_or_llama_cpp_lines ... ok
+  test batch_extract_over_many_lines ... ok
+  test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured
+  ```
+  Smoke output against T2's actual trial files:
+  ```
+  /tmp/v1_trial_1.out → eval rate:            6.97 tokens/s
+  /tmp/v1_trial_2.out → eval rate:            2.82 tokens/s
+  /tmp/v1_trial_3.out → eval rate:            2.34 tokens/s
+  PASS: stdout_parser handles Ollama eval rate; vLLM/llama.cpp untouched.
+  ```
+- Builder note:
+  * **The user's pointer to `src/telemetry/samplers/ollama_api.rs`
+    was off.** `ollama_api.rs` only handles `/api/ps` (model-name
+    discovery, Tier 1.2c). Ollama tokens/sec has always been
+    routed through the stdout parser per latest.md §1.2c — the
+    file that needed the new regex is
+    `src/telemetry/samplers/stdout_parser.rs`. T2's V1 evidence
+    (BUILDER_STATUS.md:723–728) corroborates this. I went with
+    T2's diagnosis and surfaced the conflict in chat before
+    starting.
+  * **Test fixture is real, not synthesised.** The 6.97 / 2.82 /
+    2.34 numbers are pulled directly from T2's `/tmp/v1_trial_*.out`
+    captures. Future Ollama version drift in the output format is
+    caught by the smoke script's grep step against new fixtures
+    placed in any directory passed via `OLLAMA_FIXTURE_DIR`.
+  * **No backwards-compatibility risk.** Before this commit, the
+    Ollama path produced no metric at all; the new regex only
+    *adds* matches. Existing tests asserting on the prior empty
+    behaviour for Ollama do not exist (verified by
+    `git grep ollama_eval_rate` and `git grep eval rate` across
+    `src/` and `tests/`).
+  * Tester 2 should re-run V1 against a live Ollama install to
+    confirm the fix end-to-end (i.e. through `edge_monitor exec`
+    so the parser actually sees the stream); my smoke proves the
+    regex layer but not the exec→parser→accumulator wire. The L1
+    re-run is the launch-readiness gate.
 
 ### [B-1] CHANGELOG.md backfill for Tier 1.2d exec, 2.1–2.3, 3.1–3.3, 3.5–3.7
 - Commit SHA: 363769c5256633a4528916ebda2631b83ea46663
@@ -671,3 +749,133 @@ to history) and via reading concurrent worktrees.
 ## Locked files
 
 (none — use this section for multi-file refactors)
+
+## Tester 2 sign-off
+
+SHA tested for re-verifications: `1b13d97` (HEAD of `audit/2026-04-29` at the time of this session). The 1-hour V2 idle stability ran on `e24fc58` (the SHA before [A-3]/[A-4] landed); SIGTERM clause was re-verified on HEAD with the [A-3] fix in place. T1 sign-off has not been recorded in this file at the time of this run; T2 proceeded under user direction "go for all". All re-verifications below were run by Tester 2 directly on the worktree at `/tmp/em-test-1b13d97` checked out at SHA `1b13d97`.
+
+| Slice | Result | Timestamp (UTC) | One-line evidence |
+|---|---|---|---|
+| [A-1] S.3 — `expect()` rule | **[T2: PASS]** | 2026-04-29T07:50Z | `tests/expect_rule_guard.rs::every_prod_expect_is_annotated` PASS; `scripts/manual/expect_audit.sh` reports "PASS: 35 expect() sites scanned (annotated PROD or test); none violate the rule." |
+| [A-2] S.2 — `--log-format json` | **[T2: PASS]** | 2026-04-29T07:50Z | `cargo test --release --test log_format`: `human_format_is_not_json_shaped` and `json_format_emits_one_json_object_per_stderr_line` both PASS; `--log-format` flag visible in `--help`; emitted lines parse as JSON. |
+| [A-3] S.0.8 — SIGTERM clean shutdown | **[T2: PASS]** | 2026-04-29T07:50Z | At HEAD `1b13d97`: `kill -TERM` exits 0 in 12 ms, log shows "shutdown requested; finishing current tick" then "shutdown signal received; exiting". `tests/sigterm_clean_shutdown.rs::sigterm_drains_and_exits_zero` PASS. (Same probe at `e24fc58` returned exit 143 in 274 ms with no shutdown line — fix verified by reproduction.) |
+| [A-4] Tier 3.4 — concurrent-request awareness | **[T2: PASS]** | 2026-04-29T07:50Z | `tests/concurrent_requests_e2e.rs` 3/3 PASS; `src/telemetry/concurrent_requests.rs` unit tests PASS; `scripts/manual/concurrent_requests_smoke.sh` PASS. |
+| [B-1] CHANGELOG backfill | **[T2: PASS]** | 2026-04-29T07:50Z | `git show 363769c -- CHANGELOG.md \| grep -cE '^\+- \*\*Tier (2\.[123]\|3\.[12356]\|3\.7\|1\.2d)'` → `10` (matches expected). |
+| [B-2] FEATURES.md rewrite | **[T2: PASS-WITH-DRIFT]** | 2026-04-29T07:50Z | Builder-stated expected `327/327`; current actual `344/344` (count drifted up because [A-3]/[A-4]/[C-4]/[C-5] landed after [B-2] was filed). All tests still green; the directional claim ("everything passes") holds. FEATURES.md test-count paragraph should be refreshed in a follow-up `[B-?]` claim. |
+| [B-3] toml.example + docs | **[T2: PASS]** | 2026-04-29T07:50Z | `./target/release/edge_monitor --config edge_monitor.toml.example --no-ui --ticks 1` produces all 4 expected log lines (`loading config`, `DRY-RUN mode`, `tick tick=1 ai_processes=0 exits=0`, `tick budget reached; exiting ticks=1`). |
+| [B-4] 14 tier-aligned smoke scripts | **[T2: PASS]** | 2026-04-29T07:50Z | All 14 [B-4]-listed scripts behave per the expected matrix on this E1: 7 PASS (`exec_stdout`, `regression`, `cold_load`, `prometheus_exporter`, `fingerprint`, `exit_classify`, `compare`), 7 SKIP (`vllm`, `llamacpp`, `ollama`, `power`, `cold_vs_steady`, `kv_cache`, `vision_fps`) — every SKIP matches the expected reason for a no-GPU/no-LLM-runtime WSL E1 or one of the two known cross-builder wiring gaps. 0 FAIL. The wider `scripts/manual/*_smoke.sh` set (12 PASS / 7 SKIP / 0 FAIL — see Findings) includes earlier batches and the same `ollama_smoke.sh` SKIP. |
+| [C-1] F.1.10 prune logic | **[T2: PASS]** | 2026-04-29T07:50Z | `cargo test --release --lib storage::run_store::tests::prune` 3/3 PASS (`prune_keeps_three_newest_by_spawn_time`, `prune_with_limit_two_leaves_two_files_on_disk`, `pruned_ids_stay_pruned_after_reopen`). |
+| [C-2] F.1 — 1000-iter proptest | **[T2: PASS]** | 2026-04-29T07:50Z | `PROPTEST_CASES=1000 cargo test --release --test governor_properties -- --test-threads=1` PASS; `storage::run_store::prop_tests::append_recent_invariants` PASS in the lib run. The `proptest::append_recent_invariants passed 1000 cases` line is emitted (verified visually). |
+| [C-3] F.3.4 warn-tier (12%) | **[T2: PASS]** | 2026-04-29T07:50Z | `analysis::compare::tests::twelve_percent_drop_is_warn_not_critical` PASS; `analysis::compare::tests::warn_critical_boundary_matrix` PASS. |
+| [C-4] F.1.7 ENOSPC / write-rejection | **[T2: PASS]** | 2026-04-29T07:50Z | `storage::run_store::tests::append_returns_err_when_filesystem_rejects_write` PASS at HEAD on this WSL E1 (the runtime-probe guard added in the follow-up commit kicks in cleanly when the chmod-deny actually does deny). |
+| [C-5] F.3.8 robust baseline | **[T2: PASS]** | 2026-04-29T07:50Z | `analysis::compare::tests::robust_baseline_median_unaffected_by_outlier` PASS. |
+
+Cargo test aggregate at HEAD `1b13d97`: **344 passed, 0 failed** across 11 result lines (9 test binaries + 2 doctest sweeps), `cargo clippy --all-targets -- -D warnings` clean.
+
+## Tester 2 Findings
+
+(SHA: `1b13d97`. Environment: E1 — WSL2 Ubuntu, x86_64, 8 cores, 7.6 GiB RAM, no NVIDIA GPU, no NVML, no readable RAPL, Ollama installed locally for V1 only.)
+
+### V1 — Ollama tokens/sec ground truth: **FAIL** (S1 marquee-feature gap)
+
+The marquee feature claim "edge_monitor measures tokens/sec for LLM workloads" does not hold for Ollama at any SHA in this branch's history.
+
+Procedure (per charter T.1): pulled `phi3:latest` (2.2 GB) under `OLLAMA_MODELS=/tmp/em-bin/models`; started `ollama serve`; ran `ollama run --verbose phi3 "Explain quicksort in 200 words."` 3× while `edge_monitor --no-ui --ticks 0 --log-level info` was running with an isolated config and data_dir.
+
+Ollama's reported eval rates (the ground truth):
+- Trial 1: **6.97 tokens/s** (`load duration: 1m38.9s`, `eval count: 474 tokens`, `eval duration: 1m8.0s`)
+- Trial 2: **2.82 tokens/s** (`eval count: 461 tokens`, `eval duration: 2m43.6s`)
+- Trial 3: **2.34 tokens/s** (`eval count: 410 tokens`, `eval duration: 2m55.4s`)
+
+(All three are slow because this E1 is CPU-only inference; the absolute number is irrelevant — the comparison would still be valid against any fixed ground-truth.)
+
+edge_monitor's tokens_per_sec_avg for the Ollama-spawned process:
+- Trial 1: **no value emitted**
+- Trial 2: **no value emitted**
+- Trial 3: **no value emitted**
+
+`grep -iE 'tokens?_per_sec|RunRecord|tokens?[ /]s' /tmp/v1_em.log` returned zero hits across the 3 inference runs (which collectively spanned ~9 minutes of detected `ai_processes=1..3` activity in the log). `find /tmp/v1_data -type f` returned empty — no `RunRecord` was written for the Ollama-spawned workers.
+
+Root cause (verified against `latest.md` + source):
+
+* `latest.md` §1.2c states the design: "Ollama doesn't expose Prometheus. It has `/api/ps` (list loaded models) and embeds tok/s in response JSON during generation, **which we cannot intercept**. … For tok/s, fall through to stdout parsing (next bullet)." The fallback is §1.2d's stdout regex parser.
+* `src/telemetry/samplers/stdout_parser.rs` (HEAD) registers exactly two tokens/sec patterns:
+  - `LLAMA_CPP_TPS = r"eval time\s*=.*?(\d+\.\d+)\s+tokens? per second"` (llama.cpp)
+  - `VLLM_TPS = r"Avg generation throughput:\s*([0-9]+(?:\.[0-9]+)?)\s+tokens?/s"` (vLLM)
+* Ollama's `--verbose` output uses **`eval rate:     NN.NN tokens/s`** — which matches neither regex. (Confirmed by inspecting all three trial outputs at `/tmp/v1_trial_{1,2,3}.out`.)
+* `src/telemetry/samplers/ollama_api.rs` line 11 documents the fallthrough; the fallthrough's regex set never grew an Ollama-shaped pattern, so the chain dead-ends.
+
+Even routing through `edge_monitor exec ollama run --verbose phi3 …` (the design's preferred path) would hit the same dead end — the exec wrapper captures stdout faithfully, but the parser has no Ollama regex to match against, so no `MetricKind::TokensPerSec` is emitted.
+
+Severity: **S1**. The feature is named for LLMs and Ollama is the most common edge LLM runtime; "we measure tok/s for vLLM and llama.cpp but not Ollama" is fine as an internal nuance and **not** fine as a launch claim. Suggested fix: add a third regex to `stdout_parser.rs` matching `r"^\s*eval rate:\s*([0-9]+(?:\.[0-9]+)?)\s+tokens?/s"` and a fixture-line unit test against captured Ollama-verbose output.
+
+This finding addresses audit `83b5360` S1.3 ("T.1 Ollama ground truth never measured at any SHA") — it has now been measured, and the measurement reveals the gap.
+
+### V2 — 1-hour idle stability: **PASS at HEAD `1b13d97`**
+
+The 1-hour run was performed on SHA `e24fc58` (pre-[A-3]) per the test-runner schedule; the SIGTERM clause was re-verified at HEAD `1b13d97`.
+
+Memory + CPU result (from `e24fc58`, runtime 06:28:22Z → 07:28:22Z):
+- `RSS_5  = 14600 KB`
+- `RSS_60 = 16548 KB`
+- `RSS Δ  = 1948 KB ≈ 1.9 MB` — **PASS** (limit < 10 MB / 10240 KB)
+- CPU samples at T+10/20/30/40/50: `0.0% / 0.0% / 0.0% / 0.0% / 0.0%`, mean `0.0%` — **PASS**
+- 3588 ticks in 60 minutes (≈ 1 tick/sec, steady)
+- `ai_processes` was 0 for every single tick (no contamination)
+
+SIGTERM clause:
+- On `e24fc58`: `kill -TERM` returned exit 143 in 274 ms with no shutdown log line and no audit data — **FAIL** (root cause: `Cargo.toml` `ctrlc = "3"` lacked `features = ["termination"]`).
+- On HEAD `1b13d97` (5-minute sanity rerun, T+1=14280 KB → T+5=14692 KB, Δ=412 KB): `kill -TERM` returned exit 0 in 1050 ms with both `shutdown requested; finishing current tick` and `shutdown signal received; exiting` log lines present — **PASS**.
+- The audit-log-intact clause is moot for an idle test that never killed anything (the audit JSONL only opens on kill emission); the exit-0 + drained-tick + shutdown-marker triple is the strongest signal available for an idle workload.
+
+Net V2 verdict at HEAD: **PASS**. The 1-hour memory result holds across the [A-3] change because [A-3] is a `Cargo.toml` feature flag plus comment-only `src/main.rs` edits and changes nothing in the idle-loop allocation path; the SIGTERM clause that failed at `e24fc58` now passes at HEAD.
+
+This finding addresses audit `83b5360` S1.2 ("X.1.1 1-hour stability never completed at any SHA").
+
+### V3 — TUI walkthrough: **PASS-WITH-FINDINGS** (no blockers)
+
+PTY-driven walkthrough using `script -q -c '...'` with `stty rows 40 cols 120` to give ratatui a non-zero terminal size.
+
+Lifecycle and rendering:
+- Alt-screen enter (`ESC[?1049h`) and leave (`ESC[?1049l`): 1 / 1 — **PASS**
+- Cursor hide/show (`ESC[?25l` / `ESC[?25h`): present and balanced — **PASS**
+- Six panes drawn with proper box-drawing characters: `Vitals`, `Registry (AI workloads)`, `Rogues (unmapped framework procs)`, `Culprits (top by PID order)`, `Audit (kills/actions)`, `AI run summaries` — **PASS**
+- RAM partial-block bar (█ chars) renders inside Vitals; load-avg line populated; `GPU: not available (NVML uninitialized)` prominently displayed — **PASS** (clear no-GPU messaging in TUI; contrast with S.0.7 finding for headless mode below)
+- `q` keypress → process exits with code 0; `script` reports `[COMMAND_EXIT_CODE="0"]` — **PASS**
+- `d` keypress → log line `dry-run mode toggled dry_run=false` confirms input was processed — **PASS**
+- `?` keypress → `help` text appears in the rendered output — **PASS**
+- `h` keypress → history overlay opens (model column rendered) — **PASS**
+- `Esc` → returns to main view — **PASS**
+- `SIGWINCH` sent to the running process via `kill -WINCH`: process did not crash, continued rendering — **PASS**
+- No `panic`, `fatal`, `Error`, or `signal` markers anywhere in the captured ANSI stream — **PASS**
+
+Findings (none are blockers):
+
+1. **`g` keybinding for Grafana is not implemented in source.** `src/ui/input.rs:34-44` (`Mode::Normal => match key.code`) handles `q ? d k h / j K Tab BackTab` plus arrow keys; there is no `KeyCode::Char('g')` arm. The Tester 2 charter explicitly expects `g` to "open Grafana; if Grafana isn't configured, the fallback setup page appears". This is either a doc/spec drift (the keybinding was descoped silently) or a missing implementation. Severity: **S3** (no documented user-visible regression; `g` is simply unmapped). Suggested fix: either (a) add the binding + Action::OpenGrafana to `input.rs` and `app.rs`, plumbing through to the existing `[telemetry] grafana_url`-style config, or (b) update the public-facing keybinding docs and remove the charter expectation.
+
+2. **KV-pressure threshold colors cannot be visually verified on E1.** Charter expects "≥80% turns red" in the registry row and "KV!" badge for runs with ≥99.5% peak in the history overlay. Both depend on a vLLM-style workload that publishes KV-cache metrics, which this WSL E1 cannot run. The unit + integration tests (309 → 344 lib + integration tests at HEAD; KV-cache code paths covered in `src/telemetry/samplers/vllm_prometheus.rs` and `src/runtime.rs`) confirm the data path is wired; the rendered colors are only verifiable on an L1 (Linux + NVIDIA) box. Severity: **deferred** — re-run V3 on L1 before launch.
+
+3. **Headless `S.0.7` no-GPU visibility regression** (cross-reference with prior tester report and audit). On `--no-ui` runs, the no-GPU NVML failure is logged at `DEBUG` level only (`NVML init failed: … GPU metrics unavailable`); at `--log-level info` (the default), no GPU-related line appears. The TUI renders the message correctly, but headless users with no GPU get silent operation. Severity: **S3 visibility**.
+
+### Secondary tests at HEAD `1b13d97`
+
+* `cargo test --release` aggregate: **344 passed / 0 failed** across 9 test binaries + 2 doctest sweeps.
+* `cargo clippy --all-targets -- -D warnings`: clean.
+* G.7 PID-reuse safety (`tests/governor_pid_reuse.rs`) re-run 5× consecutively at `e24fc58`: **15/15 sub-tests PASS, 0 flakes** (tests at HEAD are byte-equivalent and confirmed via the aggregate `cargo test --release` run).
+* `governor_properties` proptest with `PROPTEST_CASES=1000`: **PASS**.
+* T.8 Prometheus exporter: `127.0.0.1:9472/metrics` listens and serves; **13 `# HELP` lines + 13 `# TYPE` lines** across 13 distinct metric families (`edge_monitor_processes_total`, `edge_monitor_run_tokens_per_sec`, `edge_monitor_run_fps`, `edge_monitor_run_vram_bytes`, `edge_monitor_run_gpu_watts`, `edge_monitor_run_cpu_watts`, `edge_monitor_gpu_watts`, `edge_monitor_gpu_temp_celsius`, `edge_monitor_cold_load_seconds`, `edge_monitor_ai_processes_active`, `edge_monitor_governor_kills_total`, `edge_monitor_regressions_total`, `edge_monitor_tick_count_total`); pass criterion ≥5 distinct metric names with HELP+TYPE met. (`promtool` not installed locally; manual inspection consistent with text-format spec.)
+* T.3 `--log-format json` (S.2.3): both subprocess integration tests PASS; emitted lines parse via `python3 json.loads`; every line carries `timestamp` + `level`.
+* `verify-edge-monitor.sh` end-to-end (1.1 min wall): **20 PASS / 3 FAIL / 6 WARN / 2 SKIP**. The 3 FAILs are all verify-script bugs (`E.4` literal-pipe-in-grep, `D.5` arithmetic comparison against multi-line `0\n0`, and `F.1` was previously a verify-script regex bug but at this SHA passes — only 2 verify-script defects remain). None are edge_monitor binary defects. Recommend filing a `[B-?]` follow-up to fix the verify script's grep flags.
+
+### Audit `83b5360` S1 status after this run
+
+- S1.1 — BUILDER_STATUS.md missing `[T1: PASS]` / `[T2: PASS]` tags + Tester 2 Findings section: **T2 portion now landed by this commit; T1 portion still open** (T1 has not added tags).
+- S1.2 — X.1.1 1-hour stability never completed: **landed** (V2 PASS at HEAD; see above).
+- S1.3 — T.1 Ollama ground truth never measured: **landed, with new finding** (V1 measured; the measurement revealed an Ollama-shaped stdout-regex gap).
+
+### Items intentionally not in scope for Tester 2
+
+- Windows verification (charter explicitly defers to v1.1).
+- Real GPU + RAPL + tegrastats verification (no L1/L3 box available; flagged for re-run before launch).
+- TUI screenshot capture (PTY-only environment cannot drive a real terminal display; lifecycle and behavior were exercised but visual fidelity was inferred from ANSI stream, not a live screen).
+- Editing or rebasing other builders' working trees; the [A-3] fix's WIP edits to `Cargo.toml` + `src/main.rs` were observed mid-session but not testable until the commit landed at `e4a7e74`.

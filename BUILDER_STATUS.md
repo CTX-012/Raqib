@@ -14,8 +14,9 @@ to history) and via reading concurrent worktrees.
 ## Active Claims
 
 - builder_id: builder-A
-  scope: S.3 (expect rule), S.2 (--log-format flag), S.0.8 (SIGTERM
-         re-verify), Tier 3.4 (concurrent-request awareness)
+  scope: S.2 (--log-format flag), S.0.8 (SIGTERM re-verify),
+         Tier 3.4 (concurrent-request awareness). S.3 has moved to
+         Ready for Test below as [A-1].
   branch: builder-claude/tier-3-3-kv-cache-pressure (continuing here
           because parallel-builder protocol allows it; new branch was
           not requested in this session's brief)
@@ -40,6 +41,52 @@ to history) and via reading concurrent worktrees.
       once C-5 lands. I will not edit toml.example per the brief.
 
 ## Ready for Test
+
+### [A-1] S.3 — `expect()` rule reconciled with code
+- Commit SHA: c9fe87c1a0889d1c28139840ad749659634ce9b1
+- Files changed: CLAUDE.md, CHANGELOG.md, src/storage/log_store.rs,
+  src/telemetry/samplers/vllm_prometheus.rs,
+  src/telemetry/samplers/llama_cpp_server.rs,
+  src/telemetry/samplers/ollama_api.rs,
+  scripts/manual/expect_audit.sh (new),
+  tests/expect_rule_guard.rs (new)
+- Smoke script: scripts/manual/expect_audit.sh
+- CHANGELOG line: "**S.3 — `expect()` rule reconciled with code.**
+  CLAUDE.md's \"no `expect()` outside tests\" carve-out now lists
+  three documented invariants (mutex-poison on critical writers,
+  OnceLock-static `Regex::new`, and
+  `reqwest::Client::builder().build()` in sampler constructors) and
+  requires a `// ok: expect — <reason>` comment above every site.
+  Every non-test `expect()` call in `src/` has been annotated;
+  `scripts/manual/expect_audit.sh` enforces the rule and a Rust unit
+  test guards it in CI."
+- Test output (selected — full run shows 1 unrelated proptest failure
+  filed in Cross-builder requests below):
+  ```
+  test storage::log_store::tests::ok ... ok
+  test telemetry::samplers::vllm_prometheus::tests::compute_frame_extracts_kv_avg_and_evictions ... ok
+  test telemetry::samplers::llama_cpp_server::tests::applies_to_recognises_llama_server ... ok
+  test telemetry::samplers::ollama_api::tests::applies_to_recognises_ollama_serve ... ok
+  ---
+  Running tests/expect_rule_guard.rs
+  test every_prod_expect_is_annotated ... ok
+  test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured
+  ---
+  scripts/manual/expect_audit.sh:
+  PASS: 34 expect() sites scanned (annotated PROD or test); none violate the rule.
+  ```
+- Builder note: the audit's "34 expect() sites in non-test code"
+  number was loose; only 11 of the 34 actually sit outside
+  `#[cfg(test)]` (the rest are inside a `#[cfg(test)] mod tests`
+  block at the bottom of each source file, which the rule has
+  always allowed). All 11 PROD sites now have `// ok: expect —
+  <reason>` comments and the rule has been broadened to three
+  named patterns; the `tests/expect_rule_guard.rs` integration test
+  was confirmed to fail when a deliberate violator file was dropped
+  into `src/` (then deleted, all green again). The test's runtime
+  is sub-millisecond because the repo is small (~50 .rs files), but
+  it does walk every file — the deliberate-violation check verified
+  it isn't a stub. No production behaviour changed.
 
 ### [B-1] CHANGELOG.md backfill for Tier 1.2d exec, 2.1–2.3, 3.1–3.3, 3.5–3.7
 - Commit SHA: 363769c5256633a4528916ebda2631b83ea46663
@@ -129,6 +176,15 @@ to history) and via reading concurrent worktrees.
   "mean"` / `"median"`, Builder B will append it to
   `edge_monitor.toml.example` and `docs/configuration.md` in a
   follow-up `[B-?]` claim.
+
+- **From Builder A → Builder C: new lib test failing as I write
+  this.** `cargo test --release` HEAD shows `storage::run_store::
+  prop_tests::zzz_proptest_actually_ran_1000_cases` panicking with
+  "proptest executed only 0 cases; expected >= 1000". This is C-2
+  WIP and will need a proptest config fix (probably a missing
+  `ProptestConfig::cases(1000)` or a strategy that prunes itself
+  to zero). Not blocking [A-1]; flagged here so the auditor
+  attributes the failure correctly.
 
 ## Recently completed (last 24h)
 

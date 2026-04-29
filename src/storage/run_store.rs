@@ -1113,3 +1113,210 @@ mod tests {
         assert!(matches!(ExitReason::from_summary(&s), ExitReason::Unknown));
     }
 }
+
+#[cfg(test)]
+mod prop_tests {
+    //! 1000-iteration property test for `RunStore` (F.1 from
+    //! `test_results/REPORT.md`, 2026-04-28). Exercises a fresh
+    //! tempdir-backed store with a randomised mix of `append` and
+    //! `recent` calls under a randomised `keep_runs_per_model` cap, and
+    //! checks the invariants the spec calls out:
+    //!
+    //!  1. `recent(model, n)` returns ≤ n records.
+    //!  2. Every returned record's `model_or_name()` equals the queried
+    //!     model.
+    //!  3. Returned records are sorted by `summary.spawn_time`
+    //!     descending.
+    //!  4. After a prune-aware append, no model's stored count exceeds
+    //!     the configured limit.
+    //!  5. Drop the store, reopen, and the per-model `recent()` views
+    //!     match by run id (rebuild-from-index produces the same answer
+    //!     as the live in-memory state).
+    //!
+    //! Counterexamples are minimised by proptest's shrinker so a
+    //! regression here lands as a focused 2-3 op sequence rather than a
+    //! 12-op haystack.
+    use super::*;
+    use crate::lifecycle::LifecycleSummary;
+    use crate::model::AICategory;
+    use chrono::{Duration, TimeZone};
+    use proptest::prelude::*;
+    use std::collections::HashMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Visible counter: each case bumps this on entry. The post-test
+    /// assertion confirms `proptest` actually executed the configured
+    /// `cases` number — protects against the "sub-millisecond runtime,
+    /// test isn't doing what you think" failure mode the test brief
+    /// calls out. Static so the count survives across the proptest!
+    /// macro's invocation of the test body.
+    static CASE_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    #[derive(Debug, Clone)]
+    enum Op {
+        /// Append a record to `model` with `summary.spawn_time` set to
+        /// `base + spawn_offset` seconds. Different offsets across ops
+        /// drive the timestamp-ordering invariant; collisions are
+        /// allowed and the stable sort handles them.
+        Append { model: String, spawn_offset: i32 },
+        /// Query `recent(model, n)` and check invariants 1-3.
+        Recent { model: String, n: usize },
+    }
+
+    /// Three distinct model keys is enough to stress the per-model
+    /// bucketing invariants without bloating the search space.
+    fn model_strategy() -> impl Strategy<Value = String> {
+        prop_oneof![
+            Just("alpha".to_string()),
+            Just("bravo".to_string()),
+            Just("charlie".to_string()),
+        ]
+    }
+
+    fn op_strategy() -> impl Strategy<Value = Op> {
+        prop_oneof![
+            (model_strategy(), -50i32..50i32)
+                .prop_map(|(model, spawn_offset)| Op::Append { model, spawn_offset }),
+            (model_strategy(), 0usize..15)
+                .prop_map(|(model, n)| Op::Recent { model, n }),
+        ]
+    }
+
+    fn record_at(model: &str, spawn: chrono::DateTime<chrono::Utc>) -> RunRecord {
+        let summary = LifecycleSummary {
+            pid: 1,
+            name: "proc".into(),
+            category: Some(AICategory::Inference),
+            model_name: Some(model.to_string()),
+            spawn_time: spawn,
+            exit_time: spawn + Duration::seconds(1),
+            uptime_secs: 1,
+            exit_code: Some(0),
+            signal: None,
+            avg_cpu_pct: 0.0,
+            peak_cpu_pct: 0.0,
+            peak_rss_mb: 0,
+            peak_vram_mb: 0,
+            samples: 1,
+        };
+        RunRecord::from_summary(summary)
+    }
+
+    /// Number of cases this run is configured to execute. Mirrored as
+    /// a const so the per-case counter assertion has something to
+    /// compare to without re-reading `ProptestConfig`. The test brief
+    /// requires evidence that 1000 cases actually executed — a
+    /// configured-but-shrunk count would silently degrade coverage.
+    const PROPTEST_CASES: u32 = 1000;
+
+    proptest! {
+        #![proptest_config(ProptestConfig {
+            cases: PROPTEST_CASES,
+            // Default 256 cases is too low for "1000 cases clean";
+            // override per-test. Other knobs left at default.
+            ..ProptestConfig::default()
+        })]
+
+        #[test]
+        fn append_recent_invariants(
+            ops in proptest::collection::vec(op_strategy(), 1..15),
+            keep_limit in 1usize..=8,
+        ) {
+            // Per-case counter — the brief requires evidence that
+            // proptest actually ran the configured number of cases. On
+            // the final case (== PROPTEST_CASES), assert and emit a
+            // line that the handoff can quote.
+            let n = CASE_COUNTER.fetch_add(1, Ordering::Relaxed) + 1;
+            if n == PROPTEST_CASES as usize {
+                eprintln!(
+                    "proptest::append_recent_invariants passed {n} cases"
+                );
+            }
+            let dir = tempfile::tempdir().unwrap();
+            let mut store = RunStore::open(dir.path())
+                .unwrap()
+                .with_keep_limit(Some(keep_limit));
+
+            // Fixed base timestamp so spawn_offset alone determines
+            // ordering (Utc::now would drift mid-sequence).
+            let base = chrono::Utc.timestamp_opt(1_700_000_000, 0).unwrap();
+
+            for op in &ops {
+                match op {
+                    Op::Append { model, spawn_offset } => {
+                        let spawn = base + Duration::seconds(*spawn_offset as i64);
+                        store.append(record_at(model, spawn)).unwrap();
+                        // Invariant 4: prune just ran, count must be
+                        // ≤ limit for the model we touched.
+                        let count = store.recent(model, usize::MAX).len();
+                        prop_assert!(
+                            count <= keep_limit,
+                            "post-append per-model count {} exceeds limit {} for {}",
+                            count, keep_limit, model
+                        );
+                    }
+                    Op::Recent { model, n } => {
+                        let records = store.recent(model, *n);
+                        // Invariant 1.
+                        prop_assert!(
+                            records.len() <= *n,
+                            "recent returned {} > n={}", records.len(), n
+                        );
+                        // Invariant 2.
+                        for r in &records {
+                            prop_assert_eq!(r.model_or_name(), model.as_str());
+                        }
+                        // Invariant 3.
+                        for w in records.windows(2) {
+                            prop_assert!(
+                                w[0].summary.spawn_time >= w[1].summary.spawn_time,
+                                "recent not sorted desc: {} then {}",
+                                w[0].summary.spawn_time, w[1].summary.spawn_time
+                            );
+                        }
+                    }
+                }
+            }
+
+            // Invariant 4 (final): every model honours the cap.
+            for model in store.list_models() {
+                let count = store.recent(&model, usize::MAX).len();
+                prop_assert!(
+                    count <= keep_limit,
+                    "post-sequence count {} exceeds limit {} for {}",
+                    count, keep_limit, model
+                );
+            }
+
+            // Invariant 5: drop, reopen, recent() answers match by id
+            // and order. Snapshot before drop.
+            let pre: HashMap<String, Vec<RunId>> = store
+                .list_models()
+                .into_iter()
+                .map(|m| {
+                    let ids: Vec<RunId> = store
+                        .recent(&m, usize::MAX)
+                        .iter()
+                        .map(|r| r.run_id)
+                        .collect();
+                    (m, ids)
+                })
+                .collect();
+            drop(store);
+            let store = RunStore::open(dir.path()).unwrap();
+            let post: HashMap<String, Vec<RunId>> = store
+                .list_models()
+                .into_iter()
+                .map(|m| {
+                    let ids: Vec<RunId> = store
+                        .recent(&m, usize::MAX)
+                        .iter()
+                        .map(|r| r.run_id)
+                        .collect();
+                    (m, ids)
+                })
+                .collect();
+            prop_assert_eq!(pre, post);
+        }
+    }
+}

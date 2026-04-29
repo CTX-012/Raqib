@@ -61,6 +61,15 @@ pub fn run_history_to<W: Write>(
             if json {
                 serde_json::to_writer_pretty(&mut *w, &records)?;
                 writeln!(w)?;
+            } else if records.is_empty() {
+                // DESIGN_HANDOFF Principle 6 — the "no runs found"
+                // line on its own strands a user with a typo. Listing
+                // the models that *do* have runs makes the next step
+                // obvious. JSON mode skips this branch on purpose
+                // (callers already get an empty array, which is
+                // unambiguous and easy to test against).
+                let known = store.list_models();
+                render_unknown_model(w, &m, &known)?;
             } else {
                 render_runs(w, &m, &records)?;
             }
@@ -75,6 +84,47 @@ pub fn run_history_to<W: Write>(
             }
         }
     }
+    Ok(())
+}
+
+/// Print a "no runs for <model>" message that lists the models we *do*
+/// have, so a typo or model-name drift surfaces immediately. If the
+/// store is genuinely empty, fall back to the same "try this" hint
+/// the no-args path would have shown.
+fn render_unknown_model(
+    w: &mut impl Write,
+    model: &str,
+    known: &[String],
+) -> std::io::Result<()> {
+    if known.is_empty() {
+        writeln!(w, "No runs found for model: {}", model)?;
+        writeln!(w, "(In fact, no runs at all yet.)")?;
+        writeln!(w)?;
+        writeln!(
+            w,
+            "Try one of these in another terminal to populate history:"
+        )?;
+        writeln!(w, "    ollama run llama3 'hello'")?;
+        writeln!(w, "    vllm serve <model>")?;
+        writeln!(w, "    yolo predict model=yolov8n.pt source=...")?;
+        return Ok(());
+    }
+    writeln!(w, "No runs found for model: {}", model)?;
+    writeln!(w)?;
+    writeln!(
+        w,
+        "Models with run history (run `edge_monitor history` for a summary):"
+    )?;
+    for name in known {
+        writeln!(w, "    {}", name)?;
+    }
+    writeln!(w)?;
+    writeln!(
+        w,
+        "If the model you wanted isn't listed, the classifier may have \
+         recorded it under a different name — check `edge_monitor history` \
+         (no model) for the canonical labels."
+    )?;
     Ok(())
 }
 
@@ -124,7 +174,29 @@ pub fn build_model_summaries(store: &RunStore) -> Vec<ModelSummary> {
 
 fn render_models(w: &mut impl Write, summaries: &[ModelSummary]) -> std::io::Result<()> {
     if summaries.is_empty() {
-        writeln!(w, "no run history yet — run an AI workload first")?;
+        // DESIGN_HANDOFF Principle 6 — empty states teach the
+        // product. The blank "no run history yet" line was technically
+        // correct and operationally useless: a first-time user sees
+        // it and has no idea what to do next. Three concrete examples
+        // (one LLM CLI, one server runtime, one vision runtime) plus
+        // the `exec` wrapper cover the common starts.
+        writeln!(w, "No run history yet.")?;
+        writeln!(w)?;
+        writeln!(
+            w,
+            "Try one of these in another terminal — edge_monitor will"
+        )?;
+        writeln!(w, "detect the workload automatically:")?;
+        writeln!(w)?;
+        writeln!(w, "    ollama run llama3 'hello'")?;
+        writeln!(w, "    vllm serve <model>")?;
+        writeln!(w, "    yolo predict model=yolov8n.pt source=...")?;
+        writeln!(w)?;
+        writeln!(
+            w,
+            "Or wrap an existing command so we capture stdout metrics too:"
+        )?;
+        writeln!(w, "    edge_monitor exec -- <your command>")?;
         return Ok(());
     }
     writeln!(
@@ -153,7 +225,12 @@ fn render_models(w: &mut impl Write, summaries: &[ModelSummary]) -> std::io::Res
 
 fn render_runs(w: &mut impl Write, model: &str, records: &[RunRecord]) -> std::io::Result<()> {
     if records.is_empty() {
-        writeln!(w, "no runs found for model: {}", model)?;
+        // Now mostly unreachable: `run_history_to` routes empty
+        // results through `render_unknown_model` which lists the
+        // models that DO have runs. Leaving a sane fallback here so
+        // direct callers (tests, future tooling) still get a clear
+        // line instead of a blank one.
+        writeln!(w, "No runs found for model: {}", model)?;
         return Ok(());
     }
     writeln!(
@@ -310,24 +387,82 @@ mod tests {
         RunRecord::from_summary(summary)
     }
 
-    /// Spec test: history command with no runs prints "no history" / 0 exit.
+    /// Empty-store empty-state per DESIGN_HANDOFF Principle 6 — the
+    /// banner line plus at least one example command point a
+    /// first-time user at the next concrete thing to try.
     #[test]
-    fn empty_store_prints_no_history() {
+    fn empty_store_teaches_with_example_commands() {
         let dir = tempfile::tempdir().unwrap();
         let store = RunStore::open(dir.path()).unwrap();
         let summaries = build_model_summaries(&store);
         let mut buf = Vec::new();
         render_models(&mut buf, &summaries).unwrap();
         let out = String::from_utf8(buf).unwrap();
-        assert!(out.contains("no run history yet"), "got: {out}");
+        assert!(
+            out.contains("No run history yet"),
+            "expected the banner line; got: {out}"
+        );
+        assert!(
+            out.contains("ollama run") || out.contains("vllm serve"),
+            "empty-state must include at least one example command; got: {out}"
+        );
+        assert!(
+            out.contains("edge_monitor exec"),
+            "empty-state must mention the exec wrapper; got: {out}"
+        );
     }
 
+    /// Direct-`render_runs` empty-state fallback. The CLI surface
+    /// routes empty results through `render_unknown_model` instead;
+    /// this test exists for direct callers (future tooling, in-tree
+    /// tests).
     #[test]
-    fn no_runs_for_model_prints_message() {
+    fn render_runs_empty_falls_back_cleanly() {
         let mut buf = Vec::new();
         render_runs(&mut buf, "phi3-mini", &[]).unwrap();
         let out = String::from_utf8(buf).unwrap();
-        assert!(out.contains("no runs found for model: phi3-mini"));
+        assert!(
+            out.contains("No runs found for model: phi3-mini"),
+            "got: {out}"
+        );
+    }
+
+    /// Unknown-model empty-state with a populated store: list the
+    /// models that DO have history so the user can spot a typo or
+    /// model-name drift.
+    #[test]
+    fn unknown_model_lists_known_models() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = RunStore::open(dir.path()).unwrap();
+        store.append(record_for("phi3-mini", None)).unwrap();
+        store.append(record_for("llama-3.1-8b", None)).unwrap();
+        let known = store.list_models();
+        let mut buf = Vec::new();
+        render_unknown_model(&mut buf, "phi3-min", &known).unwrap();
+        let out = String::from_utf8(buf).unwrap();
+        assert!(out.contains("No runs found for model: phi3-min"));
+        // Both real model names appear so a typo's correct match is
+        // visible at a glance.
+        assert!(out.contains("phi3-mini"), "got: {out}");
+        assert!(out.contains("llama-3.1-8b"), "got: {out}");
+        // And the line that points at `history` (no model) for the
+        // canonical labels.
+        assert!(out.contains("edge_monitor history"), "got: {out}");
+    }
+
+    /// Unknown-model empty-state with an empty store: list nothing
+    /// (because there's nothing to list) and instead repeat the
+    /// "try this" hint from the no-args empty path.
+    #[test]
+    fn unknown_model_with_empty_store_shows_try_this_hint() {
+        let mut buf = Vec::new();
+        render_unknown_model(&mut buf, "phi3-mini", &[]).unwrap();
+        let out = String::from_utf8(buf).unwrap();
+        assert!(out.contains("No runs found for model: phi3-mini"));
+        assert!(
+            out.contains("ollama run") || out.contains("vllm serve"),
+            "with no models known, fall back to launch examples; got: {out}"
+        );
     }
 
     /// Spec test: `--json` output validates as well-formed JSON for both

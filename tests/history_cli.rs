@@ -51,9 +51,15 @@ fn empty_store_prints_no_history_message() {
     let mut buf = Vec::new();
     run_history_to(None, 20, false, &cfg, &mut buf).unwrap();
     let out = String::from_utf8(buf).unwrap();
+    // DESIGN_HANDOFF Principle 6 — empty state teaches with at
+    // least the banner + one launch example.
     assert!(
-        out.contains("no run history yet"),
-        "expected 'no run history yet', got:\n{out}"
+        out.contains("No run history yet"),
+        "expected the banner line; got:\n{out}"
+    );
+    assert!(
+        out.contains("ollama run") || out.contains("vllm serve"),
+        "expected at least one launch example; got:\n{out}"
     );
 }
 

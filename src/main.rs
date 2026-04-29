@@ -176,6 +176,29 @@ fn log_tick_summary(state: &RuntimeState) {
         exits = exits,
         "tick"
     );
+
+    // DESIGN_HANDOFF Principle 6 — one-shot teaching hint when the
+    // first tick sees nothing AI-flavoured. A first-time user runs
+    // `edge_monitor --no-ui --ticks 5`, sees five "ai_processes=0"
+    // lines, and has no idea that's because they haven't started a
+    // workload. The hint fires once per process lifetime and only
+    // when the *first* tick observed zero AI processes — silent for
+    // every subsequent tick (so log scrapers stay clean) and silent
+    // entirely for users whose first tick already saw a workload.
+    static EMPTY_HINT_EMITTED: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+    if state.tick_count == 1
+        && ai_procs.is_empty()
+        && !EMPTY_HINT_EMITTED.swap(true, std::sync::atomic::Ordering::Relaxed)
+    {
+        tracing::info!(
+            "No AI workloads detected this tick. Try one of these in \
+             another terminal — edge_monitor will pick it up on the \
+             next tick: `ollama run llama3 'hello'`, \
+             `vllm serve <model>`, or wrap with \
+             `edge_monitor exec -- <your command>`."
+        );
+    }
     for p in &ai_procs {
         // Two emission sites: with and without `model=`. Keeps the
         // structured-log shape clean — when no model name was extracted,
@@ -353,7 +376,21 @@ fn load_config(path: Option<&std::path::Path>, force_dry_run: bool) -> anyhow::R
                 tracing::info!(path = %default_path.display(), "loading config");
                 Config::from_file(&default_path)?
             } else {
-                tracing::info!("no config file; using built-in defaults");
+                // DESIGN_HANDOFF Principle 6 — first-time launch
+                // with no config used to print "no config file; using
+                // built-in defaults" which technically informed and
+                // practically taught nothing. The new line names
+                // exactly what defaults are in play, where the
+                // example config lives, and how to learn more — at
+                // the cost of one extra line on every default-config
+                // run, which is the right trade for first-run UX.
+                tracing::info!(
+                    "Running with built-in defaults (no edge_monitor.toml \
+                     found). Governor is in dry-run mode, run history \
+                     persists at ~/.local/share/edge_monitor. \
+                     See edge_monitor.toml.example for tunables, or \
+                     run with --config <path> to load one."
+                );
                 Config::default()
             }
         }

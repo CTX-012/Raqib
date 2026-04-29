@@ -86,11 +86,17 @@ pub fn run_compare(
         .with_context(|| format!("opening run store at {}", path.display()))?;
 
     let mut columns = Vec::with_capacity(models.len());
+    let mut empty_models: Vec<String> = Vec::new();
     for model in &models {
         let records = store.recent(model, runs);
         if records.is_empty() {
             // Empty column rather than aborting — operators want to
             // see all requested models even if one has no history.
+            // DESIGN_HANDOFF Principle 6 — collect the empty-column
+            // names so we can teach in a single trailing stderr note
+            // (one model not found is interesting; 4 of 4 models not
+            // found is "did you mean a different store?").
+            empty_models.push(model.clone());
             columns.push(ComparisonColumn {
                 model: model.clone(),
                 sample_size: 0,
@@ -160,6 +166,37 @@ pub fn run_compare(
         writeln!(w)?;
     } else {
         render_table(&mut w, &columns)?;
+        // DESIGN_HANDOFF Principle 6 — one stderr line that teaches
+        // when a comparison includes models we have no data for. The
+        // table still renders (empty columns) so a script piping
+        // both columns to a downstream tool isn't broken; the note
+        // goes to stderr so plain stdout-capture pipelines don't
+        // see it. JSON mode skips this — callers there already have
+        // sample_size = 0 they can branch on.
+        if !empty_models.is_empty() {
+            let known = store.list_models();
+            let mut err = std::io::stderr().lock();
+            writeln!(
+                err,
+                "\nNote: {} model(s) had no run history: {}",
+                empty_models.len(),
+                empty_models.join(", ")
+            )?;
+            if known.is_empty() {
+                writeln!(
+                    err,
+                    "      The run store at {} has no records yet — try \
+                     `edge_monitor history` for the empty-state hint.",
+                    path.display()
+                )?;
+            } else {
+                writeln!(
+                    err,
+                    "      Models that DO have history: {}",
+                    known.join(", ")
+                )?;
+            }
+        }
     }
     Ok(())
 }

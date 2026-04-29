@@ -75,9 +75,22 @@ impl GpuCollector {
         let nvml = match Nvml::init() {
             Ok(n) => Some(n),
             Err(e) => {
-                // NVML initialization can fail on systems without NVIDIA GPU or drivers
-                // This is not an error condition; just log and continue
-                tracing::debug!("NVML init failed: {}, GPU metrics unavailable", e);
+                // DESIGN_HANDOFF Principle 6 — empty states teach
+                // the product. The previous debug-level message was
+                // invisible at the default log level, so a no-GPU
+                // user wondered why their VRAM column was always
+                // empty. Audit S.0.7 (test_results/REPORT.md
+                // 2026-04-28) recommended promoting this; one-shot
+                // info now names what's missing AND what still
+                // works, and the NVML detail stays for the operator
+                // who actually wants the libnvidia-ml.so.1 line.
+                tracing::info!(
+                    nvml_detail = %e,
+                    "No NVIDIA GPU detected. \
+                     VRAM, GPU power, and per-device temperature \
+                     metrics will be empty; CPU, RAM, lifecycle, \
+                     governor, and regression detection still work."
+                );
                 None
             }
         };

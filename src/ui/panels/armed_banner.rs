@@ -65,8 +65,13 @@ impl ArmedKill {
 /// Render the banner into `area`. Caller is responsible for only
 /// allocating the row when an `ArmedKill` is present — otherwise an
 /// empty red strip would render whenever no kill is armed.
-pub fn render(frame: &mut Frame, area: Rect, armed: &ArmedKill) {
-    let body = format_body(armed);
+///
+/// `dry_run` controls the `(DRY-RUN — won't die)` insert that warns
+/// the operator a confirm-press will only log, not signal. Without
+/// the insert, dry-run mode silently swallows the kill — which looks
+/// to the operator like the keypress was lost.
+pub fn render(frame: &mut Frame, area: Rect, armed: &ArmedKill, dry_run: bool) {
+    let body = format_body(armed, dry_run);
     let style = Style::default()
         .bg(Color::Red)
         .fg(Color::White)
@@ -76,17 +81,18 @@ pub fn render(frame: &mut Frame, area: Rect, armed: &ArmedKill) {
 
 /// Pure formatter — exposed so the cascading-priority unit tests can
 /// pin the exact UI Contract strings without spinning a `Frame`.
-pub fn format_body(armed: &ArmedKill) -> String {
+pub fn format_body(armed: &ArmedKill, dry_run: bool) -> String {
+    let dry_insert = if dry_run { " (DRY-RUN — won't die)" } else { "" };
     if armed.allowlisted {
         format!(
-            "ARMED kill PID={pid} ({name}) — ALLOWLISTED, press k to override — {n}s",
+            "ARMED kill{dry_insert} PID={pid} ({name}) — ALLOWLISTED, press k to override — {n}s",
             pid = armed.pid,
             name = armed.name,
             n = armed.seconds_remaining(),
         )
     } else {
         format!(
-            "ARMED kill PID={pid} ({name}) — press k to confirm, Esc/5s to disarm — {n}s",
+            "ARMED kill{dry_insert} PID={pid} ({name}) — press k to confirm, Esc/5s to disarm — {n}s",
             pid = armed.pid,
             name = armed.name,
             n = armed.seconds_remaining(),
@@ -126,12 +132,13 @@ mod tests {
         assert!(armed.is_expired());
     }
 
-    /// UI Contract: the normal body is exactly this format, including
-    /// em-dash separators. Pin it so a casual cleanup pass can't
-    /// silently rewrite the operator's muscle-memory cue.
+    /// UI Contract: the normal enforce-mode body is exactly this
+    /// format, including em-dash separators. Pin it so a casual
+    /// cleanup pass can't silently rewrite the operator's
+    /// muscle-memory cue.
     #[test]
     fn normal_body_matches_ui_contract() {
-        let body = format_body(&freshly_armed(false));
+        let body = format_body(&freshly_armed(false), false);
         assert_eq!(
             body,
             "ARMED kill PID=4242 (ollama) — press k to confirm, Esc/5s to disarm — 5s",
@@ -142,10 +149,31 @@ mod tests {
     /// and "press k to override" phrasing.
     #[test]
     fn allowlisted_body_matches_ui_contract() {
-        let body = format_body(&freshly_armed(true));
+        let body = format_body(&freshly_armed(true), false);
         assert_eq!(
             body,
             "ARMED kill PID=4242 (ollama) — ALLOWLISTED, press k to override — 5s",
+        );
+    }
+
+    /// UI Contract: dry-run insert sits between `kill` and `PID=`
+    /// so the operator sees "armed but won't actually die" before
+    /// the second confirm press.
+    #[test]
+    fn dry_run_normal_body_includes_insert() {
+        let body = format_body(&freshly_armed(false), true);
+        assert_eq!(
+            body,
+            "ARMED kill (DRY-RUN — won't die) PID=4242 (ollama) — press k to confirm, Esc/5s to disarm — 5s",
+        );
+    }
+
+    #[test]
+    fn dry_run_allowlisted_body_includes_insert() {
+        let body = format_body(&freshly_armed(true), true);
+        assert_eq!(
+            body,
+            "ARMED kill (DRY-RUN — won't die) PID=4242 (ollama) — ALLOWLISTED, press k to override — 5s",
         );
     }
 }

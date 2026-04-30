@@ -37,7 +37,7 @@ pub fn render(f: &mut Frame, state: &RuntimeState, app: &App) {
     let (banner_area, body_area) = (split[0], split[1]);
 
     if let Some(armed) = app.armed_kill() {
-        armed_banner::render(f, banner_area, armed);
+        armed_banner::render(f, banner_area, armed, state.dry_run);
     }
 
     if app.detail_mode() {
@@ -168,6 +168,21 @@ fn render_process_row(f: &mut Frame, area: Rect, state: &RuntimeState, app: &App
 }
 
 fn render_footer(f: &mut Frame, area: Rect, app: &App) {
+    // An ephemeral status message wins over the keybind hints — the
+    // operator-feedback path is more valuable than the always-visible
+    // cheat sheet for the few seconds the message is live. Yellow
+    // matches the DRY-RUN label colour in the status bar so the two
+    // dry-run cues read as the same channel.
+    if let Some(msg) = app.status() {
+        let p = Paragraph::new(format!(" {msg} ")).style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        );
+        f.render_widget(p, area);
+        return;
+    }
+
     // Detail mode unlocks Tab; default mode locks focus to AI Workloads.
     // The footer reflects what the operator can actually do right now —
     // listing keys that no-op in default mode would be misleading.

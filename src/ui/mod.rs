@@ -127,9 +127,27 @@ fn apply_action(action: Action, runtime: &mut Runtime, app: &mut App) {
             // didn't notice) silently re-arms instead of firing, which
             // looks like the keypress was lost.
             if let Some(armed_pid) = app.armed_kill_pid() {
+                // Snapshot name + dry-run state BEFORE disarm: the
+                // armed-kill record is dropped by `disarm_kill`, and
+                // `runtime.dry_run()` could in principle change between
+                // the read and the message — pin both to the value at
+                // the moment the kill was dispatched.
+                let armed_name = app
+                    .armed_kill()
+                    .map(|a| a.name.clone())
+                    .unwrap_or_default();
+                let was_dry_run = runtime.dry_run();
                 let reason = "manual kill via TUI".to_string();
                 if let Err(e) = runtime.manual_kill(armed_pid, reason) {
                     tracing::warn!("manual kill failed: {}", e);
+                } else if was_dry_run {
+                    // Dry-run swallows the signal silently in
+                    // `kill_sigterm` — the operator needs explicit
+                    // feedback that the press was received but the
+                    // process is still alive on purpose.
+                    app.set_status(format!(
+                        "DRY-RUN: would have sent SIGTERM to PID {armed_pid} ({armed_name}) — press d to enforce",
+                    ));
                 }
                 app.disarm_kill();
             } else if let Some(pid) = app.selected_pid(runtime.state()) {
@@ -193,11 +211,25 @@ fn apply_action(action: Action, runtime: &mut Runtime, app: &mut App) {
 ///   2. `EDGE_MONITOR_GRAFANA_URL` environment variable, if set
 ///   3. Hardcoded fallback `http://localhost:3000/d/edge_monitor`
 ///
-/// Refuses with a status hint when no row is focused.
-/// `compute_dashboard_url` does the `{model}`/`{pid}` substitution.
-fn handle_open_dashboard(runtime: &Runtime, app: &App) {
+/// Spawns `xdg-open <url>` directly rather than going through the
+/// `webbrowser` crate. The crate fans out across an opaque list of
+/// helpers (`xdg-open` / `wslview` / `gio open` / `gnome-open` /
+/// `kde-open`), which on a stripped distro silently picks the first
+/// that exists — and reports a generic "no successful command"
+/// error otherwise. `xdg-open` directly is the standard Linux
+/// contract, fails fast with a recognisable spawn error, and lets
+/// the operator install the missing piece in one step.
+///
+/// Surfaces a status-footer message for both outcomes so the
+/// operator gets inline confirmation the keypress was received,
+/// even when the spawn fails (the URL is shown so it can be
+/// copy-pasted into another browser). Refuses with a status hint
+/// when no row is focused.
+fn handle_open_dashboard(runtime: &Runtime, app: &mut App) {
     let Some(pid) = app.selected_pid(runtime.state()) else {
-        tracing::info!("No workload focused — select a row first");
+        let msg = "No workload focused — select a row first";
+        tracing::info!("{msg}");
+        app.set_status(msg);
         return;
     };
     let template = resolve_dashboard_template(runtime.config());
@@ -208,13 +240,22 @@ fn handle_open_dashboard(runtime: &Runtime, app: &App) {
         .find(|p| p.pid == pid)
         .and_then(|p| p.model_name.clone());
     let url = compute_dashboard_url(&template, model.as_deref(), pid);
-    match webbrowser::open(&url) {
-        Ok(_) => tracing::info!(%url, "Opened {url}"),
-        Err(e) => tracing::warn!(
-            %url,
-            error = %e,
-            "Could not open browser — URL: {url}",
-        ),
+    match std::process::Command::new("xdg-open")
+        .arg(&url)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(_) => {
+            tracing::info!(%url, "Opened {url}");
+            app.set_status(format!("Opening {url}"));
+        }
+        Err(e) => {
+            tracing::warn!(%url, error = %e, "xdg-open failed — URL: {url}");
+            app.set_status(format!(
+                "xdg-open failed ({e}); copy URL: {url}",
+            ));
+        }
     }
 }
 

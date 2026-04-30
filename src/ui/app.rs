@@ -1,8 +1,16 @@
+use std::time::{Duration, Instant};
+
 use crate::model::AICategory;
 use crate::runtime::RuntimeState;
 use crate::storage::RunRecord;
 use crate::ui::panels::armed_banner::ArmedKill;
 use crate::ui::panels::postmortem::PostMortemCard;
+
+/// How long an ephemeral status footer message stays on screen
+/// before `tick_overlays` clears it. Mirrors the operator-feedback
+/// rhythm of the armed-kill banner: long enough to read, short
+/// enough not to mask the keybind hints permanently.
+pub(crate) const STATUS_TTL: Duration = Duration::from_secs(3);
 
 /// Which panel currently owns selection / cursor focus.
 /// Only the three list panels accept selection; vitals and audit are read-only.
@@ -126,6 +134,12 @@ pub struct App {
     /// is what the operator-feedback pass asked for. Tab focus-cycling
     /// is suppressed in default mode since only one panel is reachable.
     detail_mode: bool,
+    /// Ephemeral status footer message + when it was set. Auto-cleared
+    /// by `tick_overlays` after `STATUS_TTL`. Used to surface kill-flow
+    /// feedback (especially the dry-run "would-have-sent" message) so
+    /// the operator gets confirmation a keypress was received even
+    /// when the underlying signal was suppressed.
+    status: Option<(String, Instant)>,
 }
 
 impl Default for App {
@@ -147,7 +161,26 @@ impl App {
             postmortem: None,
             history: None,
             detail_mode: false,
+            status: None,
         }
+    }
+
+    /// Set an ephemeral status footer message. Replaces any prior
+    /// message; auto-clears after `STATUS_TTL` via `tick_overlays`.
+    pub fn set_status(&mut self, msg: impl Into<String>) {
+        self.status = Some((msg.into(), Instant::now()));
+    }
+
+    /// Currently visible status footer message, or `None` if no
+    /// message is set or the TTL has lapsed.
+    pub fn status(&self) -> Option<&str> {
+        self.status.as_ref().and_then(|(s, t)| {
+            if t.elapsed() < STATUS_TTL {
+                Some(s.as_str())
+            } else {
+                None
+            }
+        })
     }
 
     pub fn focus(&self) -> FocusedPanel {
@@ -293,6 +326,11 @@ impl App {
             && card.is_expired()
         {
             self.postmortem = None;
+        }
+        if let Some((_, t)) = &self.status
+            && t.elapsed() >= STATUS_TTL
+        {
+            self.status = None;
         }
     }
 

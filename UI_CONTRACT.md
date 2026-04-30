@@ -39,9 +39,12 @@
 
 | Context | String |
 |---|---|
-| Armed banner, normal | `ARMED kill PID={pid} ({name}) — press k to confirm, Esc/5s to disarm — {n}s` |
-| Armed banner, allowlisted | `ARMED kill PID={pid} ({name}) — ALLOWLISTED, press k to override — {n}s` |
-| Status bar, kill sent | `Sent SIGTERM to PID {pid} ({name})` (Linux) / `Sent termination to PID {pid} ({name})` (Windows) |
+| Armed banner, normal (enforce) | `ARMED kill PID={pid} ({name}) — press k to confirm, Esc/5s to disarm — {n}s` |
+| Armed banner, allowlisted (enforce) | `ARMED kill PID={pid} ({name}) — ALLOWLISTED, press k to override — {n}s` |
+| Armed banner, normal (dry-run) | `ARMED kill (DRY-RUN — won't die) PID={pid} ({name}) — press k to confirm, Esc/5s to disarm — {n}s` |
+| Armed banner, allowlisted (dry-run) | `ARMED kill (DRY-RUN — won't die) PID={pid} ({name}) — ALLOWLISTED, press k to override — {n}s` |
+| Status footer, kill confirmed in dry-run | `DRY-RUN: would have sent SIGTERM to PID {pid} ({name}) — press d to enforce` (yellow, bold; auto-clears at 3s) |
+| Status bar, kill sent (enforce) | `Sent SIGTERM to PID {pid} ({name})` (Linux) / `Sent termination to PID {pid} ({name})` (Windows) |
 | Status bar, kill blocked by rate limit | `Kill rate-limited (max {max} per {window}s) — try again in {wait}s` |
 | Status bar, `g` with no focus | `No workload focused — select a row first` |
 | Status bar, `g` with empty url source | `Set [dashboard].url_template in your config or EDGE_MONITOR_GRAFANA_URL env var` |
@@ -117,8 +120,22 @@ convention.
 valid for exactly 5 seconds. 2nd `k` press within that window confirms
 and dispatches via the existing kill path (allowlist still respected;
 manual kill still flows through audit log with manual-source tagging).
-Any other key press during the armed window does NOT cancel the arm —
-only `Esc` does, or auto-disarm at 5s.
+The FIRE branch dispatches on the *armed* PID, not on whatever is
+currently selected — selection drift between presses (PID list reshuffle
+across a tick boundary) must not silently re-arm. Any other key press
+during the armed window does NOT cancel the arm — only `Esc` does, or
+auto-disarm at 5s.
+
+**Dry-run vs enforce rendering**: when the runtime is in dry-run mode
+(`policy.enforce = false`, the default per CLAUDE.md safety rule 3),
+the armed banner inserts ` (DRY-RUN — won't die)` between `kill` and
+`PID=` for both the normal and allowlisted variants. After the second
+`k` press confirms, `kill_sigterm` swallows the signal and returns
+Ok(()); the status footer surfaces the dry-run message above so the
+operator gets feedback that the press was received but the process is
+intentionally still alive. Status footer auto-clears at 3 seconds and
+is rendered in yellow + bold to match the `DRY-RUN` label colour in
+the status bar.
 
 **Post-mortem trigger**: the card appears when an AI-classified process
 exits. Two paths:

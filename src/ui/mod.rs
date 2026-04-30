@@ -97,12 +97,6 @@ fn run_loop(
             // drawing so the banner doesn't render with `0s` remaining
             // for one extra frame.
             app.tick_overlays();
-            // Drain any pending post-mortem cards from the runtime so
-            // an AI exit between user keystrokes still surfaces. Done
-            // inside the render budget so we're not racing the tick.
-            for card in runtime.drain_postmortems() {
-                app.show_postmortem(card);
-            }
             terminal.draw(|f| panels::render(f, runtime.state(), &app))?;
             last_render = Instant::now();
         }
@@ -181,6 +175,7 @@ fn apply_action(action: Action, runtime: &mut Runtime, app: &mut App) {
         Action::ToggleDetailMode => app.toggle_detail_mode(),
         Action::OpenDashboard => handle_open_dashboard(runtime, app),
         Action::DismissPostmortem => app.dismiss_postmortem(),
+        Action::ShowPostmortemForFocused => handle_show_postmortem(runtime, app),
         Action::Escape => {
             // Cascading priority is in `App::handle_escape`. Filter
             // mode's Esc is handled earlier by `input::translate`
@@ -220,6 +215,40 @@ fn handle_open_dashboard(runtime: &Runtime, app: &App) {
             error = %e,
             "Could not open browser — URL: {url}",
         ),
+    }
+}
+
+/// `Enter`-on-focused-row handler ([UX-2], UI Contract v2). Builds a
+/// post-mortem snapshot for the focused workload's *most recent* run
+/// and pushes it as a card. Skipped silently when no row is focused
+/// or the focused workload has no run history yet — the latter is
+/// expected for AI processes that have never exited; surfacing a
+/// blank card would mislead more than logging it skips.
+fn handle_show_postmortem(runtime: &Runtime, app: &mut App) {
+    let Some(pid) = app.selected_pid(runtime.state()) else {
+        tracing::info!("No workload focused — select a row first");
+        return;
+    };
+    let state = runtime.state();
+    let key = state
+        .annotated
+        .iter()
+        .find(|p| p.pid == pid)
+        .and_then(|p| p.model_name.clone().or(Some(p.name.clone())));
+    let Some(model) = key else {
+        tracing::info!(%pid, "Focused row has no model/name — skipping post-mortem");
+        return;
+    };
+    match runtime.latest_postmortem(&model) {
+        Some(post_mortem) => {
+            app.show_postmortem(crate::ui::panels::postmortem::PostMortemCard {
+                post_mortem,
+                shown_at: Instant::now(),
+            });
+        }
+        None => {
+            tracing::info!(model = %model, "No run history yet for this workload");
+        }
     }
 }
 

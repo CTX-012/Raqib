@@ -155,10 +155,6 @@ pub struct Runtime {
     /// would-fire in dry-run); consulted on exit to attribute the
     /// kill to `ExitReason::GovernorKill`.
     governor_killed_pids: HashMap<u32, String>,
-    /// [UX-2] — pending post-mortem cards built by the runtime's exit
-    /// hook. Drained by `Runtime::drain_postmortems` on every render
-    /// frame so the TUI surfaces AI exits within ~100 ms.
-    pending_postmortems: Vec<crate::ui::panels::postmortem::PostMortemCard>,
     /// Previous tick's cumulative CPU ticks, per PID, plus the wall-clock
     /// timestamp that reading was taken at. Used to compute cpu_pct as
     /// delta_ticks / CLK_TCK / elapsed_secs × 100.
@@ -229,7 +225,6 @@ impl Runtime {
             fingerprinter,
             pid_to_model_path: HashMap::new(),
             governor_killed_pids: HashMap::new(),
-            pending_postmortems: Vec::new(),
             prev_cpu: HashMap::new(),
             clk_tck: read_clk_tck(),
         }
@@ -268,15 +263,31 @@ impl Runtime {
         crate::governor::manual::ManualKiller::is_allowlisted(name, &self.governor)
     }
 
-    /// [UX-2] — drain queued post-mortem cards. The render loop calls
-    /// this once per frame and pushes anything it finds onto `App`.
-    /// Returning a `Vec` rather than an `Option<single>` lets the
-    /// runtime outpace the renderer without dropping cards on the
-    /// floor; the latest-wins rule is enforced inside `App`.
-    pub fn drain_postmortems(
-        &mut self,
-    ) -> Vec<crate::ui::panels::postmortem::PostMortemCard> {
-        std::mem::take(&mut self.pending_postmortems)
+    /// Build the post-mortem snapshot for the most recent run of
+    /// `model`, or `None` when the run store has no history for it.
+    /// Used by the `Enter`-on-focused-row handler in [UX-2] (UI
+    /// Contract v2): the card is shown on demand for the focused
+    /// workload, not auto-pushed when any AI process exits.
+    pub fn latest_postmortem(
+        &self,
+        model: &str,
+    ) -> Option<crate::ui::panels::postmortem::PostMortem> {
+        let rs = self.run_store.as_ref()?;
+        let mut recent = rs.recent(model, 1);
+        if recent.is_empty() {
+            return None;
+        }
+        let record = recent.remove(0);
+        let baseline_status = build_baseline_status(
+            record.metrics.tokens_per_sec_avg,
+            rs,
+            model,
+            &self.config.regression,
+        );
+        Some(crate::ui::panels::postmortem::PostMortem::from_run_record(
+            &record,
+            baseline_status,
+        ))
     }
 
     pub fn toggle_dry_run(&mut self) {
@@ -476,55 +487,6 @@ impl Runtime {
                         .regressions_count
                         .entry((ev.model.clone(), ev.regression.metric.clone()))
                         .or_insert(0) += 1;
-                }
-
-                // [UX-2] — push a post-mortem card for AI-classified
-                // exits. Worst-by-severity wins; ties resolve to the
-                // most-recently-pushed event since `max_by_key` keeps
-                // the latest among equal keys with stable ordering.
-                if record_clone.summary.category.is_some() {
-                    // UI Contract v2 — build the transient PostMortem
-                    // here. Stderr is empty for the headless path (the
-                    // runtime doesn't own child stdio); the exec
-                    // wrapper has its own card-trigger when it lands.
-                    // Baseline headline is computed from the run's
-                    // tokens_per_sec_avg vs the baseline mean — this
-                    // is independent of `RegressionConfig` thresholds
-                    // (the contract pins the headline bands directly:
-                    // ≥20 critical / ≥10 attention / ≤-10 healthy /
-                    // otherwise matching).
-                    let summary = &record_clone.summary;
-                    let display_name = summary
-                        .model_name
-                        .clone()
-                        .unwrap_or_else(|| summary.name.clone());
-                    let baseline_status = build_baseline_status(
-                        record_clone.metrics.tokens_per_sec_avg,
-                        rs,
-                        &model,
-                        &self.config.regression,
-                    );
-                    let pm = crate::ui::panels::postmortem::PostMortem {
-                        display_name,
-                        duration_secs: summary.uptime_secs.max(0) as u64,
-                        avg_cpu_pct: summary.avg_cpu_pct,
-                        peak_rss_mb: summary.peak_rss_mb,
-                        peak_vram_mb: summary.peak_vram_mb,
-                        tokens_per_sec: record_clone.metrics.tokens_per_sec_avg,
-                        exit_reason: record_clone.exit_reason.clone(),
-                        // Headless path doesn't own stderr. The
-                        // `regs_before` reference below keeps the
-                        // borrow-checker happy by not capturing `self`.
-                        stderr_tail: Vec::new(),
-                        baseline_status,
-                    };
-                    let _ = regs_before; // silence unused-binding lint
-                    self.pending_postmortems.push(
-                        crate::ui::panels::postmortem::PostMortemCard {
-                            post_mortem: pm,
-                            shown_at: Instant::now(),
-                        },
-                    );
                 }
             }
             // Drop accumulator state for the exited PID so a recycled

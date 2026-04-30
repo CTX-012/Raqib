@@ -34,6 +34,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
 
+use crate::storage::RunRecord;
 use crate::storage::run_store::ExitReason;
 
 /// Transient struct constructed by the runtime at exit time and
@@ -62,6 +63,34 @@ pub struct PostMortem {
     /// buffer; the render path further clamps to the last 3 lines.
     pub stderr_tail: Vec<String>,
     pub baseline_status: BaselineStatus,
+}
+
+impl PostMortem {
+    /// Build the transient card payload from a persisted `RunRecord`
+    /// and a freshly-computed `BaselineStatus`. Stderr is left empty
+    /// — the headless monitor path doesn't own child stdio (the
+    /// exec wrapper, when it lands, will populate this directly
+    /// before constructing the card). Display name resolves to the
+    /// classifier's `model_name` when present, otherwise the raw
+    /// process name.
+    pub fn from_run_record(record: &RunRecord, baseline_status: BaselineStatus) -> Self {
+        let summary = &record.summary;
+        let display_name = summary
+            .model_name
+            .clone()
+            .unwrap_or_else(|| summary.name.clone());
+        Self {
+            display_name,
+            duration_secs: summary.uptime_secs.max(0) as u64,
+            avg_cpu_pct: summary.avg_cpu_pct,
+            peak_rss_mb: summary.peak_rss_mb,
+            peak_vram_mb: summary.peak_vram_mb,
+            tokens_per_sec: record.metrics.tokens_per_sec_avg,
+            exit_reason: record.exit_reason.clone(),
+            stderr_tail: Vec::new(),
+            baseline_status,
+        }
+    }
 }
 
 /// Color-coded baseline summary headline. Independent of

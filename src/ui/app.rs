@@ -73,6 +73,11 @@ pub enum Action {
     /// when a card is visible; `Esc` also dismisses via the cascading
     /// priority handled in `apply_action`.
     DismissPostmortem,
+    /// Show the post-mortem card for the currently focused row
+    /// ([UX-2], UI Contract v2). Triggered by `Enter` in Normal mode
+    /// when no card is already visible. Skipped silently when no row
+    /// is focused or the focused workload has no run history yet.
+    ShowPostmortemForFocused,
     /// Cascading-priority Esc: dismisses post-mortem first, then
     /// disarms a pending kill, then closes any other overlay. Filter
     /// mode handles its own Esc before this runs.

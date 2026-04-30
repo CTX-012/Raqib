@@ -35,10 +35,12 @@ pub fn translate(key: KeyEvent, app: &App) -> Action {
             // Esc cascades through overlays / armed kill. App::handle_escape
             // owns the priority order; we just route the press there.
             KeyCode::Esc => Action::Escape,
-            // Enter dismisses the post-mortem card when one is visible.
-            // Otherwise no-op (Enter has no other Normal-mode binding
-            // today; the help text doesn't promise anything either).
+            // Enter cascade: dismiss if a card is up, else show the
+            // card for the focused row. Per UI Contract v2 (UX-2),
+            // post-mortem cards are *demand-triggered* — the runtime
+            // no longer auto-pushes them on AI exit.
             KeyCode::Enter if app.postmortem().is_some() => Action::DismissPostmortem,
+            KeyCode::Enter => Action::ShowPostmortemForFocused,
             KeyCode::Char('q') => Action::Quit,
             KeyCode::Char('?') => Action::ToggleHelp,
             KeyCode::Char('d') => Action::ToggleDryRun,
@@ -191,9 +193,15 @@ mod tests {
         );
     }
 
+    /// Without a card visible, Enter requests the card for the
+    /// focused row. The handler is responsible for the no-row /
+    /// no-history fallthrough; the input layer just routes the press.
     #[test]
-    fn enter_is_noop_in_normal_mode_without_postmortem() {
+    fn enter_in_normal_mode_without_postmortem_shows_focused_card() {
         let app = App::new();
-        assert_eq!(translate(key(KeyCode::Enter), &app), Action::None);
+        assert_eq!(
+            translate(key(KeyCode::Enter), &app),
+            Action::ShowPostmortemForFocused,
+        );
     }
 }

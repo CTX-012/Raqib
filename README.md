@@ -45,6 +45,30 @@ cargo build --release
 See [`edge_monitor.toml.example`](edge_monitor.toml.example) for a
 commented config file.
 
+### Opening the dashboard from the TUI (`g` keybinding)
+
+Pressing `g` on a focused AI workload row asks the OS to open the
+configured dashboard URL (`[dashboard].url_template` in the config,
+or the `EDGE_MONITOR_GRAFANA_URL` env var, or a `localhost:3000`
+fallback) in your default browser. On Linux this shells out to
+`xdg-open`; on a vanilla WSL install neither `xdg-open` nor a browser
+association exists by default, so `g` will surface
+`Could not open browser — URL: <url>` in the status footer. Two
+fixes:
+
+```bash
+# Option A — install wslu, which provides wslview as an xdg-open
+# shim that hands the URL to your Windows-side default browser.
+sudo apt install wslu
+sudo update-alternatives --install /usr/bin/xdg-open xdg-open \
+  "$(command -v wslview)" 100
+
+# Option B — set $BROWSER to any opener you have on PATH; xdg-open
+# (when present) honours it, and you can copy the URL from the
+# status footer in the meantime.
+export BROWSER='/mnt/c/Windows/explorer.exe'
+```
+
 ### CLI flags
 
 | Flag                  | Effect                                                       |

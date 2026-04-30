@@ -251,10 +251,13 @@ fn handle_open_dashboard(runtime: &Runtime, app: &mut App) {
             app.set_status(format!("Opening {url}"));
         }
         Err(e) => {
-            tracing::warn!(%url, error = %e, "xdg-open failed — URL: {url}");
-            app.set_status(format!(
-                "xdg-open failed ({e}); copy URL: {url}",
-            ));
+            // Tracing keeps the underlying spawn error for devs (the
+            // most common cause on WSL is xdg-open / wslview not
+            // installed; ErrorKind::NotFound surfaces as "No such file
+            // or directory"). The status footer matches UI_CONTRACT
+            // verbatim — no `os error 2`-style jargon for the user.
+            tracing::warn!(%url, error = %e, "Could not open browser — URL: {url}");
+            app.set_status(format!("Could not open browser — URL: {url}"));
         }
     }
 }

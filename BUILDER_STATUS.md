@@ -1327,15 +1327,18 @@ to history) and via reading concurrent worktrees.
   not measure exact fps. cargo test --release green; clippy clean.
   Authorised override of the brief's "no `src/` edits" rule.
 
-### [UX-1] Armed-kill banner (top-of-screen + 5s auto-disarm)
-- Commit SHA: 19b7efe42402266ae331e12da581b97087e5180a
-- Files changed: src/ui/panels/armed_banner.rs (new),
+### [UX-1] Armed-kill banner (UI Contract v2)
+- Commit SHA: cc8b3cc4f24bb9e4683d1ea4f163bd5c58ddabd5
+  (earlier v1 wiring at 19b7efe — superseded by v2; v2 keeps the
+  banner unchanged from v1, only the supporting Esc cascade and
+  string contract are now governed by `UI_CONTRACT.md` v2)
+- Files changed: src/ui/panels/armed_banner.rs (new at 19b7efe),
   src/ui/panels/mod.rs, src/ui/app.rs, src/ui/mod.rs,
   src/ui/input.rs
 - Smoke: scripts/manual/tui_ux_three_smoke.sh
 - Verification command (what the tester should run):
   ```
-  cargo test --release --lib ui::panels::armed_banner ui::app::tests
+  cargo test --release --lib ui::panels::armed_banner ui::app::tests::esc
   ```
 - Expected output (last 10 lines):
   ```
@@ -1343,83 +1346,92 @@ to history) and via reading concurrent worktrees.
   test ui::panels::armed_banner::tests::expired_after_window ... ok
   test ui::panels::armed_banner::tests::normal_body_matches_ui_contract ... ok
   test ui::panels::armed_banner::tests::seconds_remaining_counts_down ... ok
-  test ui::app::tests::arm_kill_records_pid_and_name_and_allowlisted ... ok
   test ui::app::tests::esc_disarms_kill_when_no_postmortem_present ... ok
   test ui::app::tests::esc_dismisses_postmortem_in_priority_over_disarm ... ok
-  test ui::app::tests::tick_overlays_drops_expired_armed_kill ... ok
   test result: ok. ...
   ```
-- Builder note: 5s WINDOW + verbatim body strings locked by UI
-  Contract (`IMPLEMENTATION_LINUX_TUI_UX.md`). `seconds_remaining`
-  rounds UP so a freshly-armed kill reads `5s` rather than `4s`
-  for the first 999 ms; UI Contract pins the ceiling, not the
-  truncating floor of `Duration::as_secs()`. Old inline status-bar
-  marker removed — the full-row red banner is visually unmissable
-  and double-rendering the same state was a source of confusion.
+- Builder note: 5s WINDOW + verbatim body strings locked by
+  `UI_CONTRACT.md` v2. `seconds_remaining` rounds UP so a freshly-
+  armed kill reads `5s` rather than `4s` for the first 999 ms.
+  Old inline status-bar marker removed — the full-row red banner
+  is visually unmissable.
 
-### [UX-2] Post-mortem card (centered overlay, 30s auto-dismiss)
-- Commit SHA: 19b7efe42402266ae331e12da581b97087e5180a
-- Files changed: src/ui/panels/postmortem.rs (new),
-  src/ui/panels/mod.rs, src/ui/app.rs, src/ui/mod.rs,
-  src/ui/input.rs (and the supporting `RunRecord.stderr_lines`
-  + `Runtime::pending_postmortems` plumbing that landed earlier
-  on `audit/2026-04-29` from Builder A's prep work)
+### [UX-2] Post-mortem card (UI Contract v2 — supersedes v1)
+- Commit SHA: cc8b3cc4f24bb9e4683d1ea4f163bd5c58ddabd5
+- Files changed: src/ui/panels/postmortem.rs (rewrite for v2),
+  src/storage/run_store.rs (revert v1 stderr_lines field),
+  src/exec_wrapper.rs (drop v1 stderr_lines population),
+  src/runtime.rs (build transient PostMortem with computed
+  baseline_status), tests/postmortem_e2e.rs (rewritten for v2)
 - Smoke: scripts/manual/tui_ux_three_smoke.sh
 - Verification command (what the tester should run):
   ```
-  cargo test --release --lib ui::panels::postmortem ui::app::tests
+  cargo test --release --lib ui::panels::postmortem \
+    && cargo test --release --test postmortem_e2e
   ```
 - Expected output (last 10 lines):
   ```
   test ui::panels::postmortem::tests::build_lines_emits_required_fields_in_order ... ok
-  test ui::panels::postmortem::tests::clip_ellipsizes_long_strings ... ok
-  test ui::panels::postmortem::tests::clip_leaves_short_strings_alone ... ok
-  test ui::panels::postmortem::tests::duration_formats_at_each_band ... ok
-  test ui::panels::postmortem::tests::expired_after_window ... ok
-  test ui::panels::postmortem::tests::no_stderr_block_when_lines_absent_or_empty ... ok
-  test ui::panels::postmortem::tests::seconds_remaining_counts_down_from_thirty ... ok
+  test ui::panels::postmortem::tests::peak_gpu_memory_row_is_omitted_when_zero ... ok
+  test ui::panels::postmortem::tests::throughput_row_is_omitted_when_no_tokens_per_sec ... ok
+  test ui::panels::postmortem::tests::baseline_headlines_match_contract ... ok
+  test ui::panels::postmortem::tests::baseline_status_bands_metric_correctly ... ok
   test ui::panels::postmortem::tests::stderr_block_renders_only_when_present_and_clamps_to_three ... ok
-  test result: ok. ...
+  test result: ok. ... (panel module)
+  test result: ok. 9 passed; ... (postmortem_e2e)
   ```
-- Builder note: 30s WINDOW, 60% width clamped `[60, 100]`, fixed
-  12-row height, seven required field labels in locked order, and
-  stderr-clamp to the last 3 lines all pinned by unit tests
-  against the UI Contract. Field order test reads the labels off
-  built lines so a casual cleanup pass can't silently re-order.
-  Latest-wins replacement (no queue) per UI Contract D3.
-  AI-classified exits trigger the card; non-AI exits never do —
-  the runtime gates by `record_clone.summary.category.is_some()`.
+- Builder note: rewritten end-to-end to UI Contract v2. The card
+  now uses a transient `PostMortem` struct (display_name,
+  duration_secs, avg_cpu_pct, peak_rss_mb, peak_vram_mb,
+  tokens_per_sec, exit_reason, stderr_tail, baseline_status);
+  `RunRecord.stderr_lines` (added in v1) has been **reverted** —
+  v2 keeps stderr ephemeral. Field set is Duration / Avg CPU /
+  Peak RAM / Peak GPU memory (omitted when 0) / Throughput
+  (omitted when None) / Exited; the labelled `Compared to
+  baseline:` row from v1 is replaced by a color-coded headline
+  below the field block (red ≥20% slower, yellow ≥10% slower,
+  green ≥10% faster, muted "matches baseline", omitted entirely
+  when no baseline). Card is fixed 64 columns; height computed
+  and clamped to `[8, 22]`. Latest-wins replacement (no queue).
+  Headline bands are pinned by the contract directly, independent
+  of `RegressionConfig` thresholds — the runtime computes
+  `BaselineStatus::from_metric(tokens_per_sec_avg, baseline_mean)`
+  via a new `build_baseline_status` helper next to
+  `check_regressions`.
 
-### [UX-3] `g` keybinding for `[dashboard].url_template`
-- Commit SHA: 19b7efe42402266ae331e12da581b97087e5180a
-- Files changed: src/ui/input.rs (new `g` binding + contextual
-  `Enter` for postmortem dismiss), src/ui/mod.rs
-  (`handle_open_dashboard`), src/ui/app.rs (Action variants).
-  Supporting prep already on `audit/2026-04-29`: `Cargo.toml`
-  (`webbrowser` dep), `src/config.rs` (`DashboardConfig`),
-  `edge_monitor.toml.example`, `docs/configuration.md`.
+### [UX-3] `g` keybinding (UI Contract v2 — URL priority added)
+- Commit SHA: cc8b3cc4f24bb9e4683d1ea4f163bd5c58ddabd5
+  (earlier v1 wiring at 19b7efe — superseded by v2; v2 adds the
+  config → env var → hardcoded fallback priority order)
+- Files changed: src/ui/mod.rs (`resolve_dashboard_template` +
+  v2 status strings), tests/dashboard_keybinding_e2e.rs (3 new
+  URL-priority tests)
 - Smoke: scripts/manual/tui_ux_three_smoke.sh
 - Verification command (what the tester should run):
   ```
-  cargo test --release --lib ui::input
+  cargo test --release --test dashboard_keybinding_e2e
   ```
 - Expected output (last 10 lines):
   ```
-  test ui::input::tests::enter_dismisses_postmortem_when_visible ... ok
-  test ui::input::tests::enter_is_noop_in_normal_mode_without_postmortem ... ok
-  test ui::input::tests::esc_in_normal_mode_routes_to_app_handle_escape ... ok
-  test ui::input::tests::g_emits_open_dashboard ... ok
-  test result: ok. <N> passed; 0 failed; ...
+  test url_priority_config_beats_env_var ... ok
+  test url_priority_env_var_used_when_config_empty ... ok
+  test url_priority_hardcoded_fallback_when_both_empty ... ok
+  test substitutes_model_and_pid_into_template ... ok
+  test empty_model_substitutes_as_empty_string_not_dash ... ok
+  test template_without_substitution_tokens_is_passed_through ... ok
+  test pid_substitutes_as_decimal_integer_no_leading_zeros ... ok
+  test template_with_unrelated_curly_brace_tokens_is_left_alone ... ok
+  test result: ok. 8 passed; 0 failed; ...
   ```
-- Builder note: closes T2's V3 finding 1 (`g` previously unmapped).
-  `handle_open_dashboard` substitutes `{model}` and `{pid}` against
-  the focused row and calls `webbrowser::open`. Empty template
-  logs a `tracing::info!` hint pointing at the config; no focused
-  row logs a different hint. Browser-launch failure is logged at
-  `warn` with the URL so the operator can copy-paste even when
-  the launch itself failed. Static URLs (no substitution tokens)
-  are accepted on purpose — some users want a fixed dashboard
-  link.
+- Builder note: closes T2's V3 finding 1. `resolve_dashboard_template`
+  is `pub` (was `pub(crate)` in v1) so the integration tests can
+  pin the priority order without spinning a browser:
+    1. `[dashboard].url_template` from config (if non-empty)
+    2. `EDGE_MONITOR_GRAFANA_URL` env var (if set)
+    3. Hardcoded `http://localhost:3000/d/edge_monitor` fallback
+  Pressing `g` always opens *something* useful when a row is
+  focused — the v2 contract removed the v1 "empty-template
+  refusal" branch.
 
 ## Cross-builder requests
 

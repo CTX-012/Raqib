@@ -79,6 +79,12 @@ export BROWSER='/mnt/c/Windows/explorer.exe'
 | `--ticks <N>`         | Exit after N ticks (`0` = run until killed). Useful in CI    |
 | `--log-level <LEVEL>` | `trace` / `debug` / `info` / `warn` / `error`                |
 | `--log-format <FMT>`  | `human` (default K=V text) or `json` (one JSON object per line, `jq`-pipeable) |
+| `--log-stderr`        | Force tracing to stderr while running the TUI (default: write to log file) |
+
+Logs default to `~/.cache/edge_monitor/edge_monitor.log` when running
+the dashboard so tracing output cannot bleed into the alternate-screen
+TUI. `--no-ui` and the subcommands keep using stderr; pass
+`--log-stderr` to opt back into stderr while the TUI is active.
 
 ## History
 

@@ -59,6 +59,13 @@ struct Cli {
     #[arg(long, default_value = "human", value_parser = ["human", "json"])]
     log_format: String,
 
+    /// Force tracing logs to stderr instead of the default log file
+    /// when running the TUI. Useful for debugging the TUI itself or
+    /// when `~/.cache/edge_monitor/` is unwritable. Has no effect in
+    /// `--no-ui` mode or under subcommands (those already use stderr).
+    #[arg(long)]
+    log_stderr: bool,
+
     /// Subcommand. Defaults to running the monitor (TUI / headless) when
     /// omitted, preserving the Phase-1 invocation.
     #[command(subcommand)]
@@ -110,7 +117,12 @@ enum Commands {
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
-    init_tracing(&cli.log_level, &cli.log_format)?;
+    // TUI mode = no `--no-ui`, no subcommand, and no explicit
+    // `--log-stderr` opt-out. In that mode tracing must NOT touch
+    // stderr — the alternate-screen TUI shares the same buffer and
+    // every log line corrupts the frame. Route to a file instead.
+    let log_to_file = !cli.no_ui && cli.command.is_none() && !cli.log_stderr;
+    init_tracing(&cli.log_level, &cli.log_format, log_to_file)?;
 
     let config = load_config(cli.config.as_deref(), cli.dry_run)?;
     config.validate().context("config validation failed")?;
@@ -325,7 +337,7 @@ fn log_tick_summary(state: &RuntimeState) {
     }
 }
 
-fn init_tracing(level: &str, format: &str) -> anyhow::Result<()> {
+fn init_tracing(level: &str, format: &str, log_to_file: bool) -> anyhow::Result<()> {
     let lvl = match level.to_ascii_lowercase().as_str() {
         "trace" => Level::TRACE,
         "debug" => Level::DEBUG,
@@ -344,21 +356,56 @@ fn init_tracing(level: &str, format: &str) -> anyhow::Result<()> {
     // | jq` would otherwise see the tracing log first and choke.
     let env_filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(lvl.to_string()));
-    // ANSI escape codes are great in an interactive terminal but break
-    // grep / jq / log shippers reading piped stderr — they end up
-    // splitting tokens like `tick=1` across `tick`, an SGR sequence,
-    // and `=1`. Auto-detect via IsTerminal so live operators still get
-    // colour while CI / headless runs stay machine-readable.
-    let stderr_is_tty = std::io::IsTerminal::is_terminal(&std::io::stderr());
-    let builder = tracing_subscriber::fmt()
-        .with_env_filter(env_filter)
-        .with_target(false)
-        .with_ansi(stderr_is_tty)
-        .with_writer(std::io::stderr);
-    match format {
-        "json" => builder.json().flatten_event(true).init(),
-        // "human" or anything clap accepted (clap restricts to {human, json}).
-        _ => builder.init(),
+
+    if log_to_file {
+        // TUI owns the alternate screen, which shares the terminal
+        // buffer with stderr — any tracing line written there would
+        // smear ANSI escapes across the rendered frame. Route to a
+        // file under $HOME/.cache/edge_monitor instead. Falls back to
+        // $TMPDIR/edge_monitor when HOME is unset (containers, init).
+        let cache_dir = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .map(|h| h.join(".cache").join("edge_monitor"))
+            .unwrap_or_else(|| std::env::temp_dir().join("edge_monitor"));
+        std::fs::create_dir_all(&cache_dir)
+            .with_context(|| format!("creating log dir {}", cache_dir.display()))?;
+        let log_path = cache_dir.join("edge_monitor.log");
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+            .with_context(|| format!("opening log file {}", log_path.display()))?;
+        let builder = tracing_subscriber::fmt()
+            .with_env_filter(env_filter)
+            .with_target(false)
+            .with_ansi(false)
+            .with_writer(std::sync::Mutex::new(file));
+        match format {
+            "json" => builder.json().flatten_event(true).init(),
+            _ => builder.init(),
+        }
+        // Surface the path on stderr BEFORE the TUI takes the screen
+        // so users know where to find logs. Single line, lands above
+        // EnterAlternateScreen's clear and is preserved when the TUI
+        // exits and the original buffer is restored.
+        eprintln!("logs: {}", log_path.display());
+    } else {
+        // ANSI escape codes are great in an interactive terminal but break
+        // grep / jq / log shippers reading piped stderr — they end up
+        // splitting tokens like `tick=1` across `tick`, an SGR sequence,
+        // and `=1`. Auto-detect via IsTerminal so live operators still get
+        // colour while CI / headless runs stay machine-readable.
+        let stderr_is_tty = std::io::IsTerminal::is_terminal(&std::io::stderr());
+        let builder = tracing_subscriber::fmt()
+            .with_env_filter(env_filter)
+            .with_target(false)
+            .with_ansi(stderr_is_tty)
+            .with_writer(std::io::stderr);
+        match format {
+            "json" => builder.json().flatten_event(true).init(),
+            // "human" or anything clap accepted (clap restricts to {human, json}).
+            _ => builder.init(),
+        }
     }
     Ok(())
 }

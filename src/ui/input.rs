@@ -32,6 +32,13 @@ pub fn translate(key: KeyEvent, app: &App) -> Action {
             _ => Action::None,
         },
         Mode::Normal => match key.code {
+            // Esc cascades through overlays / armed kill. App::handle_escape
+            // owns the priority order; we just route the press there.
+            KeyCode::Esc => Action::Escape,
+            // Enter dismisses the post-mortem card when one is visible.
+            // Otherwise no-op (Enter has no other Normal-mode binding
+            // today; the help text doesn't promise anything either).
+            KeyCode::Enter if app.postmortem().is_some() => Action::DismissPostmortem,
             KeyCode::Char('q') => Action::Quit,
             KeyCode::Char('?') => Action::ToggleHelp,
             KeyCode::Char('d') => Action::ToggleDryRun,
@@ -39,6 +46,9 @@ pub fn translate(key: KeyEvent, app: &App) -> Action {
             KeyCode::Char('h') => Action::OpenHistory,
             KeyCode::Char('/') => Action::StartFilter,
             KeyCode::Char('v') => Action::ToggleDetailMode,
+            // [UX-3] open dashboard. Refusal cases (no row, empty
+            // template) are handled in `handle_open_dashboard`.
+            KeyCode::Char('g') => Action::OpenDashboard,
             KeyCode::Char('j') | KeyCode::Down => Action::SelectNext,
             KeyCode::Char('K') | KeyCode::Up => Action::SelectPrev,
             KeyCode::Tab => Action::FocusNext,
@@ -135,5 +145,65 @@ mod tests {
             translate(key(KeyCode::Char('v')), &app),
             Action::ToggleDetailMode,
         );
+    }
+
+    #[test]
+    fn g_emits_open_dashboard() {
+        let app = App::new();
+        assert_eq!(
+            translate(key(KeyCode::Char('g')), &app),
+            Action::OpenDashboard,
+        );
+    }
+
+    #[test]
+    fn esc_in_normal_mode_routes_to_app_handle_escape() {
+        let app = App::new();
+        assert_eq!(translate(key(KeyCode::Esc), &app), Action::Escape);
+    }
+
+    /// Enter dismisses the post-mortem card when a card is visible;
+    /// otherwise it's a no-op (filter-mode Enter is handled earlier).
+    #[test]
+    fn enter_dismisses_postmortem_when_visible() {
+        use crate::lifecycle::LifecycleSummary;
+        use crate::model::AICategory;
+        use crate::storage::run_store::RunRecord;
+        use crate::ui::panels::postmortem::PostMortemCard;
+        use chrono::Utc;
+        use std::time::Instant;
+
+        let mut app = App::new();
+        let summary = LifecycleSummary {
+            pid: 1,
+            name: "python".into(),
+            category: Some(AICategory::Inference),
+            model_name: Some("phi3-mini".into()),
+            spawn_time: Utc::now(),
+            exit_time: Utc::now(),
+            uptime_secs: 1,
+            exit_code: Some(0),
+            signal: None,
+            avg_cpu_pct: 0.0,
+            peak_cpu_pct: 0.0,
+            peak_rss_mb: 0,
+            peak_vram_mb: 0,
+            samples: 1,
+        };
+        app.show_postmortem(PostMortemCard {
+            record: RunRecord::from_summary(summary),
+            worst_regression: None,
+            shown_at: Instant::now(),
+        });
+        assert_eq!(
+            translate(key(KeyCode::Enter), &app),
+            Action::DismissPostmortem,
+        );
+    }
+
+    #[test]
+    fn enter_is_noop_in_normal_mode_without_postmortem() {
+        let app = App::new();
+        assert_eq!(translate(key(KeyCode::Enter), &app), Action::None);
     }
 }

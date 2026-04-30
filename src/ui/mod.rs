@@ -10,7 +10,7 @@
 
 pub mod app;
 pub mod input;
-mod panels;
+pub mod panels;
 
 use std::io;
 use std::sync::Arc;
@@ -26,6 +26,7 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 
 use crate::runtime::Runtime;
+use crate::ui::panels::armed_banner::ArmedKill;
 
 use app::{Action, App};
 
@@ -92,6 +93,16 @@ fn run_loop(
         }
 
         if last_render.elapsed() >= render {
+            // Drop expired armed-kill / post-mortem snapshots before
+            // drawing so the banner doesn't render with `0s` remaining
+            // for one extra frame.
+            app.tick_overlays();
+            // Drain any pending post-mortem cards from the runtime so
+            // an AI exit between user keystrokes still surfaces. Done
+            // inside the render budget so we're not racing the tick.
+            for card in runtime.drain_postmortems() {
+                app.show_postmortem(card);
+            }
             terminal.draw(|f| panels::render(f, runtime.state(), &app))?;
             last_render = Instant::now();
         }
@@ -123,7 +134,23 @@ fn apply_action(action: Action, runtime: &mut Runtime, app: &mut App) {
                     }
                     app.disarm_kill();
                 } else {
-                    app.arm_kill(pid);
+                    // Resolve name + allowlist status at the moment
+                    // of the keypress so the banner renders without
+                    // having to re-walk the runtime state every frame.
+                    let state = runtime.state();
+                    let proc = state.annotated.iter().find(|p| p.pid == pid);
+                    let name = proc.map(|p| p.name.clone()).unwrap_or_default();
+                    let allowlisted = runtime
+                        .config()
+                        .policy
+                        .allowlist
+                        .contains(&name);
+                    app.arm_kill(ArmedKill {
+                        pid,
+                        name,
+                        allowlisted,
+                        armed_at: Instant::now(),
+                    });
                 }
             }
         }
@@ -148,6 +175,66 @@ fn apply_action(action: Action, runtime: &mut Runtime, app: &mut App) {
         }
         Action::CloseHistory => app.close_history(),
         Action::ToggleDetailMode => app.toggle_detail_mode(),
+        Action::OpenDashboard => handle_open_dashboard(runtime, app),
+        Action::DismissPostmortem => app.dismiss_postmortem(),
+        Action::Escape => {
+            // Cascading priority is in `App::handle_escape`. Filter
+            // mode's Esc is handled earlier by `input::translate`
+            // (CancelFilter), so we never get here in filter mode.
+            app.handle_escape();
+        }
         Action::None => {}
     }
+}
+
+/// `g` keybinding handler ([UX-3]). Pure dispatch — `compute_dashboard_url`
+/// does the substitution arithmetic and returns the URL or a
+/// status-bar message describing why the open didn't happen.
+fn handle_open_dashboard(runtime: &Runtime, app: &App) {
+    let template = &runtime.config().dashboard.url_template;
+    let Some(pid) = app.selected_pid(runtime.state()) else {
+        // Empty-template + no-row both surface as "no row" if both are
+        // true, but the no-row hint is the more actionable message —
+        // "fix your config" is moot if there's no workload to open
+        // anyway. Match the UI Contract by precedence.
+        if template.is_empty() {
+            tracing::info!(
+                "dashboard keybinding requires [dashboard].url_template; \
+                 see edge_monitor.toml.example for the template format"
+            );
+        } else {
+            tracing::info!("no workload focused — select a row first");
+        }
+        return;
+    };
+    if template.is_empty() {
+        tracing::info!(
+            "dashboard keybinding requires [dashboard].url_template; \
+             see edge_monitor.toml.example for the template format"
+        );
+        return;
+    }
+    let state = runtime.state();
+    let model = state
+        .annotated
+        .iter()
+        .find(|p| p.pid == pid)
+        .and_then(|p| p.model_name.clone());
+    let url = compute_dashboard_url(template, model.as_deref(), pid);
+    match webbrowser::open(&url) {
+        Ok(_) => tracing::info!(%url, "opened dashboard in browser"),
+        Err(e) => tracing::warn!(%url, error = %e, "failed to open dashboard"),
+    }
+}
+
+/// Pure substitution: applies `{model}` and `{pid}` against the
+/// template. `None` for `model` substitutes empty (per UI Contract —
+/// not a dash, not a placeholder; templates that include `{model}`
+/// can target a fallback dashboard with a literal `var-model=` query
+/// param when the value is empty). Exposed so the integration tests
+/// can pin the substitution rules without spinning a browser.
+pub fn compute_dashboard_url(template: &str, model: Option<&str>, pid: u32) -> String {
+    template
+        .replace("{model}", model.unwrap_or(""))
+        .replace("{pid}", &pid.to_string())
 }

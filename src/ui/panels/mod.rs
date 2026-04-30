@@ -2,11 +2,13 @@
 //! is shared state — callers shouldn't be able to render a panel into the
 //! wrong region.
 
+pub mod armed_banner;
 mod audit;
 mod completed;
 mod culprits;
 mod help;
 mod history_overlay;
+pub mod postmortem;
 mod registry;
 mod rogues;
 mod vitals;
@@ -22,22 +24,42 @@ use crate::runtime::RuntimeState;
 use super::app::App;
 
 pub fn render(f: &mut Frame, state: &RuntimeState, app: &App) {
-    let area = f.area();
+    let full = f.area();
+
+    // [UX-1] — reserve the top row for the armed-kill banner ONLY when
+    // a kill is armed. Allocating an empty row otherwise would leave
+    // a stale red strip on screen between arms.
+    let banner_height = if app.armed_kill().is_some() { 1 } else { 0 };
+    let split = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(banner_height), Constraint::Min(0)])
+        .split(full);
+    let (banner_area, body_area) = (split[0], split[1]);
+
+    if let Some(armed) = app.armed_kill() {
+        armed_banner::render(f, banner_area, armed);
+    }
 
     if app.detail_mode() {
-        render_detail(f, area, state, app);
+        render_detail(f, body_area, state, app);
     } else {
-        render_default(f, area, state, app);
+        render_default(f, body_area, state, app);
     }
 
     if app.show_help() {
-        help::render(f, area);
+        help::render(f, body_area);
     }
 
-    // History overlay last so it floats above everything (including the
-    // help panel — though the input layer prevents both from being open
-    // simultaneously).
-    history_overlay::render(f, area, app);
+    // History overlay sits above panels but below the post-mortem
+    // card (see below) — though the input layer prevents both from
+    // being open simultaneously.
+    history_overlay::render(f, body_area, app);
+
+    // [UX-2] — post-mortem card renders LAST so it floats above
+    // everything else, including the help / history overlays.
+    if let Some(card) = app.postmortem() {
+        postmortem::render(f, full, card);
+    }
 }
 
 /// Default view — what the operator sees on launch. Drops the
@@ -121,15 +143,10 @@ fn render_status_bar(f: &mut Frame, area: Rect, state: &RuntimeState, app: &App)
         spans.push(Span::raw(format!("(filter: {}) ", app.filter())));
     }
 
-    if let Some(pid) = app.armed_kill_pid() {
-        spans.push(Span::styled(
-            format!(" ARMED kill PID={} (press k to confirm) ", pid),
-            Style::default()
-                .bg(Color::Red)
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD),
-        ));
-    }
+    // The full-row armed-kill banner ([UX-1]) supersedes the old
+    // inline status-bar marker. Leaving them both would double-render
+    // the same state and confuse the operator about which one to
+    // watch.
 
     let para = Paragraph::new(Line::from(spans));
     f.render_widget(para, area);

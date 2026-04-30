@@ -1,6 +1,8 @@
 use crate::model::AICategory;
 use crate::runtime::RuntimeState;
 use crate::storage::RunRecord;
+use crate::ui::panels::armed_banner::ArmedKill;
+use crate::ui::panels::postmortem::PostMortemCard;
 
 /// Which panel currently owns selection / cursor focus.
 /// Only the three list panels accept selection; vitals and audit are read-only.
@@ -63,6 +65,18 @@ pub enum Action {
     /// Recent actions) on or off. They stay hidden by default so the
     /// main view is just AI Workloads + Recent runs.
     ToggleDetailMode,
+    /// `g` keybinding ([UX-3]). Open `[dashboard].url_template` in the
+    /// default browser with `{model}` and `{pid}` substituted against
+    /// the focused row.
+    OpenDashboard,
+    /// Dismiss the post-mortem card ([UX-2]). Triggered by `Enter`
+    /// when a card is visible; `Esc` also dismisses via the cascading
+    /// priority handled in `apply_action`.
+    DismissPostmortem,
+    /// Cascading-priority Esc: dismisses post-mortem first, then
+    /// disarms a pending kill, then closes any other overlay. Filter
+    /// mode handles its own Esc before this runs.
+    Escape,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -89,8 +103,14 @@ pub struct App {
     quit_requested: bool,
     mode: Mode,
     filter: String,
-    /// Two-stage manual-kill: when `Some(pid)`, pressing `k` again sends.
-    armed_kill: Option<u32>,
+    /// Two-stage manual-kill ([UX-1]). `Some(_)` after the first `k`
+    /// press; auto-disarms after `ArmedKill::WINDOW`. Carries pid +
+    /// name + allowlisted so the banner can render without re-reading
+    /// the runtime state on every frame.
+    armed_kill: Option<ArmedKill>,
+    /// Most recent post-mortem-eligible exit ([UX-2]). Latest wins;
+    /// dismissed by Esc, Enter, or auto at `PostMortemCard::WINDOW`.
+    postmortem: Option<PostMortemCard>,
     /// `Some(_)` while the history overlay is open. Snapshotted on key
     /// press so subsequent ticks don't replace the records the user is
     /// reading.
@@ -119,6 +139,7 @@ impl App {
             mode: Mode::Normal,
             filter: String::new(),
             armed_kill: None,
+            postmortem: None,
             history: None,
             detail_mode: false,
         }
@@ -146,7 +167,19 @@ impl App {
         &self.filter
     }
     pub fn armed_kill_pid(&self) -> Option<u32> {
-        self.armed_kill
+        self.armed_kill.as_ref().map(|a| a.pid)
+    }
+
+    /// Full armed-kill state for the banner panel. `None` when no kill
+    /// is armed.
+    pub fn armed_kill(&self) -> Option<&ArmedKill> {
+        self.armed_kill.as_ref()
+    }
+
+    /// Most recent post-mortem-eligible exit. `None` when no card is
+    /// active. Used by `panels::render` to draw the centered overlay.
+    pub fn postmortem(&self) -> Option<&PostMortemCard> {
+        self.postmortem.as_ref()
     }
 
     pub fn request_quit(&mut self) {
@@ -215,11 +248,72 @@ impl App {
         self.selected = 0;
     }
 
-    pub fn arm_kill(&mut self, pid: u32) {
-        self.armed_kill = Some(pid);
+    /// Arm a kill on `armed`. Replaces any prior arm (e.g. user moves
+    /// focus and re-arms on a new row). The caller is expected to
+    /// resolve `name` + `allowlisted` against the runtime at the time
+    /// of the keypress so the banner doesn't have to re-resolve them
+    /// on every render frame.
+    pub fn arm_kill(&mut self, armed: ArmedKill) {
+        self.armed_kill = Some(armed);
     }
     pub fn disarm_kill(&mut self) {
         self.armed_kill = None;
+    }
+
+    /// Push a new post-mortem snapshot. Latest wins; any existing card
+    /// is replaced (no queue). Triggered from the runtime's exit hook
+    /// and from the exec wrapper's exit path.
+    pub fn show_postmortem(&mut self, card: PostMortemCard) {
+        self.postmortem = Some(card);
+    }
+
+    /// Clear the post-mortem card. Triggered by `Enter`, by the
+    /// cascading `Esc` priority, or by `tick_overlays` when the
+    /// 30-second window lapses.
+    pub fn dismiss_postmortem(&mut self) {
+        self.postmortem = None;
+    }
+
+    /// Drop expired armed-kill / post-mortem snapshots. Called once
+    /// per render tick (10 Hz). No I/O, no side effects beyond the
+    /// `App`'s own state — the loop runs even when the user isn't
+    /// pressing keys, so countdown displays decay smoothly.
+    pub fn tick_overlays(&mut self) {
+        if let Some(armed) = &self.armed_kill
+            && armed.is_expired()
+        {
+            self.armed_kill = None;
+        }
+        if let Some(card) = &self.postmortem
+            && card.is_expired()
+        {
+            self.postmortem = None;
+        }
+    }
+
+    /// Cascading-priority Escape handler ([UX-2] / [UX-1]).
+    /// Priority: post-mortem card → armed kill → other overlay
+    /// (history, help). Returns `true` when the press was consumed
+    /// by one of these branches; the caller may use the return to
+    /// skip default Esc behavior.
+    pub fn handle_escape(&mut self) -> bool {
+        if self.postmortem.is_some() {
+            self.dismiss_postmortem();
+            return true;
+        }
+        if self.armed_kill.is_some() {
+            self.disarm_kill();
+            return true;
+        }
+        if self.history.is_some() {
+            self.close_history();
+            return true;
+        }
+        if self.show_help {
+            self.show_help = false;
+            return true;
+        }
+        false
     }
 
     pub fn open_history(&mut self, model: String, records: Vec<RunRecord>) {
@@ -356,11 +450,20 @@ mod tests {
         assert_eq!(app.selected_index(), 0);
     }
 
+    fn fake_armed(pid: u32, name: &str, allowlisted: bool) -> ArmedKill {
+        ArmedKill {
+            pid,
+            name: name.into(),
+            allowlisted,
+            armed_at: std::time::Instant::now(),
+        }
+    }
+
     #[test]
     fn leaving_detail_mode_disarms_pending_kill() {
         let mut app = App::new();
         app.toggle_detail_mode();
-        app.arm_kill(99);
+        app.arm_kill(fake_armed(99, "ollama", false));
         assert_eq!(app.armed_kill_pid(), Some(99));
         // Returning to default mode hides the panel where the operator
         // armed the kill — clearing the arm is the safe default; an
@@ -416,7 +519,7 @@ mod tests {
     #[test]
     fn arm_then_confirm_kill_clears_arm() {
         let mut app = App::new();
-        app.arm_kill(42);
+        app.arm_kill(fake_armed(42, "ollama", false));
         assert_eq!(app.armed_kill_pid(), Some(42));
         app.disarm_kill();
         assert_eq!(app.armed_kill_pid(), None);
@@ -428,9 +531,96 @@ mod tests {
         // Tab is a no-op in default mode, so move into detail mode
         // first; that's the only mode where focus actually changes.
         app.toggle_detail_mode();
-        app.arm_kill(42);
+        app.arm_kill(fake_armed(42, "ollama", false));
         app.focus_next();
         assert_eq!(app.armed_kill_pid(), None);
+    }
+
+    #[test]
+    fn arm_kill_records_pid_and_name_and_allowlisted() {
+        let mut app = App::new();
+        app.arm_kill(fake_armed(4242, "ollama", false));
+        let armed = app.armed_kill().expect("should be armed");
+        assert_eq!(armed.pid, 4242);
+        assert_eq!(armed.name, "ollama");
+        assert!(!armed.allowlisted);
+        // Just-armed window has 5 integer seconds remaining.
+        assert_eq!(armed.seconds_remaining(), 5);
+    }
+
+    #[test]
+    fn esc_disarms_kill_when_no_postmortem_present() {
+        let mut app = App::new();
+        app.arm_kill(fake_armed(4242, "ollama", false));
+        let consumed = app.handle_escape();
+        assert!(consumed);
+        assert!(app.armed_kill().is_none());
+    }
+
+    #[test]
+    fn esc_dismisses_postmortem_in_priority_over_disarm() {
+        let mut app = App::new();
+        app.arm_kill(fake_armed(4242, "ollama", false));
+        app.show_postmortem(test_card());
+        let consumed = app.handle_escape();
+        // Cascading priority: card cleared first; armed kill survives
+        // this Esc and would need a second Esc to clear.
+        assert!(consumed);
+        assert!(app.postmortem().is_none());
+        assert!(
+            app.armed_kill().is_some(),
+            "Esc should clear card before disarming",
+        );
+    }
+
+    #[test]
+    fn tick_overlays_drops_expired_armed_kill() {
+        let mut app = App::new();
+        app.arm_kill(ArmedKill {
+            pid: 4242,
+            name: "ollama".into(),
+            allowlisted: false,
+            // Arm 6s ago; the 5s window has already lapsed.
+            armed_at: std::time::Instant::now() - std::time::Duration::from_secs(6),
+        });
+        app.tick_overlays();
+        assert!(app.armed_kill().is_none());
+    }
+
+    #[test]
+    fn tick_overlays_drops_expired_postmortem() {
+        let mut app = App::new();
+        let mut card = test_card();
+        card.shown_at = std::time::Instant::now() - std::time::Duration::from_secs(31);
+        app.show_postmortem(card);
+        app.tick_overlays();
+        assert!(app.postmortem().is_none());
+    }
+
+    fn test_card() -> PostMortemCard {
+        use crate::lifecycle::LifecycleSummary;
+        use chrono::Utc;
+        let summary = LifecycleSummary {
+            pid: 1,
+            name: "python".into(),
+            category: Some(AICategory::Inference),
+            model_name: Some("phi3-mini".into()),
+            spawn_time: Utc::now(),
+            exit_time: Utc::now(),
+            uptime_secs: 42,
+            exit_code: Some(0),
+            signal: None,
+            avg_cpu_pct: 0.0,
+            peak_cpu_pct: 0.0,
+            peak_rss_mb: 0,
+            peak_vram_mb: 0,
+            samples: 1,
+        };
+        PostMortemCard {
+            record: RunRecord::from_summary(summary),
+            worst_regression: None,
+            shown_at: std::time::Instant::now(),
+        }
     }
 
     #[test]

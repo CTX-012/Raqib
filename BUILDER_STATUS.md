@@ -33,7 +33,7 @@ to history) and via reading concurrent worktrees.
 
 ## Ready for Test
 
-### [A-1] S.3 — `expect()` rule reconciled with code
+### [A-1] S.3 — `expect()` rule reconciled with code  [T1: PASS 2026-04-29T11:32Z]
 - Commit SHA: c9fe87c1a0889d1c28139840ad749659634ce9b1
 - Files changed: CLAUDE.md, CHANGELOG.md, src/storage/log_store.rs,
   src/telemetry/samplers/vllm_prometheus.rs,
@@ -79,7 +79,7 @@ to history) and via reading concurrent worktrees.
   it does walk every file — the deliberate-violation check verified
   it isn't a stub. No production behaviour changed.
 
-### [A-2] S.2 — `--log-format json` flag
+### [A-2] S.2 — `--log-format json` flag  [T1: PASS 2026-04-29T11:32Z]
 - Commit SHA: 84e413390df7f24587e05d143c122e7543fb377a
 - Files changed: CHANGELOG.md, scripts/manual/log_format_smoke.sh
   (new), tests/log_format.rs (new). Note: the clap field and
@@ -119,7 +119,7 @@ to history) and via reading concurrent worktrees.
   Linux box; Tester 2 should re-run `cargo test --release --test
   log_format` and confirm both subprocess tests pass.
 
-### [A-3] S.0.8 — SIGTERM clean shutdown re-verified and patched
+### [A-3] S.0.8 — SIGTERM clean shutdown re-verified and patched  [T1: PASS 2026-04-29T11:32Z]
 - Commit SHA: e4a7e7455e864302d42c11259888de2f439dbeef
 - Files changed: Cargo.toml, Cargo.lock, src/main.rs (comment only on
   install_shutdown_handler), CHANGELOG.md,
@@ -168,7 +168,7 @@ to history) and via reading concurrent worktrees.
   some WSL / container setups). Not caused by this commit; flagged
   in Cross-builder requests below.
 
-### [A-4] Tier 3.4 — concurrent-request awareness
+### [A-4] Tier 3.4 — concurrent-request awareness  [T1: FAIL 2026-04-29T11:32Z]
 - Commit SHA: 959c477b53e62cc6c732b35f1ac1f28f37a6b4bd
 - Files changed: CHANGELOG.md, src/telemetry/concurrent_requests.rs
   (new module), src/telemetry/mod.rs (export), src/telemetry/source.rs
@@ -245,7 +245,34 @@ to history) and via reading concurrent worktrees.
     concern from the data path I shipped. Cross-builder request
     filed below.
 
-### [A-5] V1 fix — Ollama tokens/sec via stdout_parser `eval rate` regex
+#### Failure note [T1, 2026-04-29T11:32Z]
+- Failing criterion: floor #3 — `cargo test --release` exited 1 on
+  first cold run (test infrastructure flake unrelated to [A-4]'s
+  scope).
+- Evidence:
+  ```
+  test telemetry::rapl::tests::delta_math_handles_wraparound ... FAILED
+  test result: FAILED. 323 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.42s
+  failures:
+      telemetry::rapl::tests::delta_math_handles_wraparound
+  ```
+- Re-run characterisation: 2 of 3 subsequent `cargo test --release`
+  invocations passed (344/0). The failing test asserts `watts >
+  1000` from a 20 ms sleep + a 50 J synthetic delta; under heavy
+  parallel scheduler pressure the elapsed wall-clock can exceed
+  the budget, dropping watts under the threshold. Targeted [A-4]
+  smoke (`scripts/manual/concurrent_requests_smoke.sh`) is exit 0
+  with all 3 e2e tests + 1 vLLM unit test green; verify-edge-
+  monitor.sh is exit 0. Floor failure is in `src/telemetry/
+  rapl.rs` (Tier 2.1 surface) and would block any entry whose
+  cargo test happens to land cold under load — recommend the
+  rapl test be made deterministic (mock the clock, or assert on
+  energy not watts) and [A-4] re-filed.
+- Reproduction command:
+  `git checkout 959c477b53e62cc6c732b35f1ac1f28f37a6b4bd && cargo test --release`
+  (race against the rapl wraparound test — 1 in ~3 cold runs).
+
+### [A-5] V1 fix — Ollama tokens/sec via stdout_parser `eval rate` regex  [T1: FAIL 2026-04-29T11:32Z]
 - Commit SHA: b33fd28093f9fe3b328e9b2c4cbdf1b840f40c38
 - Files changed: src/telemetry/samplers/stdout_parser.rs (new
   regex factory + parse-line wiring + 2 new unit tests),
@@ -321,7 +348,27 @@ to history) and via reading concurrent worktrees.
     regex layer but not the exec→parser→accumulator wire. The L1
     re-run is the launch-readiness gate.
 
-### [A-6] UX rename — operator-facing labels in plain language
+#### Failure note [T1, 2026-04-29T11:32Z]
+- Failing criterion: floor #3 — same `delta_math_handles_wraparound`
+  rapl flake as [A-4] hit on first cold cargo test invocation at
+  this SHA (323/1).
+- Evidence:
+  ```
+  test telemetry::rapl::tests::delta_math_handles_wraparound ... FAILED
+  test result: FAILED. 325 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.71s
+  ```
+- Re-run: `cargo test --release` second invocation at this SHA
+  reports 346/0. Targeted `scripts/manual/ollama_tps_smoke.sh`
+  exits 0 with a real grep against T2's captured fixtures
+  (`/tmp/v1_trial_{1,2,3}.out` → 6.97 / 2.82 / 2.34 tokens/s) and
+  verify-edge-monitor.sh exits 0. The Ollama regex is correct in
+  isolation; the floor failure is the same Tier 2.1 rapl test
+  flake described under [A-4]. Re-file [A-5] once the rapl test
+  is made deterministic.
+- Reproduction command:
+  `git checkout b33fd28093f9fe3b328e9b2c4cbdf1b840f40c38 && cargo test --release`
+
+### [A-6] UX rename — operator-facing labels in plain language  [T1: PASS 2026-04-29T11:32Z]
 - Commit SHA: 6f7b2298567dcd4646a4893dfcce3956a709087f
 - Files changed: src/ui/panels/{registry,rogues,culprits,audit,
   completed,vitals}.rs, src/main.rs (headless tracing — drops
@@ -458,7 +505,7 @@ to history) and via reading concurrent worktrees.
     be re-run on this SHA — the default-mode panel-count check
     will need updating from 6 to 3.
 
-### [B-1] CHANGELOG.md backfill for Tier 1.2d exec, 2.1–2.3, 3.1–3.3, 3.5–3.7
+### [B-1] CHANGELOG.md backfill for Tier 1.2d exec, 2.1–2.3, 3.1–3.3, 3.5–3.7  [T1: PASS 2026-04-29T11:32Z]
 - Commit SHA: 363769c5256633a4528916ebda2631b83ea46663
   (follow-up SHA `f0dfeb9` refreshes the test-count footer after
   Builder C's [C-1] prune fix landed; tester should review HEAD's
@@ -478,7 +525,7 @@ to history) and via reading concurrent worktrees.
   (`0cc1b14`, `cf73ead`, `1f36487`, `2ccbe73`, `47cb990`, `83e299f`,
   `95baf8b`, `a532928`, `0e3b518`, `4ba1bfc`).
 
-### [B-2] FEATURES.md rewrite
+### [B-2] FEATURES.md rewrite  [T1: FAIL 2026-04-29T11:32Z]
 - Commit SHA: 1a6454c9e70dd1d0507dcd8f410ee9624d69a2a4
   (follow-up SHA `f0dfeb9` refreshes the test-count paragraph after
   [C-1] landed)
@@ -499,7 +546,37 @@ to history) and via reading concurrent worktrees.
   "Remaining gaps for v0.1.0"; everything else has moved out of
   "what this does not do".
 
-### [C-1] F.1.10 — `keep_runs_per_model` prune logic on `RunStore::append`
+#### Failure note [T1, 2026-04-29T11:32Z]
+- Failing criterion: targeted #5 — FEATURES.md test-count claim at
+  the listed Commit SHA does not match `cargo test --release`.
+- Evidence (at SHA 1a6454c):
+  ```
+  FEATURES.md:453-454 claims:
+    "312 lib unit + 5 history-CLI + 3 pipeline + 2 governor
+     proptest = 322 tests" (and "311 of the 312 lib unit tests pass")
+  cargo test --release at this SHA reports:
+    AGGREGATE: passed=325 failed=0
+    (312 lib + 0 main + 3 governor_pid_reuse + 2 governor_properties +
+     5 history_cli + 3 pipeline_end_to_end)
+  ```
+- Root cause: FEATURES.md omits the `governor_pid_reuse` 3-test
+  suite (322 vs 325). The builder explicitly anticipated this and
+  filed follow-up SHA `f0dfeb9` ("docs: refresh test counts after
+  Builder C prune fix landed") which rewrites the paragraph to
+  "327 tests" — but that itself anticipates [A-1]'s expect-rule
+  guard test landing at c9fe87c, so f0dfeb9's claim is also
+  forward-looking. The canonical Commit SHA in the schema
+  (1a6454c) is what gets verified, and at that SHA the count
+  claim does not match the binary.
+- Reproduction command:
+  `git checkout 1a6454c9e70dd1d0507dcd8f410ee9624d69a2a4 && cargo test --release | grep -c '^test result' && grep -A1 'cargo test --release' FEATURES.md | head -3`
+- Suggested remediation: re-file [B-2] with Commit SHA pointing at
+  whichever HEAD has the true post-flux test count (currently
+  [B-5]'s 2bce1b3 also fails the same check; the chain of
+  forward-referencing means a stable count requires a SHA that
+  freezes after all sibling work has landed).
+
+### [C-1] F.1.10 — `keep_runs_per_model` prune logic on `RunStore::append`  [T1: PASS 2026-04-29T11:32Z]
 - Commit SHA: 5c3ec5cc734c08b9885fb0f3f60152fb49dabaf9
 - Files changed: src/storage/run_store.rs, src/runtime.rs (one-line
   wiring of config.storage.keep_runs_per_model into the opened store),
@@ -531,7 +608,7 @@ to history) and via reading concurrent worktrees.
   `prune_with_limit_two_leaves_two_files_on_disk` confirms 10
   appends with limit=2 leave exactly 2 record files on disk.
 
-### [C-2] F.1 — 1000-iteration property test for `RunStore`
+### [C-2] F.1 — 1000-iteration property test for `RunStore`  [T1: FAIL 2026-04-29T11:32Z]
 - Commit SHA: 78697712e7ce2128d2835b391d76b84adeaeaa78
 - Files changed: src/storage/run_store.rs (new `prop_tests` module),
   proptest-regressions/storage/run_store.txt (added in [C-4] commit
@@ -570,7 +647,36 @@ to history) and via reading concurrent worktrees.
   `proptest-regressions/storage/run_store.txt` and re-runs first on
   every future invocation.
 
-### [C-3] F.3.4 — Warn-tier (12%) + boundary regression matrix
+#### Failure note [T1, 2026-04-29T11:32Z]
+- Failing criterion: floor #4 — `verify-edge-monitor.sh` exited 1
+  (S1 launch blocker) on first run at this SHA.
+- Evidence:
+  ```
+  Audit complete in 0.4 minutes
+    PASS: 21   FAIL: 3   WARN: 6   SKIP: 2
+  ⚠ 1 S0/S1 LAUNCH BLOCKER(S) — see report
+  - **[G.1]** (S1) Prometheus /metrics serves valid output —
+    Endpoint responds but content sparse: 4 metrics, 13 HELP.
+  ```
+- Re-run: second invocation at the same SHA exited 0 (G.1 PASS).
+  The G.1 check fails when the binary's `/metrics` reply has
+  fewer than 5 metric value lines — environmentally sensitive to
+  whether any process classified as AI was sampled during the
+  audit's headless run. Targeted [C-2] check
+  (`cargo test --release --lib storage::run_store::prop_tests::
+  append_recent_invariants -- --nocapture`) PASSED with the
+  required `passed 1000 cases` line; cargo test floor was clean
+  (327/0). The [C-2] entry's actual scope (1000-iter proptest) is
+  correct.
+- Reproduction command:
+  `git checkout 78697712e7ce2128d2835b391d76b84adeaeaa78 && bash verify-edge-monitor.sh`
+- Suggested remediation: this is a Tier 2.3 / verify-script
+  threshold issue, not [C-2]'s scope. Either lower G.1's
+  metric-line floor below 5, or have the verify script first run
+  a brief workload that populates per-PID metrics before scraping.
+  Re-file [C-2] once the verify-script flake is closed.
+
+### [C-3] F.3.4 — Warn-tier (12%) + boundary regression matrix  [T1: PASS 2026-04-29T11:32Z]
 - Commit SHA: 3ec02724ffa827ded3948b3139571eed43e4dcad
 - Files changed: src/analysis/compare.rs (tests only)
 - New tests added:
@@ -603,7 +709,7 @@ to history) and via reading concurrent worktrees.
   `10.01% (just above warn): expected regression, got none` —
   exactly the kind of message a reviewer can act on.
 
-### [C-4] F.1.7 — write-rejection / disk-full path on `append`
+### [C-4] F.1.7 — write-rejection / disk-full path on `append`  [T1: FAIL 2026-04-29T11:32Z]
 - Commit SHA: c6a832ac8363d73d1ff5ba36266c2a80e3eb264e
   (follow-up SHA in HEAD adds a runtime probe that skips the test
   cleanly on filesystems where chmod doesn't actually deny writes
@@ -640,7 +746,36 @@ to history) and via reading concurrent worktrees.
   confirmed the test fails with `"append should fail when the day
   dir is read-only: <uuid>"`; restored.
 
-### [C-5] F.3.8 — Robust baseline (median + outlier flag)
+#### Failure note [T1, 2026-04-29T11:32Z]
+- Failing criterion: floor #4 — `verify-edge-monitor.sh` exited 1
+  on 3 of 3 runs at this SHA with G.1 S1 blocker.
+- Evidence:
+  ```
+  Audit complete in 0.5 minutes
+    PASS: 18   FAIL: 4   WARN: 4   SKIP: 2
+  ⚠ 2 S0/S1 LAUNCH BLOCKER(S) — see report
+  - **[B.1]** (S0) cargo test runs and reports results — Could
+    not parse any test result lines. Test infrastructure broken.
+  - **[G.1]** (S1) Prometheus /metrics serves valid output —
+    Endpoint responds but content sparse: 4 metrics, 13 HELP.
+  ```
+  Subsequent re-runs: G.1 stayed RED 3/3 (consistent 4 metric
+  lines vs verify-script threshold ≥5). B.1 only flaked on the
+  first run. Targeted [C-4] verification PASSED — `cargo test
+  --release --lib append_returns_err_when_filesystem_rejects_write`
+  exits 0 with the test running its full chmod-readonly setup,
+  asserting on path-context error message AND in-memory state
+  consistency (NOT a weak `assert!(.is_err())` — passes the
+  charter's "real tmpfs setup or mock at writer trait" intent).
+- Reproduction command:
+  `git checkout c6a832ac8363d73d1ff5ba36266c2a80e3eb264e && bash verify-edge-monitor.sh`
+- Suggested remediation: same as [C-2] — verify-script G.1
+  threshold is environmentally sensitive (per-PID metrics only
+  emit when AI processes are sampled). Either lower the threshold
+  or have G.1 spawn a brief test workload first. Re-file [C-4]
+  once that's fixed.
+
+### [C-5] F.3.8 — Robust baseline (median + outlier flag)  [T1: PASS 2026-04-29T11:32Z]
 - Commit SHA: b4ddd150e512d0c72694dea0d7a4c8882c0f0ef5
 - Files changed: src/analysis/compare.rs (impl + test),
   src/storage/run_store.rs, src/runtime.rs, src/compare.rs (the
@@ -766,7 +901,97 @@ to history) and via reading concurrent worktrees.
   to copy edits; if you tighten the messages further, just keep
   the three contract parts and it'll stay green.
 
-### [B-3] edge_monitor.toml.example + docs/configuration.md [telemetry] section
+### [D-2] DESIGN_HANDOFF Gap 14 — user-facing empty states + first-run teaching
+- Commit SHA: 203760a3dc7702c44fcc459232da837959d402cf
+- Files changed: src/history.rs, src/compare.rs, src/main.rs,
+  src/platform/gpu_nvidia.rs, src/ui/panels/registry.rs,
+  tests/history_cli.rs
+- New tests added:
+    - history::tests::empty_store_teaches_with_example_commands
+      (renamed from empty_store_prints_no_history; same path,
+      harder assertion — banner + ≥1 launch example + exec hint)
+    - history::tests::render_runs_empty_falls_back_cleanly
+      (renamed from no_runs_for_model_prints_message)
+    - history::tests::unknown_model_lists_known_models (NEW)
+    - history::tests::unknown_model_with_empty_store_shows_try_this_hint (NEW)
+- Test output proving the new tests ran:
+  ```
+  $ cargo test --release --lib history::tests
+  Finished `release` profile [optimized] target(s)
+       Running unittests src/lib.rs
+
+  running 6 tests
+  test history::tests::empty_store_teaches_with_example_commands ... ok
+  test history::tests::render_runs_empty_falls_back_cleanly ... ok
+  test history::tests::unknown_model_lists_known_models ... ok
+  test history::tests::unknown_model_with_empty_store_shows_try_this_hint ... ok
+  test history::tests::json_output_round_trips_for_records ... ok
+  test history::tests::json_output_round_trips_for_model_summary ... ok
+
+  test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured
+  ```
+- End-to-end smoke (`./target/release/edge_monitor history` against
+  an empty store):
+  ```
+  No run history yet.
+
+  Try one of these in another terminal — edge_monitor will
+  detect the workload automatically:
+
+      ollama run llama3 'hello'
+      vllm serve <model>
+      yolo predict model=yolov8n.pt source=...
+
+  Or wrap an existing command so we capture stdout metrics too:
+      edge_monitor exec -- <your command>
+  ```
+- Builder note: this is the lane Builder C couldn't take in [C-6]
+  because it crosses the CLI/TUI surface (Builder A territory).
+  Project owner authorised it mid-session via "complete them"; filed
+  under a fresh `[D-?]` claim rather than squeezed into a Builder C
+  handoff so the audit trail stays honest.
+
+  Eight surfaces moved from "technically informative" to "next-step
+  obvious":
+  1. history CLI empty store → banner + 3 launch examples + exec
+     hint.
+  2. history CLI model-not-found w/ other models → lists the known
+     ones so a typo's correct match is visible at a glance.
+  3. history CLI model-not-found w/ empty store → falls back to the
+     launch examples.
+  4. compare CLI empty columns → stderr trailer naming the missing
+     models and either listing known ones or pointing at
+     `edge_monitor history`. Stdout / JSON unchanged so scripts
+     don't break.
+  5. NVML init failure → debug → one-shot info ("VRAM, GPU power,
+     and per-device temperature metrics will be empty; CPU, RAM,
+     lifecycle, governor, and regression detection still work").
+     Closes the audit S.0.7 recommendation
+     (test_results/REPORT.md 2026-04-28).
+  6. Headless first-run with no config → names the defaults in play
+     (dry-run, ~/.local/share/edge_monitor) and points at
+     edge_monitor.toml.example.
+  7. Headless first tick with zero AI processes → static
+     AtomicBool-gated one-shot info with the same launch hints.
+  8. TUI registry panel empty state → Paragraph with launch
+     examples (or filter-recovery hint when a `/`-filter, not
+     absence, hid every row).
+
+  No conflict with Builder A's [A-6] rename pass — that touched
+  panel labels and headless-log wording, neither of which I
+  changed. The new TUI text reuses the existing "AI Workloads"
+  panel label.
+
+  Tester 1 / Tester 2 verification:
+  ```
+  cargo test --release --lib history::tests
+  cargo test --release --test history_cli
+  ./target/release/edge_monitor history             # smoke
+  ./target/release/edge_monitor history phi3-mini   # smoke
+  ./target/release/edge_monitor --no-ui --ticks 1   # smoke
+  ```
+
+### [B-3] edge_monitor.toml.example + docs/configuration.md [telemetry] section  [T1: PASS 2026-04-29T11:32Z]
 - Commit SHA: 3d65df22e16f65835f2000044bfe583cb57fefdf
 - Files changed: edge_monitor.toml.example, docs/configuration.md
 - Verification command (what the tester should run):
@@ -787,7 +1012,7 @@ to history) and via reading concurrent worktrees.
   with the default that `Default::default()` actually produces. No
   `[power]` section was added — see Cross-builder requests below.
 
-### [B-4] 14 tier-aligned smoke scripts under scripts/manual/
+### [B-4] 14 tier-aligned smoke scripts under scripts/manual/  [T1: FAIL 2026-04-29T11:32Z]
 - Commit SHA: d1373918918fe72b47b13688623127dad296838d
 - Files changed (all new): scripts/manual/{vllm_smoke,llamacpp_smoke,
   ollama_smoke,exec_stdout_smoke,regression_smoke,power_smoke,
@@ -850,7 +1075,58 @@ to history) and via reading concurrent worktrees.
   `src/`; both are filed below in Cross-builder requests rather
   than worked around in the script.
 
-### [B-5] FEATURES.md test-count + Tier-3.4/3.6/3.2/Ollama refresh
+#### Failure note [T1, 2026-04-29T11:32Z]
+- Failing criterion: targeted #5 — at least 1 script exited with a
+  forbidden code AND 6 scripts violated the last-line schema.
+- Sub-results across the 14 scripts:
+  ```
+  PASS  exec_stdout_smoke         (rc=0, last=PASS)
+  PASS  regression_smoke          (rc=0, last=PASS)
+  PASS  cold_load_smoke           (rc=0, last=PASS)
+  PASS  prometheus_exporter_smoke (rc=0, last=PASS)
+  PASS  fingerprint_smoke         (rc=0, last=PASS)
+  PASS  exit_classify_smoke       (rc=0, last=PASS)
+  PASS  compare_smoke             (rc=0, last=PASS)
+  FAIL  ollama_smoke              (rc=1, last="FAIL: no Ollama-loaded model name appeared in history --json")
+  SCHEMA_FAIL  vllm_smoke         (rc=77 OK, last="cannot be exercised without a real vLLM /metrics endpoint.")
+  SCHEMA_FAIL  llamacpp_smoke     (rc=77 OK, last="a real /metrics endpoint at :8080.")
+  SCHEMA_FAIL  power_smoke        (rc=77 OK, last="cannot be exercised without a real power source.")
+  SCHEMA_FAIL  cold_vs_steady_smoke (rc=77 OK, last="operator picks a representative workload.")
+  SCHEMA_FAIL  kv_cache_smoke     (rc=77 OK, last="cannot be exercised without a real vLLM /metrics endpoint.")
+  SCHEMA_FAIL  vision_fps_smoke   (rc=77 OK, last="BUILDER_STATUS.md cross-builder requests.")
+  ```
+- Two distinct issues:
+  1. **`ollama_smoke.sh` exited 1** with Ollama installed and
+     `phi3:latest` loaded on this verifier box. The script ran
+     edge_monitor headless for 20 ticks and queried `history
+     --json`, expecting a record whose `model_name` matched the
+     loaded Ollama model — found none. Either the Ollama API
+     sampler isn't wired to populate `model_name` on RunRecords
+     for headless (non-`exec`) runs, or the 20-tick budget is
+     too short for the sampler+exit cycle. Real failure to
+     investigate.
+  2. **6 SKIP scripts violate the charter's schema rule** "Any
+     script whose last line is not `PASS`, `SKIP`, or `FAIL` =
+     schema violation FAIL." All 6 use a multi-line SKIP preamble
+     and rely on `exit 77` to signal SKIP — the *first* line of
+     the preamble starts with "SKIP:" but the *last* line is
+     descriptive continuation. The builder's design intent
+     ("clear SKIP preamble when the prerequisite isn't met") is
+     reasonable but doesn't satisfy the literal charter clause.
+     Either rewrite the scripts to print a final bare `SKIP` token
+     after the preamble, or amend the charter to accept "first
+     line of preamble starts with SKIP + exit 77" as equivalent.
+- Reproduction command:
+  ```
+  git checkout d1373918918fe72b47b13688623127dad296838d
+  for s in scripts/manual/{vllm,llamacpp,ollama,exec_stdout,regression,power,cold_load,prometheus_exporter,fingerprint,cold_vs_steady,kv_cache,exit_classify,vision_fps,compare}_smoke.sh; do
+    bash "$s" >/tmp/$(basename "$s").log 2>&1; rc=$?
+    last=$(tail -n 1 /tmp/$(basename "$s").log)
+    echo "rc=$rc  last=${last:0:60}  $s"
+  done
+  ```
+
+### [B-5] FEATURES.md test-count + Tier-3.4/3.6/3.2/Ollama refresh  [T1: FAIL 2026-04-29T11:32Z]
 - Commit SHA: 2bce1b3ae9dcfae4b7aef22f982d51fbaea293ec
 - Files changed: FEATURES.md
 - Verification command (what the tester should run):
@@ -874,6 +1150,34 @@ to history) and via reading concurrent worktrees.
   documented under "Remaining gaps for v0.1.0" alongside T2's V3
   S.0.7 visibility finding. Stdout parser description picked up
   Ollama `eval rate:` regex from `[A-5]`.
+
+#### Failure note [T1, 2026-04-29T11:32Z]
+- Failing criterion: targeted #5 — FEATURES.md test count claim
+  vs measured `cargo test --release` aggregate at the listed SHA.
+- Evidence (at SHA 2bce1b3):
+  ```
+  FEATURES.md claims: 347 tests
+    (327 lib unit + 3 concurrent_requests_e2e + 1 expect-rule guard
+     + 3 governor_pid_reuse + 2 governor_properties + 5 history_cli
+     + 2 log_format + 3 pipeline + 1 sigterm_clean_shutdown)
+  cargo test --release at this SHA reports:
+    AGGREGATE: passed=346 failed=0
+    (lib=326 vs claimed 327 — 1 test short)
+  ```
+- The 1-test gap is the `governor::executor::tests::
+  dry_run_reason_string_uses_process_name_and_plain_english`
+  test that lands in [A-6] (commit 6f7b229), which is *after*
+  [B-5]'s SHA 2bce1b3. Same forward-referencing pattern as
+  [B-2]: FEATURES.md anticipates a not-yet-landed test, so the
+  count claim doesn't match reality at the canonical Commit SHA.
+- Reproduction command:
+  `git checkout 2bce1b3ae9dcfae4b7aef22f982d51fbaea293ec && cargo test --release 2>&1 | grep -E '^test result' | awk -F'[. ]+' '{passed += $4; failed += $6} END {print passed"/"(passed+failed)}'`
+- Suggested remediation: re-file [B-5] with Commit SHA at HEAD
+  *after* [A-6] has landed (e.g. 6f7b229 or later), and ensure
+  the FEATURES.md text matches the test count of that frozen
+  SHA. Alternatively the auditor may grant a "documentation
+  block bracketing several commits" exception, but that requires
+  a charter amendment.
 
 ### [B-6] `[regression] baseline_strategy` + `drop_outliers` wired end-to-end
 - Commit SHA: 25665b86eb7fed4e89a85e029f7014a63616246c

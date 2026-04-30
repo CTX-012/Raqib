@@ -166,33 +166,23 @@ mod tests {
     /// otherwise it's a no-op (filter-mode Enter is handled earlier).
     #[test]
     fn enter_dismisses_postmortem_when_visible() {
-        use crate::lifecycle::LifecycleSummary;
-        use crate::model::AICategory;
-        use crate::storage::run_store::RunRecord;
-        use crate::ui::panels::postmortem::PostMortemCard;
-        use chrono::Utc;
+        use crate::storage::run_store::ExitReason;
+        use crate::ui::panels::postmortem::{BaselineStatus, PostMortem, PostMortemCard};
         use std::time::Instant;
 
         let mut app = App::new();
-        let summary = LifecycleSummary {
-            pid: 1,
-            name: "python".into(),
-            category: Some(AICategory::Inference),
-            model_name: Some("phi3-mini".into()),
-            spawn_time: Utc::now(),
-            exit_time: Utc::now(),
-            uptime_secs: 1,
-            exit_code: Some(0),
-            signal: None,
-            avg_cpu_pct: 0.0,
-            peak_cpu_pct: 0.0,
-            peak_rss_mb: 0,
-            peak_vram_mb: 0,
-            samples: 1,
-        };
         app.show_postmortem(PostMortemCard {
-            record: RunRecord::from_summary(summary),
-            worst_regression: None,
+            post_mortem: PostMortem {
+                display_name: "phi3-mini".into(),
+                duration_secs: 1,
+                avg_cpu_pct: 0.0,
+                peak_rss_mb: 0,
+                peak_vram_mb: 0,
+                tokens_per_sec: None,
+                exit_reason: ExitReason::CleanExit,
+                stderr_tail: Vec::new(),
+                baseline_status: BaselineStatus::NotAvailable,
+            },
             shown_at: Instant::now(),
         });
         assert_eq!(

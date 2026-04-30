@@ -222,15 +222,12 @@ pub struct RunRecord {
     pub exit_reason: ExitReason,
     #[serde(default)]
     pub cold_start: Option<ColdStartStats>,
-    /// [UX-2] — last lines of stderr captured by the exec wrapper.
-    /// `None` for headless-monitored exits (the runtime can't read
-    /// stderr without owning stdio) and for on-disk records persisted
-    /// before this field existed (`#[serde(default)]` back-compat).
-    /// Capped at 64 lines via the existing `stderr_tail` plumbing.
-    /// Distinguishes `None` (no stream) from `Some(vec![])` (had a
-    /// stream; the process said nothing).
-    #[serde(default)]
-    pub stderr_lines: Option<Vec<String>>,
+    // UI Contract v2 reverts the v1 `stderr_lines` field: stderr is
+    // ephemeral, built on a transient `PostMortem` struct at exit
+    // time and never persisted to RunRecord. See UI_CONTRACT.md (v2)
+    // ("Stderr is ephemeral"). If a future feature needs stderr
+    // post-hoc that's a deliberate schema decision, not a side
+    // effect of the post-mortem card.
 }
 
 impl ExitReason {
@@ -254,7 +251,6 @@ impl RunRecord {
             metrics: RunMetrics::default(),
             exit_reason,
             cold_start: None,
-            stderr_lines: None,
         }
     }
 

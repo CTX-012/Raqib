@@ -291,11 +291,18 @@ impl App {
         }
     }
 
-    /// Cascading-priority Escape handler ([UX-2] / [UX-1]).
-    /// Priority: post-mortem card → armed kill → other overlay
-    /// (history, help). Returns `true` when the press was consumed
-    /// by one of these branches; the caller may use the return to
-    /// skip default Esc behavior.
+    /// Cascading-priority Escape handler per UI Contract v2.
+    ///
+    /// Priority order:
+    ///   1. post-mortem card → dismiss
+    ///   2. armed kill → disarm
+    ///   3. other overlay (history, help) → close
+    ///   4. nothing to dismiss → quit (same as `q`)
+    ///
+    /// Returns `true` when steps 1–3 consumed the press, `false`
+    /// when step 4 fired. Either way `quit_requested` is set in
+    /// the step-4 branch; callers can use the return to log
+    /// `Esc → quit` differently from a `q`-quit if desired.
     pub fn handle_escape(&mut self) -> bool {
         if self.postmortem.is_some() {
             self.dismiss_postmortem();
@@ -313,6 +320,8 @@ impl App {
             self.show_help = false;
             return true;
         }
+        // UI Contract v2 step 4: nothing to dismiss → quit.
+        self.quit_requested = true;
         false
     }
 
@@ -573,6 +582,33 @@ mod tests {
         );
     }
 
+    /// UI Contract v2 step 4 — when no overlay / armed kill / card is
+    /// present, Esc falls through to quit. Matches the user's intuition
+    /// that Esc means "get me out of whatever I'm in", and gives the
+    /// keyboard a second route to quit alongside `q`. Returns `false`
+    /// (only steps 1–3 return `true`); the quit signal lives in
+    /// `quit_requested`, not in the return value.
+    #[test]
+    fn esc_quits_when_nothing_to_dismiss() {
+        let mut app = App::new();
+        // No card, no armed kill, no overlay, no help.
+        assert!(app.postmortem().is_none());
+        assert!(app.armed_kill().is_none());
+        assert!(!app.is_history_open());
+        assert!(!app.show_help());
+
+        let consumed = app.handle_escape();
+        assert!(
+            !consumed,
+            "fall-through-to-quit must return false to distinguish \
+             from a card/disarm/overlay-close consumption",
+        );
+        assert!(
+            app.should_quit(),
+            "Esc with nothing to dismiss must request quit per UI Contract v2",
+        );
+    }
+
     #[test]
     fn tick_overlays_drops_expired_armed_kill() {
         let mut app = App::new();
@@ -598,27 +634,24 @@ mod tests {
     }
 
     fn test_card() -> PostMortemCard {
-        use crate::lifecycle::LifecycleSummary;
-        use chrono::Utc;
-        let summary = LifecycleSummary {
-            pid: 1,
-            name: "python".into(),
-            category: Some(AICategory::Inference),
-            model_name: Some("phi3-mini".into()),
-            spawn_time: Utc::now(),
-            exit_time: Utc::now(),
-            uptime_secs: 42,
-            exit_code: Some(0),
-            signal: None,
-            avg_cpu_pct: 0.0,
-            peak_cpu_pct: 0.0,
-            peak_rss_mb: 0,
-            peak_vram_mb: 0,
-            samples: 1,
-        };
+        // UI Contract v2 — `PostMortemCard` wraps a transient
+        // `PostMortem` (not a `RunRecord` clone). Build a minimal
+        // fixture for App-level state tests; the card's render
+        // contract is exercised by the postmortem panel's own tests.
+        use crate::storage::run_store::ExitReason;
+        use crate::ui::panels::postmortem::{BaselineStatus, PostMortem};
         PostMortemCard {
-            record: RunRecord::from_summary(summary),
-            worst_regression: None,
+            post_mortem: PostMortem {
+                display_name: "phi3-mini".into(),
+                duration_secs: 42,
+                avg_cpu_pct: 0.0,
+                peak_rss_mb: 0,
+                peak_vram_mb: 0,
+                tokens_per_sec: None,
+                exit_reason: ExitReason::CleanExit,
+                stderr_tail: Vec::new(),
+                baseline_status: BaselineStatus::NotAvailable,
+            },
             shown_at: std::time::Instant::now(),
         }
     }

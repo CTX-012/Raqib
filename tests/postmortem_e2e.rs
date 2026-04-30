@@ -1,114 +1,70 @@
-//! [UX-2] — post-mortem card integration tests.
+//! [UX-2] (UI Contract v2) — post-mortem card integration tests.
 //!
-//! Three claims worth pinning at the integration boundary:
-//!
-//! 1. `RunRecord.stderr_lines` round-trips through JSON unchanged
-//!    so the post-mortem card can be re-derived from a persisted
-//!    record.
-//! 2. The `App` lifecycle for a card — push, query, dismiss, expire,
-//!    cascading-Esc priority over an armed kill — behaves as the
-//!    input layer expects.
-//! 3. `format_*` helpers produce the UI Contract strings for shapes
-//!    the runtime is most likely to feed in (clean exit, OOM,
-//!    governor kill).
-//!
-//! The trigger path itself (runtime sees an AI exit → builds a card)
-//! is exercised by the lib unit tests around `Runtime::tick`. Wiring
-//! a synthetic process through a real Runtime tick from an
-//! integration test would balloon scope; the lib tests already pin
-//! that wire.
+//! Pins the App lifecycle for a card (push, query, dismiss, replace,
+//! cascading-Esc priority over an armed kill) and the v2 contract's
+//! baseline-status banding. Render-shape assertions live in
+//! `src/ui/panels/postmortem.rs::tests` since `build_lines` is
+//! pub-crate; this file owns the cross-module integration claims.
 
-use chrono::Utc;
-use edge_monitor::analysis::compare::{Regression, Severity};
-use edge_monitor::lifecycle::LifecycleSummary;
-use edge_monitor::model::AICategory;
-use edge_monitor::storage::run_store::{ExitReason, RunRecord};
 use edge_monitor::ui::app::App;
 use edge_monitor::ui::panels::armed_banner::ArmedKill;
 use edge_monitor::ui::panels::postmortem::{
-    PostMortemCard, format_duration, format_exit_reason, format_regression,
+    BaselineStatus, PostMortem, PostMortemCard,
 };
+use edge_monitor::storage::run_store::ExitReason;
 
-fn fixture_summary(model: &str) -> LifecycleSummary {
-    LifecycleSummary {
-        pid: 4242,
-        name: "python".into(),
-        category: Some(AICategory::Inference),
-        model_name: Some(model.into()),
-        spawn_time: Utc::now(),
-        exit_time: Utc::now(),
-        uptime_secs: 65,
-        exit_code: Some(0),
-        signal: None,
-        avg_cpu_pct: 50.0,
-        peak_cpu_pct: 90.0,
-        peak_rss_mb: 2048,
+fn fixture_post_mortem(model: &str) -> PostMortem {
+    PostMortem {
+        display_name: model.to_string(),
+        duration_secs: 65,
+        avg_cpu_pct: 38.4,
+        peak_rss_mb: 1024,
         peak_vram_mb: 4096,
-        samples: 30,
+        tokens_per_sec: Some(38.4),
+        exit_reason: ExitReason::CleanExit,
+        stderr_tail: Vec::new(),
+        baseline_status: BaselineStatus::NotAvailable,
     }
 }
 
-fn fixture_card(model: &str, with_stderr: bool, regression: Option<Regression>) -> PostMortemCard {
-    let mut record = RunRecord::from_summary(fixture_summary(model));
-    if with_stderr {
-        record.stderr_lines = Some(vec![
-            "warning: model file is from a different vocab".into(),
-            "INFO: cuda init OK".into(),
-            "INFO: ready".into(),
-        ]);
-    }
+fn fixture_card(model: &str) -> PostMortemCard {
     PostMortemCard {
-        record,
-        worst_regression: regression,
+        post_mortem: fixture_post_mortem(model),
         shown_at: std::time::Instant::now(),
     }
-}
-
-#[test]
-fn run_record_stderr_lines_survives_json_round_trip() {
-    let mut record = RunRecord::from_summary(fixture_summary("phi3-mini"));
-    record.stderr_lines = Some(vec!["line a".into(), "line b".into()]);
-    let json = serde_json::to_string(&record).expect("serialize");
-    let back: RunRecord = serde_json::from_str(&json).expect("deserialize");
-    assert_eq!(
-        back.stderr_lines,
-        Some(vec!["line a".into(), "line b".into()])
-    );
-
-    record.stderr_lines = None;
-    let json = serde_json::to_string(&record).expect("serialize");
-    let back: RunRecord = serde_json::from_str(&json).expect("deserialize");
-    assert_eq!(back.stderr_lines, None);
 }
 
 #[test]
 fn show_postmortem_makes_card_observable_on_app() {
     let mut app = App::new();
     assert!(app.postmortem().is_none());
-    app.show_postmortem(fixture_card("phi3-mini", false, None));
+    app.show_postmortem(fixture_card("phi3-mini"));
     assert!(app.postmortem().is_some());
     assert_eq!(
-        app.postmortem().unwrap().record.summary.model_name.as_deref(),
-        Some("phi3-mini"),
+        app.postmortem().unwrap().post_mortem.display_name,
+        "phi3-mini",
     );
 }
 
 #[test]
 fn dismiss_postmortem_clears_the_card() {
     let mut app = App::new();
-    app.show_postmortem(fixture_card("phi3-mini", false, None));
+    app.show_postmortem(fixture_card("phi3-mini"));
     app.dismiss_postmortem();
     assert!(app.postmortem().is_none());
 }
 
 #[test]
 fn show_postmortem_replaces_existing_card_latest_wins() {
+    // UI Contract v2: latest wins, no queue. The user reading an
+    // older card has it replaced by a fresh exit so they don't miss
+    // the latest signal.
     let mut app = App::new();
-    app.show_postmortem(fixture_card("phi3-mini", false, None));
-    app.show_postmortem(fixture_card("llama-3-8b", false, None));
+    app.show_postmortem(fixture_card("phi3-mini"));
+    app.show_postmortem(fixture_card("llama-3-8b"));
     assert_eq!(
-        app.postmortem().unwrap().record.summary.model_name.as_deref(),
-        Some("llama-3-8b"),
+        app.postmortem().unwrap().post_mortem.display_name,
+        "llama-3-8b",
     );
 }
 
@@ -121,60 +77,62 @@ fn cascading_escape_clears_card_before_armed_kill() {
         allowlisted: false,
         armed_at: std::time::Instant::now(),
     });
-    app.show_postmortem(fixture_card("phi3-mini", false, None));
+    app.show_postmortem(fixture_card("phi3-mini"));
 
+    // First Esc dismisses the card; the armed kill survives.
     assert!(app.handle_escape());
     assert!(app.postmortem().is_none());
     assert!(app.armed_kill().is_some());
 
+    // Second Esc disarms the kill.
     assert!(app.handle_escape());
     assert!(app.armed_kill().is_none());
 }
 
 #[test]
-fn duration_formatting_picks_the_right_band() {
-    assert_eq!(format_duration(5), "5s");
-    assert_eq!(format_duration(65), "1m 5s");
-    assert_eq!(format_duration(3725), "1h 2m 5s");
+fn baseline_status_critical_band_is_at_or_above_twenty_percent() {
+    // tokens/sec dropped from 40 → 28 → 30% slower → Critical band.
+    assert!(matches!(
+        BaselineStatus::from_metric(Some(28.0), Some(40.0)),
+        BaselineStatus::Critical { .. },
+    ));
 }
 
 #[test]
-fn regression_color_text_matches_severity_levels() {
-    let warn = Regression {
-        metric: "tokens_per_sec_avg".into(),
-        baseline: 40.0,
-        current: 35.0,
-        delta_pct: -12.5,
-        severity: Severity::Warn,
-    };
-    let (text, _) = format_regression(Some(&warn));
-    assert_eq!(text, "-12.5% vs baseline (warning)");
-
-    let crit = Regression {
-        metric: "tokens_per_sec_avg".into(),
-        baseline: 40.0,
-        current: 28.0,
-        delta_pct: -30.0,
-        severity: Severity::Critical,
-    };
-    let (text, _) = format_regression(Some(&crit));
-    assert_eq!(text, "-30.0% vs baseline (critical)");
+fn baseline_status_attention_band_is_ten_to_twenty_percent() {
+    // tokens/sec dropped from 40 → 35.2 → 12% slower → Attention.
+    assert!(matches!(
+        BaselineStatus::from_metric(Some(35.2), Some(40.0)),
+        BaselineStatus::Attention { .. },
+    ));
 }
 
 #[test]
-fn exit_reason_strings_match_ui_contract() {
-    assert_eq!(format_exit_reason(&ExitReason::CleanExit), "cleanly");
-    assert_eq!(
-        format_exit_reason(&ExitReason::OutOfMemory {
-            ram: false,
-            vram: true,
-        }),
-        "killed by system (out of GPU memory)",
-    );
-    assert_eq!(
-        format_exit_reason(&ExitReason::GovernorKill {
-            reason: "ai-process exceeded 90% CPU".into(),
-        }),
-        "killed by governor (ai-process exceeded 90% CPU)",
-    );
+fn baseline_status_healthy_band_for_faster_runs() {
+    // tokens/sec rose from 40 → 46 → 15% faster → Healthy.
+    assert!(matches!(
+        BaselineStatus::from_metric(Some(46.0), Some(40.0)),
+        BaselineStatus::Healthy { .. },
+    ));
+}
+
+#[test]
+fn baseline_status_matching_band_within_ten_percent() {
+    // 5% slower — inside the ±10% band.
+    assert!(matches!(
+        BaselineStatus::from_metric(Some(38.0), Some(40.0)),
+        BaselineStatus::Matching,
+    ));
+}
+
+#[test]
+fn baseline_status_not_available_when_baseline_missing_or_zero() {
+    assert!(matches!(
+        BaselineStatus::from_metric(Some(40.0), None),
+        BaselineStatus::NotAvailable,
+    ));
+    assert!(matches!(
+        BaselineStatus::from_metric(Some(40.0), Some(0.0)),
+        BaselineStatus::NotAvailable,
+    ));
 }

@@ -15,53 +15,58 @@ once `v1.0.0` is tagged. Until then, minor versions may include breaking changes
   a 5-second auto-disarm countdown. Allowlisted targets render an
   `ALLOWLISTED, press k to override` variant. The banner replaces
   the previous inline status-bar marker (which was easy to miss).
-  Cascading-priority `Esc` now: dismisses post-mortem first, then
-  disarms a pending kill, then closes any other overlay. Window
-  and string format locked by the UI Contract in
-  `IMPLEMENTATION_LINUX_TUI_UX.md` for cross-platform parity.
+  Window and string format locked by `UI_CONTRACT.md` (v2) for
+  cross-platform parity.
 - **Post-mortem card** ([UX-2],
   `src/ui/panels/postmortem.rs`). When an AI workload exits, a
-  centered overlay surfaces the run summary — model, duration,
-  tokens/sec, peak RAM, peak GPU memory, exit reason, regression
-  delta vs baseline, plus the last 3 stderr lines for exec-wrapped
-  runs — for 30 seconds. `Esc` or `Enter` dismisses early. Only
-  AI-classified exits trigger the card; non-AI process exits stay
-  silent (random shell exits would drown the operator). The runtime
-  pushes cards through `Runtime::drain_postmortems`; the TUI's
-  render loop drains them once per ~100 ms render tick. Field
-  order, labels, 30 s window, and 60 % width with `[60, 100]` clamp
-  locked by the UI Contract.
-- **`g` keybinding for dashboards** ([UX-3]). Pressing `g` on a
-  focused workload row opens `[dashboard].url_template` in the
-  default browser, with `{model}` and `{pid}` substituted. Empty
-  template logs a hint pointing at the config; no focused row logs
-  a different hint. Uses the `webbrowser` crate (cross-platform,
-  ~50 KB stripped). Closes T2's V3 finding 1 (`g` unmapped).
+  centered overlay surfaces the run summary — Duration, Avg CPU,
+  Peak RAM, Peak GPU memory (omitted when zero), Throughput
+  (omitted when no tokens/sec data), Exited — for 30 seconds, with
+  a color-coded baseline headline below the field block (red
+  `≥20% slower`, yellow `≥10% slower`, green `≥10% faster`, muted
+  `matches baseline`, omitted entirely for first runs). `Esc` or
+  `Enter` dismisses early. Only AI-classified exits trigger the
+  card. Card title is the workload's `display_name`; width is
+  fixed 64 columns; height computed from content and clamped to
+  `[8, 22]` rows. The runtime builds a transient `PostMortem`
+  struct at exit time and pushes a card through
+  `Runtime::drain_postmortems`; **stderr is ephemeral** — the
+  `PostMortem` carries `stderr_tail` and is dropped when the card
+  is dismissed, never persisted to `RunRecord` (per UI Contract
+  v2 schema decision).
+- **`g` keybinding for dashboards** ([UX-3], UI Contract v2).
+  Pressing `g` on a focused workload row opens a dashboard URL in
+  the default browser, with `{model}` and `{pid}` substituted.
+  URL source priority: `[dashboard].url_template` from config →
+  `EDGE_MONITOR_GRAFANA_URL` env var → hardcoded
+  `http://localhost:3000/d/edge_monitor` fallback. Refuses with a
+  status hint when no row is focused. Uses the `webbrowser` crate
+  (~50 KB stripped). Closes T2's V3 finding 1.
 - **`[dashboard]` config section.** New `DashboardConfig` on
   `Config` with a single `url_template: String` field
-  (default `""` = keybinding disabled). Documented in
-  `edge_monitor.toml.example` and `docs/configuration.md`. Static
-  URLs (no `{model}` / `{pid}` tokens) are accepted for users who
-  just want a fixed dashboard link.
-- **`RunRecord.stderr_lines: Option<Vec<String>>`** (additive,
-  `serde(default)` for back-compat with on-disk records persisted
-  before this field existed). Populated by the exec wrapper at
-  exit time from the existing 64-line `stderr_tail`; `None` for
-  headless-monitored exits where edge_monitor doesn't own the
-  child stdio. Unblocks the post-mortem card's "Last output:"
-  block without coupling its render path to live event timing.
+  (default `""` = use env var or hardcoded fallback). Documented
+  in `edge_monitor.toml.example` and `docs/configuration.md`.
+  Static URLs (no `{model}` / `{pid}` tokens) are accepted.
 
 ### Changed
-- **Cascading `Esc` priority in the TUI.** `App::handle_escape`
-  routes Esc through: post-mortem card → armed-kill disarm →
-  history overlay close → help overlay close, in that order. Each
-  branch consumes the press and returns; subsequent branches don't
-  fire. Filter mode still owns its own Esc (cancels filter).
+- **Cascading `Esc` priority in the TUI** (UI Contract v2).
+  `App::handle_escape` routes Esc through: post-mortem card →
+  armed-kill disarm → history overlay close → help overlay close
+  → **quit (same as `q`)**. Each branch consumes the press and
+  returns; the v2 fall-through to quit is new (v1 was a no-op when
+  nothing was open). Filter mode still owns its own Esc.
 
 ### Notes
 - `webbrowser` crate added to `Cargo.toml` (`default-features = false`,
   ~50 KB stripped). Binary remains over the 5 MB budget; size trim
   deferred per prior CHANGELOG note.
+- UI Contract v2 reverts the v1 addition of
+  `RunRecord.stderr_lines`. Stderr is now built ephemerally on a
+  transient `PostMortem` struct at exit time and dropped when the
+  card is dismissed. If a future feature needs stderr post-hoc
+  (e.g. "show me what the last 3 failing runs printed"), that's a
+  deliberate schema decision filed as a new feature, not a side
+  effect of the post-mortem card.
 
 - **Tier 3.4 history rendering** ([B-7], commit `e3a22da`,
   `src/history.rs`). `edge_monitor history MODEL` now renders the
@@ -548,10 +553,11 @@ once `v1.0.0` is tagged. Until then, minor versions may include breaking changes
 ### Notes
 - Developed on WSL Ubuntu; NVML returns `None` gracefully without GPU
   passthrough. Real target (Jetson AGX Orin) not yet validated end-to-end.
-- 364 lib unit + 3 concurrent-request e2e + 1 expect-rule guard +
-  3 governor pid-reuse + 2 governor proptest + 5 history-CLI + 2
-  log-format + 3 pipeline + 1 SIGTERM clean-shutdown = 384 tests
-  pass on release (`cargo test --release`).
+- 372 lib unit + 3 concurrent-request e2e + 8 dashboard-keybinding
+  e2e + 1 expect-rule guard + 3 governor pid-reuse + 2 governor
+  proptest + 5 history-CLI + 2 log-format + 3 pipeline + 9
+  postmortem e2e + 1 SIGTERM clean-shutdown = 409 tests pass on
+  release (`cargo test --release`).
 - No release artifact yet. `v0.1.0` will be tagged once Phase 1 launch
   checklist (CI, demo GIF, `.deb`, crates.io name reservation) is complete.
 

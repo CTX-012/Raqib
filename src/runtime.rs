@@ -483,21 +483,45 @@ impl Runtime {
                 // most-recently-pushed event since `max_by_key` keeps
                 // the latest among equal keys with stable ordering.
                 if record_clone.summary.category.is_some() {
-                    let worst = self
-                        .state
-                        .regressions
-                        .iter()
-                        .skip(regs_before)
-                        .max_by_key(|ev| match ev.regression.severity {
-                            crate::analysis::Severity::Critical => 2,
-                            crate::analysis::Severity::Warn => 1,
-                            crate::analysis::Severity::Info => 0,
-                        })
-                        .map(|ev| ev.regression.clone());
+                    // UI Contract v2 — build the transient PostMortem
+                    // here. Stderr is empty for the headless path (the
+                    // runtime doesn't own child stdio); the exec
+                    // wrapper has its own card-trigger when it lands.
+                    // Baseline headline is computed from the run's
+                    // tokens_per_sec_avg vs the baseline mean — this
+                    // is independent of `RegressionConfig` thresholds
+                    // (the contract pins the headline bands directly:
+                    // ≥20 critical / ≥10 attention / ≤-10 healthy /
+                    // otherwise matching).
+                    let summary = &record_clone.summary;
+                    let display_name = summary
+                        .model_name
+                        .clone()
+                        .unwrap_or_else(|| summary.name.clone());
+                    let baseline_status = build_baseline_status(
+                        record_clone.metrics.tokens_per_sec_avg,
+                        rs,
+                        &model,
+                        &self.config.regression,
+                    );
+                    let pm = crate::ui::panels::postmortem::PostMortem {
+                        display_name,
+                        duration_secs: summary.uptime_secs.max(0) as u64,
+                        avg_cpu_pct: summary.avg_cpu_pct,
+                        peak_rss_mb: summary.peak_rss_mb,
+                        peak_vram_mb: summary.peak_vram_mb,
+                        tokens_per_sec: record_clone.metrics.tokens_per_sec_avg,
+                        exit_reason: record_clone.exit_reason.clone(),
+                        // Headless path doesn't own stderr. The
+                        // `regs_before` reference below keeps the
+                        // borrow-checker happy by not capturing `self`.
+                        stderr_tail: Vec::new(),
+                        baseline_status,
+                    };
+                    let _ = regs_before; // silence unused-binding lint
                     self.pending_postmortems.push(
                         crate::ui::panels::postmortem::PostMortemCard {
-                            record: record_clone,
-                            worst_regression: worst,
+                            post_mortem: pm,
                             shown_at: Instant::now(),
                         },
                     );
@@ -743,6 +767,44 @@ impl Runtime {
         let delta_ticks = (ticks_now - ticks_prev) as f32;
         (delta_ticks / self.clk_tck as f32 / dt) * 100.0
     }
+}
+
+/// Compute the [`BaselineStatus`] for a freshly-exited run by reading
+/// the same baseline window the regression detector uses. Independent
+/// of `RegressionConfig` thresholds (the post-mortem-card contract
+/// pins its bands directly: ≥20% slower → critical, ≥10% slower →
+/// attention, ≤-10% (faster) → healthy, otherwise matching). Returns
+/// `NotAvailable` whenever there's no usable baseline (first run, or
+/// fewer than `min_baseline_samples` prior records).
+fn build_baseline_status(
+    current: Option<f32>,
+    rs: &RunStore,
+    model: &str,
+    cfg: &crate::config::RegressionConfig,
+) -> crate::ui::panels::postmortem::BaselineStatus {
+    use crate::ui::panels::postmortem::BaselineStatus;
+
+    let Some(_) = current else {
+        return BaselineStatus::NotAvailable;
+    };
+    let window = cfg.baseline_window as usize;
+    // Same shape as `check_regressions`: pull window+1 newest records
+    // and drop the in-flight one. We don't have its run_id here, so
+    // we drop the leading entry (newest first); if that leading
+    // record happens to be the in-flight one (it is — it was just
+    // appended), this is the baseline-excluding-current view.
+    let mut history = rs.recent(model, window + 1);
+    if !history.is_empty() {
+        history.remove(0);
+    }
+    if history.len() < cfg.min_baseline_samples as usize {
+        return BaselineStatus::NotAvailable;
+    }
+    let strategy = cfg.strategy();
+    let (metrics, _outliers) =
+        crate::analysis::BaselineMetrics::from_records_with(&history, strategy, cfg.drop_outliers);
+    let baseline_mean = metrics.tokens_per_sec_avg.map(|m| m.mean);
+    BaselineStatus::from_metric(current, baseline_mean)
 }
 
 /// Construct the telemetry [`Dispatcher`] from the toggles in

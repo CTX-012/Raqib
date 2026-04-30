@@ -236,17 +236,11 @@ pub async fn run_exec(
     };
     record.exit_reason = classify_exit(&summary, &ctx);
 
-    // [UX-2] — carry the captured tail onto the persisted RunRecord
-    // so a future history overlay deep-dive (or the post-mortem card,
-    // when reading back from the store) can surface the last few
-    // lines. `None` when we caught nothing — distinguishes "we owned
-    // stdio and the process said nothing on stderr" from "we never
-    // had a stderr stream for this run" (the headless path).
-    record.stderr_lines = if s.stderr_tail.is_empty() {
-        None
-    } else {
-        Some(s.stderr_tail.clone())
-    };
+    // UI Contract v2 — stderr is ephemeral, owned only by the
+    // post-mortem card built at exit time. Not persisted to
+    // RunRecord. The exec wrapper still feeds `stderr_tail` into
+    // the Tier 3.5 classifier above; the tail itself is dropped
+    // when this function returns.
 
     // Persist to RunStore.
     if let Some(path) = config.storage.run_store() {

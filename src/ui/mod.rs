@@ -187,44 +187,54 @@ fn apply_action(action: Action, runtime: &mut Runtime, app: &mut App) {
     }
 }
 
-/// `g` keybinding handler ([UX-3]). Pure dispatch — `compute_dashboard_url`
-/// does the substitution arithmetic and returns the URL or a
-/// status-bar message describing why the open didn't happen.
+/// `g` keybinding handler ([UX-3]) per UI Contract v2.
+///
+/// URL source priority (highest first):
+///   1. `[dashboard].url_template` from config, if set and non-empty
+///   2. `EDGE_MONITOR_GRAFANA_URL` environment variable, if set
+///   3. Hardcoded fallback `http://localhost:3000/d/edge_monitor`
+///
+/// Refuses with a status hint when no row is focused.
+/// `compute_dashboard_url` does the `{model}`/`{pid}` substitution.
 fn handle_open_dashboard(runtime: &Runtime, app: &App) {
-    let template = &runtime.config().dashboard.url_template;
     let Some(pid) = app.selected_pid(runtime.state()) else {
-        // Empty-template + no-row both surface as "no row" if both are
-        // true, but the no-row hint is the more actionable message —
-        // "fix your config" is moot if there's no workload to open
-        // anyway. Match the UI Contract by precedence.
-        if template.is_empty() {
-            tracing::info!(
-                "dashboard keybinding requires [dashboard].url_template; \
-                 see edge_monitor.toml.example for the template format"
-            );
-        } else {
-            tracing::info!("no workload focused — select a row first");
-        }
+        tracing::info!("No workload focused — select a row first");
         return;
     };
-    if template.is_empty() {
-        tracing::info!(
-            "dashboard keybinding requires [dashboard].url_template; \
-             see edge_monitor.toml.example for the template format"
-        );
-        return;
-    }
+    let template = resolve_dashboard_template(runtime.config());
     let state = runtime.state();
     let model = state
         .annotated
         .iter()
         .find(|p| p.pid == pid)
         .and_then(|p| p.model_name.clone());
-    let url = compute_dashboard_url(template, model.as_deref(), pid);
+    let url = compute_dashboard_url(&template, model.as_deref(), pid);
     match webbrowser::open(&url) {
-        Ok(_) => tracing::info!(%url, "opened dashboard in browser"),
-        Err(e) => tracing::warn!(%url, error = %e, "failed to open dashboard"),
+        Ok(_) => tracing::info!(%url, "Opened {url}"),
+        Err(e) => tracing::warn!(
+            %url,
+            error = %e,
+            "Could not open browser — URL: {url}",
+        ),
     }
+}
+
+/// Resolve the dashboard URL template per UI Contract v2 priority
+/// order. Always returns *some* template — empty config + empty env
+/// fall through to the hardcoded `localhost:3000/d/edge_monitor`
+/// fallback. Pure aside from the env var read; exposed (`pub(crate)`)
+/// so integration tests can pin the priority order without spinning
+/// a browser.
+pub fn resolve_dashboard_template(config: &crate::config::Config) -> String {
+    if !config.dashboard.url_template.is_empty() {
+        return config.dashboard.url_template.clone();
+    }
+    if let Ok(env) = std::env::var("EDGE_MONITOR_GRAFANA_URL")
+        && !env.is_empty()
+    {
+        return env;
+    }
+    "http://localhost:3000/d/edge_monitor".to_string()
 }
 
 /// Pure substitution: applies `{model}` and `{pid}` against the

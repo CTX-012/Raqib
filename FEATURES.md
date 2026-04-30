@@ -310,11 +310,16 @@ Three transient overlays surface alongside the persistent panels:
   Red strip with PID, name, and a 5-second auto-disarm countdown.
   Allowlisted targets render an override-variant. The banner
   replaces the previous inline status-bar marker.
-- **Post-mortem card** ([UX-2]) — centered overlay shown for 30 s
-  after an AI workload exits. Surfaces model, duration, peak RAM /
-  GPU memory, exit classification, baseline regression delta, and
-  (exec-wrapped runs only) the last 3 stderr lines. Only AI
-  exits trigger the card; non-AI exits stay silent.
+- **Post-mortem card** ([UX-2], UI Contract v2) — centered 64-column
+  overlay shown for 30 s after an AI workload exits. Surfaces
+  Duration, Avg CPU, Peak RAM, Peak GPU memory (omitted when
+  zero), Throughput (omitted when no tokens/sec), Exited — plus a
+  color-coded baseline headline below the field block (red `≥20%
+  slower`, yellow `≥10% slower`, green `≥10% faster`, muted
+  `matches baseline`). Stderr is ephemeral — the runtime builds a
+  transient `PostMortem` at exit time and drops it when the card
+  is dismissed; the persistent `RunRecord` JSON does not carry it.
+  Only AI exits trigger the card; non-AI exits stay silent.
 - **History overlay** — pre-existing; opens with `h` on a workload row.
 
 ## Headless mode (`--no-ui`)
@@ -473,10 +478,11 @@ for piping into `jq`.
 
 ## Test surface
 
-`cargo test --release` reports **364 lib unit + 3 concurrent-request
-e2e + 1 expect-rule guard + 3 governor pid-reuse + 2 governor
-proptest + 5 history-CLI + 2 log-format + 3 pipeline + 1 SIGTERM
-clean-shutdown = 384 tests** today, all passing. Recently added:
+`cargo test --release` reports **372 lib unit + 3 concurrent-request
+e2e + 8 dashboard-keybinding e2e + 1 expect-rule guard + 3 governor
+pid-reuse + 2 governor proptest + 5 history-CLI + 2 log-format + 3
+pipeline + 9 postmortem e2e + 1 SIGTERM clean-shutdown = 409 tests**
+today, all passing. Recently added:
 the expect-rule guard enforces CLAUDE.md's `expect()` allowlist
 [A-1]; `--log-format json` integration tests [A-2]; SIGTERM
 clean-shutdown integration test [A-3]; concurrent-request awareness

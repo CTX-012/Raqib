@@ -297,6 +297,25 @@ process panels. `/` enters filter mode (case-insensitive substring
 against name/model). `j`/`k` move the selection. `h` opens the
 **history overlay** for the focused row's model (last 20 runs, with
 `KV!` badge on saturation events). `d` toggles dry-run. `q` quits.
+`g` opens `[dashboard].url_template` in your browser with `{model}`
+and `{pid}` substituted against the focused row ([UX-3]).
+`Esc` cascades through overlays in priority order (post-mortem card →
+disarm pending kill → close history / help).
+
+### Operator overlays
+
+Three transient overlays surface alongside the persistent panels:
+
+- **Armed-kill banner** ([UX-1]) — top row when `k` is pressed once.
+  Red strip with PID, name, and a 5-second auto-disarm countdown.
+  Allowlisted targets render an override-variant. The banner
+  replaces the previous inline status-bar marker.
+- **Post-mortem card** ([UX-2]) — centered overlay shown for 30 s
+  after an AI workload exits. Surfaces model, duration, peak RAM /
+  GPU memory, exit classification, baseline regression delta, and
+  (exec-wrapped runs only) the last 3 stderr lines. Only AI
+  exits trigger the card; non-AI exits stay silent.
+- **History overlay** — pre-existing; opens with `h` on a workload row.
 
 ## Headless mode (`--no-ui`)
 
@@ -454,10 +473,10 @@ for piping into `jq`.
 
 ## Test surface
 
-`cargo test --release` reports **344 lib unit + 3 concurrent-request
+`cargo test --release` reports **364 lib unit + 3 concurrent-request
 e2e + 1 expect-rule guard + 3 governor pid-reuse + 2 governor
 proptest + 5 history-CLI + 2 log-format + 3 pipeline + 1 SIGTERM
-clean-shutdown = 364 tests** today, all passing. Recently added:
+clean-shutdown = 384 tests** today, all passing. Recently added:
 the expect-rule guard enforces CLAUDE.md's `expect()` allowlist
 [A-1]; `--log-format json` integration tests [A-2]; SIGTERM
 clean-shutdown integration test [A-3]; concurrent-request awareness

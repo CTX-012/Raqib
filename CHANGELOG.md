@@ -9,6 +9,60 @@ once `v1.0.0` is tagged. Until then, minor versions may include breaking changes
 ## [Unreleased]
 
 ### Added
+- **Armed-kill banner** ([UX-1], `src/ui/panels/armed_banner.rs`).
+  When a manual kill is armed (1st `k` press), a red full-width
+  banner across the top of the TUI shows the target PID, name, and
+  a 5-second auto-disarm countdown. Allowlisted targets render an
+  `ALLOWLISTED, press k to override` variant. The banner replaces
+  the previous inline status-bar marker (which was easy to miss).
+  Cascading-priority `Esc` now: dismisses post-mortem first, then
+  disarms a pending kill, then closes any other overlay. Window
+  and string format locked by the UI Contract in
+  `IMPLEMENTATION_LINUX_TUI_UX.md` for cross-platform parity.
+- **Post-mortem card** ([UX-2],
+  `src/ui/panels/postmortem.rs`). When an AI workload exits, a
+  centered overlay surfaces the run summary — model, duration,
+  tokens/sec, peak RAM, peak GPU memory, exit reason, regression
+  delta vs baseline, plus the last 3 stderr lines for exec-wrapped
+  runs — for 30 seconds. `Esc` or `Enter` dismisses early. Only
+  AI-classified exits trigger the card; non-AI process exits stay
+  silent (random shell exits would drown the operator). The runtime
+  pushes cards through `Runtime::drain_postmortems`; the TUI's
+  render loop drains them once per ~100 ms render tick. Field
+  order, labels, 30 s window, and 60 % width with `[60, 100]` clamp
+  locked by the UI Contract.
+- **`g` keybinding for dashboards** ([UX-3]). Pressing `g` on a
+  focused workload row opens `[dashboard].url_template` in the
+  default browser, with `{model}` and `{pid}` substituted. Empty
+  template logs a hint pointing at the config; no focused row logs
+  a different hint. Uses the `webbrowser` crate (cross-platform,
+  ~50 KB stripped). Closes T2's V3 finding 1 (`g` unmapped).
+- **`[dashboard]` config section.** New `DashboardConfig` on
+  `Config` with a single `url_template: String` field
+  (default `""` = keybinding disabled). Documented in
+  `edge_monitor.toml.example` and `docs/configuration.md`. Static
+  URLs (no `{model}` / `{pid}` tokens) are accepted for users who
+  just want a fixed dashboard link.
+- **`RunRecord.stderr_lines: Option<Vec<String>>`** (additive,
+  `serde(default)` for back-compat with on-disk records persisted
+  before this field existed). Populated by the exec wrapper at
+  exit time from the existing 64-line `stderr_tail`; `None` for
+  headless-monitored exits where edge_monitor doesn't own the
+  child stdio. Unblocks the post-mortem card's "Last output:"
+  block without coupling its render path to live event timing.
+
+### Changed
+- **Cascading `Esc` priority in the TUI.** `App::handle_escape`
+  routes Esc through: post-mortem card → armed-kill disarm →
+  history overlay close → help overlay close, in that order. Each
+  branch consumes the press and returns; subsequent branches don't
+  fire. Filter mode still owns its own Esc (cancels filter).
+
+### Notes
+- `webbrowser` crate added to `Cargo.toml` (`default-features = false`,
+  ~50 KB stripped). Binary remains over the 5 MB budget; size trim
+  deferred per prior CHANGELOG note.
+
 - **Tier 3.4 history rendering** ([B-7], commit `e3a22da`,
   `src/history.rs`). `edge_monitor history MODEL` now renders the
   spec-example second line per row when concurrency telemetry is
@@ -494,9 +548,9 @@ once `v1.0.0` is tagged. Until then, minor versions may include breaking changes
 ### Notes
 - Developed on WSL Ubuntu; NVML returns `None` gracefully without GPU
   passthrough. Real target (Jetson AGX Orin) not yet validated end-to-end.
-- 344 lib unit + 3 concurrent-request e2e + 1 expect-rule guard +
+- 364 lib unit + 3 concurrent-request e2e + 1 expect-rule guard +
   3 governor pid-reuse + 2 governor proptest + 5 history-CLI + 2
-  log-format + 3 pipeline + 1 SIGTERM clean-shutdown = 364 tests
+  log-format + 3 pipeline + 1 SIGTERM clean-shutdown = 384 tests
   pass on release (`cargo test --release`).
 - No release artifact yet. `v0.1.0` will be tagged once Phase 1 launch
   checklist (CI, demo GIF, `.deb`, crates.io name reservation) is complete.

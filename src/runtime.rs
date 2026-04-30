@@ -196,6 +196,14 @@ impl Runtime {
         {
             tracing::error!(error = %e, "prometheus exporter setup failed; continuing without it");
         }
+        // Tier 3.6 — vision probe Unix socket. enable_vision_probe is a
+        // no-op when the configured path is empty, so this call is safe
+        // unconditionally. Without it, [telemetry] vision_probe_socket
+        // is parsed but the listener never binds — the gap [B-4-3.6]
+        // smoke surfaced.
+        if let Some(d) = telemetry.as_mut() {
+            d.enable_vision_probe(&config.telemetry.vision_probe_socket);
+        }
         let fingerprinter = Fingerprinter::open(if config.storage.fingerprint_cache.is_empty() {
             None
         } else {

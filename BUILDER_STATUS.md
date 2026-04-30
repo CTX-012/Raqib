@@ -31,6 +31,26 @@ to history) and via reading concurrent worktrees.
   branch: audit/2026-04-29
   finished: 2026-04-29
 
+- builder_id: builder-claude/tui-ux-three
+  scope: Three TUI UX features per IMPLEMENTATION_LINUX_TUI_UX.md
+    - [UX-1] armed-kill banner (top-of-screen + 5s countdown)
+    - [UX-2] post-mortem card (centered overlay, 30s auto-dismiss)
+    - [UX-3] `g` keybinding for [dashboard].url_template
+    Plus the supporting `RunRecord.stderr_lines` additive field
+    and the new [dashboard] config section.
+  branch: builder-claude/tui-ux-three (separate branch from
+          audit/2026-04-29 per the implementation doc; reference
+          for the planned Windows parity work).
+  finished: 2026-04-30
+  notes: UI Contract section of IMPLEMENTATION_LINUX_TUI_UX.md is
+         the locked surface for cross-platform parity. Worked in
+         parallel with Builder A — armed_banner.rs and
+         postmortem.rs panel modules + RunRecord.stderr_lines +
+         [dashboard] config + Runtime::pending_postmortems were
+         already in place; this claim wired App / input / mod /
+         panels render path / runtime trigger and added the
+         smoke script + CHANGELOG/FEATURES entries.
+
 ## Ready for Test
 
 ### [A-1] S.3 — `expect()` rule reconciled with code  [T1: PASS 2026-04-29T11:32Z]
@@ -1306,6 +1326,100 @@ to history) and via reading concurrent worktrees.
   smoke's job is to prove the probe→accumulator pipeline is alive,
   not measure exact fps. cargo test --release green; clippy clean.
   Authorised override of the brief's "no `src/` edits" rule.
+
+### [UX-1] Armed-kill banner (top-of-screen + 5s auto-disarm)
+- Commit SHA: 19b7efe42402266ae331e12da581b97087e5180a
+- Files changed: src/ui/panels/armed_banner.rs (new),
+  src/ui/panels/mod.rs, src/ui/app.rs, src/ui/mod.rs,
+  src/ui/input.rs
+- Smoke: scripts/manual/tui_ux_three_smoke.sh
+- Verification command (what the tester should run):
+  ```
+  cargo test --release --lib ui::panels::armed_banner ui::app::tests
+  ```
+- Expected output (last 10 lines):
+  ```
+  test ui::panels::armed_banner::tests::allowlisted_body_matches_ui_contract ... ok
+  test ui::panels::armed_banner::tests::expired_after_window ... ok
+  test ui::panels::armed_banner::tests::normal_body_matches_ui_contract ... ok
+  test ui::panels::armed_banner::tests::seconds_remaining_counts_down ... ok
+  test ui::app::tests::arm_kill_records_pid_and_name_and_allowlisted ... ok
+  test ui::app::tests::esc_disarms_kill_when_no_postmortem_present ... ok
+  test ui::app::tests::esc_dismisses_postmortem_in_priority_over_disarm ... ok
+  test ui::app::tests::tick_overlays_drops_expired_armed_kill ... ok
+  test result: ok. ...
+  ```
+- Builder note: 5s WINDOW + verbatim body strings locked by UI
+  Contract (`IMPLEMENTATION_LINUX_TUI_UX.md`). `seconds_remaining`
+  rounds UP so a freshly-armed kill reads `5s` rather than `4s`
+  for the first 999 ms; UI Contract pins the ceiling, not the
+  truncating floor of `Duration::as_secs()`. Old inline status-bar
+  marker removed — the full-row red banner is visually unmissable
+  and double-rendering the same state was a source of confusion.
+
+### [UX-2] Post-mortem card (centered overlay, 30s auto-dismiss)
+- Commit SHA: 19b7efe42402266ae331e12da581b97087e5180a
+- Files changed: src/ui/panels/postmortem.rs (new),
+  src/ui/panels/mod.rs, src/ui/app.rs, src/ui/mod.rs,
+  src/ui/input.rs (and the supporting `RunRecord.stderr_lines`
+  + `Runtime::pending_postmortems` plumbing that landed earlier
+  on `audit/2026-04-29` from Builder A's prep work)
+- Smoke: scripts/manual/tui_ux_three_smoke.sh
+- Verification command (what the tester should run):
+  ```
+  cargo test --release --lib ui::panels::postmortem ui::app::tests
+  ```
+- Expected output (last 10 lines):
+  ```
+  test ui::panels::postmortem::tests::build_lines_emits_required_fields_in_order ... ok
+  test ui::panels::postmortem::tests::clip_ellipsizes_long_strings ... ok
+  test ui::panels::postmortem::tests::clip_leaves_short_strings_alone ... ok
+  test ui::panels::postmortem::tests::duration_formats_at_each_band ... ok
+  test ui::panels::postmortem::tests::expired_after_window ... ok
+  test ui::panels::postmortem::tests::no_stderr_block_when_lines_absent_or_empty ... ok
+  test ui::panels::postmortem::tests::seconds_remaining_counts_down_from_thirty ... ok
+  test ui::panels::postmortem::tests::stderr_block_renders_only_when_present_and_clamps_to_three ... ok
+  test result: ok. ...
+  ```
+- Builder note: 30s WINDOW, 60% width clamped `[60, 100]`, fixed
+  12-row height, seven required field labels in locked order, and
+  stderr-clamp to the last 3 lines all pinned by unit tests
+  against the UI Contract. Field order test reads the labels off
+  built lines so a casual cleanup pass can't silently re-order.
+  Latest-wins replacement (no queue) per UI Contract D3.
+  AI-classified exits trigger the card; non-AI exits never do —
+  the runtime gates by `record_clone.summary.category.is_some()`.
+
+### [UX-3] `g` keybinding for `[dashboard].url_template`
+- Commit SHA: 19b7efe42402266ae331e12da581b97087e5180a
+- Files changed: src/ui/input.rs (new `g` binding + contextual
+  `Enter` for postmortem dismiss), src/ui/mod.rs
+  (`handle_open_dashboard`), src/ui/app.rs (Action variants).
+  Supporting prep already on `audit/2026-04-29`: `Cargo.toml`
+  (`webbrowser` dep), `src/config.rs` (`DashboardConfig`),
+  `edge_monitor.toml.example`, `docs/configuration.md`.
+- Smoke: scripts/manual/tui_ux_three_smoke.sh
+- Verification command (what the tester should run):
+  ```
+  cargo test --release --lib ui::input
+  ```
+- Expected output (last 10 lines):
+  ```
+  test ui::input::tests::enter_dismisses_postmortem_when_visible ... ok
+  test ui::input::tests::enter_is_noop_in_normal_mode_without_postmortem ... ok
+  test ui::input::tests::esc_in_normal_mode_routes_to_app_handle_escape ... ok
+  test ui::input::tests::g_emits_open_dashboard ... ok
+  test result: ok. <N> passed; 0 failed; ...
+  ```
+- Builder note: closes T2's V3 finding 1 (`g` previously unmapped).
+  `handle_open_dashboard` substitutes `{model}` and `{pid}` against
+  the focused row and calls `webbrowser::open`. Empty template
+  logs a `tracing::info!` hint pointing at the config; no focused
+  row logs a different hint. Browser-launch failure is logged at
+  `warn` with the URL so the operator can copy-paste even when
+  the launch itself failed. Static URLs (no substitution tokens)
+  are accepted on purpose — some users want a fixed dashboard
+  link.
 
 ## Cross-builder requests
 

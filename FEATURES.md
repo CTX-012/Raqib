@@ -454,18 +454,19 @@ for piping into `jq`.
 
 ## Test surface
 
-`cargo test --release` reports **327 lib unit + 3 concurrent-request
+`cargo test --release` reports **344 lib unit + 3 concurrent-request
 e2e + 1 expect-rule guard + 3 governor pid-reuse + 2 governor
 proptest + 5 history-CLI + 2 log-format + 3 pipeline + 1 SIGTERM
-clean-shutdown = 347 tests** today, all passing. (Recently added:
+clean-shutdown = 364 tests** today, all passing. Recently added:
 the expect-rule guard enforces CLAUDE.md's `expect()` allowlist
 [A-1]; `--log-format json` integration tests [A-2]; SIGTERM
 clean-shutdown integration test [A-3]; concurrent-request awareness
 end-to-end coverage [A-4]; Ollama `eval rate:` regex unit tests
-[A-5]; pid-reuse covers the governor's PID-recycling safety; the
-governor proptest fuzzes the safety invariants; new run-store
-property test (1000 cases) and write-rejection / robust-baseline
-tests landed via [C-2]/[C-4]/[C-5].)
+[A-5]; UX rename pass tests [A-6]; new run-store property test
+(1000 cases), write-rejection, robust-baseline, and error-message
+contract tests landed via [C-2]/[C-4]/[C-5]/[C-6]; `RegressionConfig`
+strategy / outlier toggle tests [B-6]; Tier 3.4 history-rendering
+matrix [B-7].
 
 `cargo clippy --all-targets -- -D warnings` is part of CI. The
 release binary now weighs ~7.4 MB (was ~2.7 MB pre-Tier-1.2) — the
@@ -477,38 +478,36 @@ out the door.
 
 ## Remaining gaps for v0.1.0
 
-Tier 3.4 — concurrent-request awareness — has landed [A-4]:
-`vllm:num_requests_running` and `vllm:num_requests_waiting` are
-parsed, `RunMetrics` carries `concurrent_requests_avg` (time-
-weighted), `concurrent_requests_peak`, and
-`concurrent_requests_waiting_peak`. The data is queryable via
-`history --json` today. The remaining loose end is the per-row text
-rendering called out by `latest.md` Tier 3.4 spec example
-("`#14  serving 8 concurrent (peak)  →  20.1 tok/s/req · 161 tok/s
-aggregate`") in `src/history.rs`; flagged in `BUILDER_STATUS.md`
-cross-builder requests, ownership not yet assigned.
+Tier 3.4 — concurrent-request awareness — is fully landed.
+`[A-4]` shipped the data path
+(`vllm:num_requests_running` / `_waiting`, `RunMetrics`
+`concurrent_requests_avg` / `_peak` / `_waiting_peak`); `[B-7]`
+shipped the history viewer's per-row second line per the spec
+example
+(`serving N concurrent (peak; M.M avg)  →  X.X tok/s/req · Y.Y
+tok/s aggregate[ · queue peak Q]`).
 
-Two known wiring gaps surfaced by the smoke-script audit (filed in
+Tier 3.6 — vision probe socket — was previously a wiring gap and
+has now been closed (`Runtime::new` invokes
+`Dispatcher::enable_vision_probe(...)` alongside the exporter
+binding; `[telemetry] vision_probe_socket = "..."` is no longer a
+no-op). The `[B-4-3.6]` smoke script's pre-flight passes through
+to the full assertion path.
+
+One known wiring gap surfaced by the smoke-script audit (filed in
 `BUILDER_STATUS.md` cross-builder requests):
 
-- **Tier 3.6 vision probe socket** — `Dispatcher::enable_vision_probe`
-  exists but `Runtime::new` never calls it, so
-  `[telemetry] vision_probe_socket = "..."` is currently a no-op.
-  Fix is one line in `runtime.rs` next to the existing
-  `enable_exporter` call.
 - **Tier 3.2 cold-start vs steady-state via `exec`** — the cold-load
-  tracker only runs from the headless tick loop; `edge_monitor exec`
-  doesn't plumb `record_disk_io(...)`, so a workload run under the
-  exec wrapper cannot transition to steady-state. Either plumb it
-  or scope Tier 3.2 to headless mode in `latest.md`.
+  tracker only runs from the headless tick loop;
+  `edge_monitor exec` doesn't plumb `record_disk_io(...)`, so a
+  workload run under the exec wrapper cannot transition to
+  steady-state. Either plumb it or scope Tier 3.2 to headless mode
+  in `latest.md`.
 
-One UX rough edge surfaced by Tester 2's V3 walkthrough:
-
-- **Headless no-GPU visibility** (S3) — when NVML init fails on a
-  no-GPU host, the failure is logged at `DEBUG` level only; default
-  `info` shows nothing. The TUI displays the message correctly;
-  headless users see silent operation. Fix is a one-line
-  log-level bump in the NVML init path.
+Tester 2's V3 walkthrough finding S.0.7 (headless no-GPU
+visibility) is already addressed: `Nvml::init()` failure now logs
+at `INFO` level with a message that names what's missing and what
+still works (`src/platform/gpu_nvidia.rs:87`).
 
 Genuinely off the roadmap (anti-goals from `latest.md` + `CLAUDE.md`):
 ROS2 node detection, Intel NPU, AMD ROCm, Hailo, web UI, Windows

@@ -9,6 +9,34 @@ once `v1.0.0` is tagged. Until then, minor versions may include breaking changes
 ## [Unreleased]
 
 ### Added
+- **Tier 3.4 history rendering** ([B-7], commit `e3a22da`,
+  `src/history.rs`). `edge_monitor history MODEL` now renders the
+  spec-example second line per row when concurrency telemetry is
+  populated:
+  `serving N concurrent (peak; M.M avg)  →  X.X tok/s/req · Y.Y
+  tok/s aggregate[ · queue peak Q]`. Falls back to peak as the
+  divisor when the time-weighted avg is missing (and names which
+  divisor was used so a reader doesn't confuse the two), skips the
+  per-request column on peak=0 to avoid Inf/NaN, and suppresses
+  the queue-peak suffix when it's zero. Vision / Ollama /
+  llama.cpp without busy-slot exposure render as before — the
+  table stays compact for non-LLM history. `format_concurrent_line`
+  is `pub(crate)` so future TUI overlays can reuse it. 6 new unit
+  tests pin the matrix.
+- **`[regression] baseline_strategy` + `drop_outliers` config**
+  ([B-6], commit `25665b8`, `src/config.rs`+`src/runtime.rs`).
+  Closes the wiring gap between `[C-5]`'s Mean/Median API and the
+  toml example. `RegressionConfig` gains
+  `baseline_strategy: String` (default `"mean"`) and
+  `drop_outliers: bool` (default `false`). `validate()` rejects
+  any strategy other than `"mean"`/`"median"` (case-insensitive)
+  at load time with a message naming the offending value.
+  `runtime::check_regressions` now reads `cfg.strategy()` /
+  `cfg.drop_outliers` instead of the previously-hardcoded
+  `Mean`/`false`, so `Baseline.strategy` and
+  `Baseline.outlier_run_ids` reflect the user's choice.
+  `edge_monitor.toml.example` and `docs/configuration.md` document
+  both fields with their defaults.
 - **Tier 3.4 — concurrent-request awareness**
   (`src/telemetry/concurrent_requests.rs`). New
   `TimeWeightedGauge` primitive folds `(value, instant)` samples into
@@ -466,9 +494,10 @@ once `v1.0.0` is tagged. Until then, minor versions may include breaking changes
 ### Notes
 - Developed on WSL Ubuntu; NVML returns `None` gracefully without GPU
   passthrough. Real target (Jetson AGX Orin) not yet validated end-to-end.
-- 313 lib unit + 1 expect-rule guard + 3 governor pid-reuse + 2
-  governor proptest + 5 history-CLI + 3 pipeline = 327 tests pass on
-  release (`cargo test --release`).
+- 344 lib unit + 3 concurrent-request e2e + 1 expect-rule guard +
+  3 governor pid-reuse + 2 governor proptest + 5 history-CLI + 2
+  log-format + 3 pipeline + 1 SIGTERM clean-shutdown = 364 tests
+  pass on release (`cargo test --release`).
 - No release artifact yet. `v0.1.0` will be tagged once Phase 1 launch
   checklist (CI, demo GIF, `.deb`, crates.io name reservation) is complete.
 

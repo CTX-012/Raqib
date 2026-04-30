@@ -30,6 +30,23 @@ pub struct Config {
     pub storage: StorageConfig,
     pub regression: RegressionConfig,
     pub telemetry: TelemetryConfig,
+    pub dashboard: DashboardConfig,
+}
+
+/// [UX-3] — what the `g` keybinding opens in the user's default
+/// browser. Empty `url_template` disables the keybinding (the TUI
+/// prints a status hint pointing at this section). Substitution
+/// tokens supported:
+///
+/// * `{model}` — focused workload's `model_name`, empty if unknown
+/// * `{pid}`   — focused workload's PID as a decimal integer
+///
+/// Static URLs (no tokens) are accepted — some operators just want a
+/// fixed dashboard link for the box.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DashboardConfig {
+    pub url_template: String,
 }
 
 /// Toggles for the optional [`telemetry::Dispatcher`] samplers

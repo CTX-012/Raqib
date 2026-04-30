@@ -155,6 +155,10 @@ pub struct Runtime {
     /// would-fire in dry-run); consulted on exit to attribute the
     /// kill to `ExitReason::GovernorKill`.
     governor_killed_pids: HashMap<u32, String>,
+    /// [UX-2] — pending post-mortem cards built by the runtime's exit
+    /// hook. Drained by `Runtime::drain_postmortems` on every render
+    /// frame so the TUI surfaces AI exits within ~100 ms.
+    pending_postmortems: Vec<crate::ui::panels::postmortem::PostMortemCard>,
     /// Previous tick's cumulative CPU ticks, per PID, plus the wall-clock
     /// timestamp that reading was taken at. Used to compute cpu_pct as
     /// delta_ticks / CLK_TCK / elapsed_secs × 100.
@@ -225,6 +229,7 @@ impl Runtime {
             fingerprinter,
             pid_to_model_path: HashMap::new(),
             governor_killed_pids: HashMap::new(),
+            pending_postmortems: Vec::new(),
             prev_cpu: HashMap::new(),
             clk_tck: read_clk_tck(),
         }
@@ -255,6 +260,25 @@ impl Runtime {
 
     /// Toggle the `enforce` bit in the live policy. The next tick will use
     /// the new mode. Manual kills follow the same flag.
+    /// Is the named process on the governor's allowlist? Surface for
+    /// the TUI's armed-kill banner so it can show the override-variant
+    /// copy without re-deriving allowlist state from the policy. Pure
+    /// read; doesn't touch governor state.
+    pub fn is_allowlisted(&self, name: &str) -> bool {
+        crate::governor::manual::ManualKiller::is_allowlisted(name, &self.governor)
+    }
+
+    /// [UX-2] — drain queued post-mortem cards. The render loop calls
+    /// this once per frame and pushes anything it finds onto `App`.
+    /// Returning a `Vec` rather than an `Option<single>` lets the
+    /// runtime outpace the renderer without dropping cards on the
+    /// floor; the latest-wins rule is enforced inside `App`.
+    pub fn drain_postmortems(
+        &mut self,
+    ) -> Vec<crate::ui::panels::postmortem::PostMortemCard> {
+        std::mem::take(&mut self.pending_postmortems)
+    }
+
     pub fn toggle_dry_run(&mut self) {
         let policy = self.governor.policy_mut();
         policy.enforce = !policy.enforce;
@@ -452,6 +476,31 @@ impl Runtime {
                         .regressions_count
                         .entry((ev.model.clone(), ev.regression.metric.clone()))
                         .or_insert(0) += 1;
+                }
+
+                // [UX-2] — push a post-mortem card for AI-classified
+                // exits. Worst-by-severity wins; ties resolve to the
+                // most-recently-pushed event since `max_by_key` keeps
+                // the latest among equal keys with stable ordering.
+                if record_clone.summary.category.is_some() {
+                    let worst = self
+                        .state
+                        .regressions
+                        .iter()
+                        .skip(regs_before)
+                        .max_by_key(|ev| match ev.regression.severity {
+                            crate::analysis::Severity::Critical => 2,
+                            crate::analysis::Severity::Warn => 1,
+                            crate::analysis::Severity::Info => 0,
+                        })
+                        .map(|ev| ev.regression.clone());
+                    self.pending_postmortems.push(
+                        crate::ui::panels::postmortem::PostMortemCard {
+                            record: record_clone,
+                            worst_regression: worst,
+                            shown_at: Instant::now(),
+                        },
+                    );
                 }
             }
             // Drop accumulator state for the exited PID so a recycled

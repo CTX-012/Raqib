@@ -33,6 +33,10 @@ async-trait = "0.1"
 regex = "1"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "http2"] }
 sha2 = "0.10"
+# `g` keybinding cross-platform browser-open ([UX-3]). ~50 KB stripped;
+# binary was already over the 5 MB budget per CHANGELOG, so the marginal
+# cost is acceptable.
+webbrowser = { version = "1", default-features = false }
 
 [dev-dependencies]
 pretty_assertions = "1"

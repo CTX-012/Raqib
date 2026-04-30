@@ -126,32 +126,36 @@ fn apply_action(action: Action, runtime: &mut Runtime, app: &mut App) {
         Action::FilterChar(c) => app.filter_push(c),
         Action::FilterBackspace => app.filter_pop(),
         Action::ConfirmKill => {
-            if let Some(pid) = app.selected_pid(runtime.state()) {
-                if app.armed_kill_pid() == Some(pid) {
-                    let reason = "manual kill via TUI".to_string();
-                    if let Err(e) = runtime.manual_kill(pid, reason) {
-                        tracing::warn!("manual kill failed: {}", e);
-                    }
-                    app.disarm_kill();
-                } else {
-                    // Resolve name + allowlist status at the moment
-                    // of the keypress so the banner renders without
-                    // having to re-walk the runtime state every frame.
-                    let state = runtime.state();
-                    let proc = state.annotated.iter().find(|p| p.pid == pid);
-                    let name = proc.map(|p| p.name.clone()).unwrap_or_default();
-                    let allowlisted = runtime
-                        .config()
-                        .policy
-                        .allowlist
-                        .contains(&name);
-                    app.arm_kill(ArmedKill {
-                        pid,
-                        name,
-                        allowlisted,
-                        armed_at: Instant::now(),
-                    });
+            // FIRE branch: once armed, the kill is committed to the
+            // armed PID. A second `k` must fire on `armed_kill_pid`
+            // (not `selected_pid`) — otherwise selection drift between
+            // ticks (PID list reshuffle, focus moves that the user
+            // didn't notice) silently re-arms instead of firing, which
+            // looks like the keypress was lost.
+            if let Some(armed_pid) = app.armed_kill_pid() {
+                let reason = "manual kill via TUI".to_string();
+                if let Err(e) = runtime.manual_kill(armed_pid, reason) {
+                    tracing::warn!("manual kill failed: {}", e);
                 }
+                app.disarm_kill();
+            } else if let Some(pid) = app.selected_pid(runtime.state()) {
+                // ARM branch: resolve name + allowlist status at the
+                // moment of the keypress so the banner renders without
+                // having to re-walk the runtime state every frame.
+                let state = runtime.state();
+                let proc = state.annotated.iter().find(|p| p.pid == pid);
+                let name = proc.map(|p| p.name.clone()).unwrap_or_default();
+                let allowlisted = runtime
+                    .config()
+                    .policy
+                    .allowlist
+                    .contains(&name);
+                app.arm_kill(ArmedKill {
+                    pid,
+                    name,
+                    allowlisted,
+                    armed_at: Instant::now(),
+                });
             }
         }
         Action::OpenHistory => {

@@ -58,13 +58,16 @@ pub fn translate(key: KeyEvent, app: &App) -> Option<Dispatch> {
             // §6 — `g` opens Grafana for the focused workload.
             KeyCode::Char('g') => Some(Dispatch::Contract(Action::OpenGrafana)),
             KeyCode::Char('j') | KeyCode::Down => Some(Dispatch::Contract(Action::SelectDown)),
+            // Note: §6 keymap defines lowercase `k` = KillOrConfirm.
+            // Uppercase `K` (and Up arrow) bind to SelectUp as an
+            // implementation extension — the contract is silent on
+            // `K`. In the single-focusable v1.0 layout (Workloads is
+            // the only focusable element after L2b removed Tab focus
+            // cycling), this resolves the vim-muscle-memory
+            // expectation that `k` goes up. Revisit if v1.1 adds
+            // multi-panel focus (Tab cycling was deliberately
+            // removed by L2b).
             KeyCode::Char('K') | KeyCode::Up => Some(Dispatch::Contract(Action::SelectUp)),
-            // Group D — `d`/`v`/Tab/BackTab — removed by L2b. Routing
-            // through LegacyAction keeps L2a a pure-rename refactor.
-            KeyCode::Char('d') => Some(Dispatch::Legacy(LegacyAction::ToggleDryRun)),
-            KeyCode::Char('v') => Some(Dispatch::Legacy(LegacyAction::ToggleDetailMode)),
-            KeyCode::Tab => Some(Dispatch::Legacy(LegacyAction::FocusNext)),
-            KeyCode::BackTab => Some(Dispatch::Legacy(LegacyAction::FocusPrev)),
             // Filter family — removed by L2c.
             KeyCode::Char('/') => Some(Dispatch::Legacy(LegacyAction::StartFilter)),
             _ => None,
@@ -138,15 +141,6 @@ mod tests {
     }
 
     #[test]
-    fn d_toggles_dry_run() {
-        let app = App::new();
-        assert_eq!(
-            translate(key(KeyCode::Char('d')), &app),
-            Some(Dispatch::Legacy(LegacyAction::ToggleDryRun))
-        );
-    }
-
-    #[test]
     fn k_triggers_kill_or_confirm() {
         let app = App::new();
         assert_eq!(
@@ -155,22 +149,24 @@ mod tests {
         );
     }
 
+    /// L2b — `d`, `v`, Tab, Shift-Tab are not in §6 and are no longer
+    /// bound. The dispatch loop sees None and skips silently.
     #[test]
-    fn tab_cycles_focus_forward() {
+    fn group_d_keys_are_unbound_after_l2b() {
         let app = App::new();
-        assert_eq!(
-            translate(key(KeyCode::Tab), &app),
-            Some(Dispatch::Legacy(LegacyAction::FocusNext))
-        );
-    }
-
-    #[test]
-    fn v_toggles_detail_mode() {
-        let app = App::new();
-        assert_eq!(
-            translate(key(KeyCode::Char('v')), &app),
-            Some(Dispatch::Legacy(LegacyAction::ToggleDetailMode)),
-        );
+        for code in [
+            KeyCode::Char('d'),
+            KeyCode::Char('v'),
+            KeyCode::Tab,
+            KeyCode::BackTab,
+        ] {
+            assert_eq!(
+                translate(key(code), &app),
+                None,
+                "{:?} must be unbound after L2b",
+                code
+            );
+        }
     }
 
     #[test]

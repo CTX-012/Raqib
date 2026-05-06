@@ -35,15 +35,13 @@ const RENDER_CALL_PATTERNS: &[&str] = &[
 /// from this list as part of the row's diff.
 const DEFERRED_FILES: &[&str] = &[
     "src/ui/panels/mod.rs",          // L25 (header) + L25 (footer keymap)
-    "src/ui/panels/armed_banner.rs", // L7 ack + L24 Esc cascade (CAR pending: countdown + allowlist hint)
+    "src/ui/panels/armed_banner.rs", // L7 ack + L24 Esc cascade (CAR-4 resolved in v0.3.2 batch)
     "src/ui/panels/audit.rs",        // L15 (merged into Activity)
     "src/ui/panels/completed.rs",    // L15 (merged into Activity)
-    "src/ui/panels/culprits.rs",     // L13 (replaced by Top processes)
-    "src/ui/panels/help.rs",         // CAR pending: help-overlay copy not in v0.3
-    "src/ui/panels/history_overlay.rs", // CAR pending: overlay header + column labels not in v0.3
-    "src/ui/panels/postmortem.rs",   // L16 split + CAR pending: post-mortem field labels
-    "src/ui/panels/registry.rs",     // L11 (rename to workloads.rs); CAR pending: filter empty-state
-    "src/ui/panels/rogues.rs",       // L13 (replaced by Top processes)
+    "src/ui/panels/help.rs",         // CAR-1 resolved in v0.3.2 (help::* module)
+    "src/ui/panels/history_overlay.rs", // CAR-6: overlay header + column labels not in v0.3
+    "src/ui/panels/postmortem.rs",   // L16 split + CAR-2 resolved in v0.3.2 (postmortem_labels::*)
+    "src/ui/panels/registry.rs",     // L11 (rename to workloads.rs); filter empty-state goes away in L2c
     "src/ui/panels/vitals.rs",       // L11 (rename to System)
 ];
 

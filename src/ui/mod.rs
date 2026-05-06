@@ -215,14 +215,8 @@ fn apply_contract(action: Action, runtime: &mut Runtime, app: &mut App) {
     }
 }
 
-fn apply_legacy(legacy: LegacyAction, runtime: &mut Runtime, app: &mut App) {
+fn apply_legacy(legacy: LegacyAction, _runtime: &mut Runtime, app: &mut App) {
     match legacy {
-        // Group D — L2b deletes these arms together with the bindings
-        // and App-state fields they touch.
-        LegacyAction::ToggleDryRun => runtime.toggle_dry_run(),
-        LegacyAction::ToggleDetailMode => app.toggle_detail_mode(),
-        LegacyAction::FocusNext => app.focus_next(),
-        LegacyAction::FocusPrev => app.focus_prev(),
         // Filter family — L2c deletes these arms together with
         // `Mode::Filter`, the filter buffer, and the registry's
         // filter empty-state copy (former L1 CAR-3).

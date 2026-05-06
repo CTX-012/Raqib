@@ -1,6 +1,5 @@
 use std::time::{Duration, Instant};
 
-use crate::model::AICategory;
 use crate::runtime::RuntimeState;
 use crate::storage::RunRecord;
 use crate::ui::panels::armed_banner::ArmedKill;
@@ -12,40 +11,6 @@ use crate::ui::panels::postmortem::PostMortemCard;
 /// enough not to mask the keybind hints permanently.
 pub(crate) const STATUS_TTL: Duration = Duration::from_secs(3);
 
-/// Which panel currently owns selection / cursor focus.
-/// Only the three list panels accept selection; vitals and audit are read-only.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FocusedPanel {
-    Registry,
-    Rogues,
-    Culprits,
-}
-
-impl FocusedPanel {
-    pub fn next(self) -> Self {
-        match self {
-            Self::Registry => Self::Rogues,
-            Self::Rogues => Self::Culprits,
-            Self::Culprits => Self::Registry,
-        }
-    }
-    pub fn prev(self) -> Self {
-        match self {
-            Self::Registry => Self::Culprits,
-            Self::Rogues => Self::Registry,
-            Self::Culprits => Self::Rogues,
-        }
-    }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Registry => "Registry",
-            Self::Rogues => "Rogues",
-            Self::Culprits => "Culprits",
-        }
-    }
-}
-
 /// L2a / UX_CONTRACT.md §6 — input actions are owned by `ux_contract`.
 /// The 11 contract variants (Quit, ToggleHelp, SelectUp, SelectDown,
 /// KillOrConfirm, OpenDetail, OpenGrafana, ToggleHistory,
@@ -55,20 +20,12 @@ impl FocusedPanel {
 pub use ux_contract::Action;
 
 /// L2a — variants without a `ux_contract::Action` analog live here
-/// transitionally. **L2b** removes Group D (the `d`/`v`/Tab/BackTab
+/// transitionally. **L2b** removed Group D (the `d`/`v`/Tab/BackTab
 /// bindings the contract §6 omits). **L2c** removes the `/` filter
-/// family (deferred to v1.1 per the contract). Both rows delete this
-/// enum entirely.
+/// family (deferred to v1.1 per the contract) and deletes this enum
+/// entirely along with `Dispatch::Legacy`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LegacyAction {
-    /// `d` — toggle dry-run/enforce. Removed by L2b (key not in §6).
-    ToggleDryRun,
-    /// `v` — toggle detail mode. Removed by L2b (key not in §6).
-    ToggleDetailMode,
-    /// `Tab` — cycle panel focus forward. Removed by L2b (key not in §6).
-    FocusNext,
-    /// `Shift-Tab` — cycle panel focus backward. Removed by L2b (key not in §6).
-    FocusPrev,
     /// `/` — start filter mode. Removed by L2c (filter deferred to v1.1).
     StartFilter,
     /// `Enter` while in filter mode — commit the filter. Removed by L2c.
@@ -111,9 +68,13 @@ pub struct HistoryOverlay {
 }
 
 /// Pure state machine for the TUI. No I/O, no rendering. Cheap to clone.
+///
+/// L2b removed the `focus` and `detail_mode` fields together with the
+/// Group D bindings (`d`/`v`/Tab/BackTab). The v1.0 layout has a single
+/// focusable element (Workloads), so panel-focus cycling has no UI
+/// affordance; selection state lives on `selected`.
 #[derive(Debug, Clone)]
 pub struct App {
-    focus: FocusedPanel,
     selected: usize,
     show_help: bool,
     quit_requested: bool,
@@ -125,18 +86,12 @@ pub struct App {
     /// the runtime state on every frame.
     armed_kill: Option<ArmedKill>,
     /// Most recent post-mortem-eligible exit ([UX-2]). Latest wins;
-    /// dismissed by Esc, Enter, or auto at `PostMortemCard::WINDOW`.
+    /// dismissed by Esc or auto at `PostMortemCard::WINDOW`.
     postmortem: Option<PostMortemCard>,
     /// `Some(_)` while the history overlay is open. Snapshotted on key
     /// press so subsequent ticks don't replace the records the user is
     /// reading.
     history: Option<HistoryOverlay>,
-    /// Detail mode — when `true`, render the secondary panels
-    /// (Framework procs, All processes, Recent actions). Default `false`
-    /// keeps the main view focused on AI Workloads + Recent runs, which
-    /// is what the operator-feedback pass asked for. Tab focus-cycling
-    /// is suppressed in default mode since only one panel is reachable.
-    detail_mode: bool,
     /// Ephemeral status footer message + when it was set. Auto-cleared
     /// by `tick_overlays` after `STATUS_TTL`. Used to surface kill-flow
     /// feedback (especially the dry-run "would-have-sent" message) so
@@ -154,7 +109,6 @@ impl Default for App {
 impl App {
     pub fn new() -> Self {
         Self {
-            focus: FocusedPanel::Registry,
             selected: 0,
             show_help: false,
             quit_requested: false,
@@ -163,7 +117,6 @@ impl App {
             armed_kill: None,
             postmortem: None,
             history: None,
-            detail_mode: false,
             status: None,
         }
     }
@@ -186,17 +139,11 @@ impl App {
         })
     }
 
-    pub fn focus(&self) -> FocusedPanel {
-        self.focus
-    }
     pub fn selected_index(&self) -> usize {
         self.selected
     }
     pub fn show_help(&self) -> bool {
         self.show_help
-    }
-    pub fn detail_mode(&self) -> bool {
-        self.detail_mode
     }
     pub fn should_quit(&self) -> bool {
         self.quit_requested
@@ -227,43 +174,8 @@ impl App {
         self.quit_requested = true;
     }
 
-    pub fn focus_next(&mut self) {
-        // Tab is meaningless when only AI Workloads is on screen — silently
-        // no-op rather than secretly moving focus to a panel the operator
-        // can't see.
-        if !self.detail_mode {
-            return;
-        }
-        self.focus = self.focus.next();
-        self.selected = 0;
-        self.armed_kill = None;
-    }
-
-    pub fn focus_prev(&mut self) {
-        if !self.detail_mode {
-            return;
-        }
-        self.focus = self.focus.prev();
-        self.selected = 0;
-        self.armed_kill = None;
-    }
-
     pub fn toggle_help(&mut self) {
         self.show_help = !self.show_help;
-    }
-
-    /// Toggle the secondary-panel view. Leaving detail mode snaps focus
-    /// back to AI Workloads (FocusedPanel::Registry) so the operator
-    /// returns to a known starting point — the previously focused panel
-    /// is no longer on screen, so keeping focus there would be invisible
-    /// state.
-    pub fn toggle_detail_mode(&mut self) {
-        self.detail_mode = !self.detail_mode;
-        if !self.detail_mode {
-            self.focus = FocusedPanel::Registry;
-            self.selected = 0;
-            self.armed_kill = None;
-        }
     }
 
     pub fn start_filter(&mut self) {
@@ -407,32 +319,20 @@ impl App {
         self.visible(state).get(self.selected).copied()
     }
 
-    /// PIDs visible in the currently focused panel after applying the filter.
+    /// PIDs visible in the AI Workloads panel after applying the filter.
     /// Stable PID-sorted so user selection doesn't jump between ticks.
+    /// L2b removed the focus-panel switch (Registry/Rogues/Culprits) —
+    /// only the AI Workloads list remains in the v1.0 layout.
     pub fn visible(&self, state: &RuntimeState) -> Vec<u32> {
         let needle = self.filter.to_lowercase();
         let matches = |p: &crate::runtime::AnnotatedProcess| {
             needle.is_empty() || p.name.to_lowercase().contains(&needle)
         };
-        let mut pids: Vec<u32> = match self.focus {
-            FocusedPanel::Registry => state
-                .ai_processes()
-                .filter(|p| matches(p))
-                .map(|p| p.pid)
-                .collect(),
-            FocusedPanel::Rogues => state
-                .annotated
-                .iter()
-                .filter(|p| p.category == AICategory::Framework && matches(p))
-                .map(|p| p.pid)
-                .collect(),
-            FocusedPanel::Culprits => {
-                let mut by_mem: Vec<&crate::runtime::AnnotatedProcess> =
-                    state.annotated.iter().filter(|p| matches(p)).collect();
-                by_mem.sort_by_key(|p| p.pid);
-                by_mem.iter().take(20).map(|p| p.pid).collect()
-            }
-        };
+        let mut pids: Vec<u32> = state
+            .ai_processes()
+            .filter(|p| matches(p))
+            .map(|p| p.pid)
+            .collect();
         pids.sort();
         pids
     }
@@ -441,6 +341,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::AICategory;
     use crate::runtime::{AnnotatedProcess, RuntimeState};
 
     fn state_with(procs: Vec<AnnotatedProcess>) -> RuntimeState {
@@ -463,48 +364,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn focus_cycles_forward_and_backward() {
-        let mut app = App::new();
-        // Tab is meaningful only in detail mode; flip the mode on first.
-        app.toggle_detail_mode();
-        assert_eq!(app.focus(), FocusedPanel::Registry);
-        app.focus_next();
-        assert_eq!(app.focus(), FocusedPanel::Rogues);
-        app.focus_prev();
-        assert_eq!(app.focus(), FocusedPanel::Registry);
-    }
-
-    #[test]
-    fn default_mode_locks_focus_to_registry() {
-        let mut app = App::new();
-        assert!(!app.detail_mode());
-        // Tab / Shift-Tab are no-ops while the secondary panels are
-        // hidden — moving focus to a panel the operator can't see would
-        // be invisible state.
-        app.focus_next();
-        assert_eq!(app.focus(), FocusedPanel::Registry);
-        app.focus_prev();
-        assert_eq!(app.focus(), FocusedPanel::Registry);
-    }
-
-    #[test]
-    fn toggle_detail_mode_flips_the_flag_and_resets_focus() {
-        let mut app = App::new();
-        assert!(!app.detail_mode());
-        app.toggle_detail_mode();
-        assert!(app.detail_mode());
-        app.focus_next(); // now actually moves
-        assert_eq!(app.focus(), FocusedPanel::Rogues);
-        // Leaving detail mode snaps focus back to Registry; otherwise
-        // the status bar would still say "focus: Rogues" while Rogues
-        // is no longer drawn.
-        app.toggle_detail_mode();
-        assert!(!app.detail_mode());
-        assert_eq!(app.focus(), FocusedPanel::Registry);
-        assert_eq!(app.selected_index(), 0);
-    }
-
     fn fake_armed(pid: u32, name: &str, allowlisted: bool) -> ArmedKill {
         ArmedKill {
             pid,
@@ -515,20 +374,7 @@ mod tests {
     }
 
     #[test]
-    fn leaving_detail_mode_disarms_pending_kill() {
-        let mut app = App::new();
-        app.toggle_detail_mode();
-        app.arm_kill(fake_armed(99, "ollama", false));
-        assert_eq!(app.armed_kill_pid(), Some(99));
-        // Returning to default mode hides the panel where the operator
-        // armed the kill — clearing the arm is the safe default; an
-        // armed kill the user can no longer see is a footgun.
-        app.toggle_detail_mode();
-        assert_eq!(app.armed_kill_pid(), None);
-    }
-
-    #[test]
-    fn registry_visible_only_includes_ai() {
+    fn visible_only_includes_ai() {
         let s = state_with(vec![
             ann(1, "ollama", AICategory::Inference),
             ann(2, "bash", AICategory::NotAi),
@@ -581,13 +427,18 @@ mod tests {
     }
 
     #[test]
-    fn focus_change_disarms_kill_for_safety() {
+    fn select_disarms_kill_for_safety() {
+        // L2b — focus cycling is gone; selection movement (j/K) is
+        // the only navigation, and it must still disarm a pending
+        // kill so the user can't accidentally fire on a different
+        // PID after the selection moves.
+        let s = state_with(vec![
+            ann(1, "ollama", AICategory::Inference),
+            ann(2, "vllm", AICategory::Inference),
+        ]);
         let mut app = App::new();
-        // Tab is a no-op in default mode, so move into detail mode
-        // first; that's the only mode where focus actually changes.
-        app.toggle_detail_mode();
         app.arm_kill(fake_armed(42, "ollama", false));
-        app.focus_next();
+        app.select_next(&s);
         assert_eq!(app.armed_kill_pid(), None);
     }
 

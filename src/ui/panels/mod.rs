@@ -5,12 +5,10 @@
 pub mod armed_banner;
 mod audit;
 mod completed;
-mod culprits;
 mod help;
 mod history_overlay;
 pub mod postmortem;
 mod registry;
-mod rogues;
 mod vitals;
 
 use ratatui::Frame;
@@ -40,11 +38,11 @@ pub fn render(f: &mut Frame, state: &RuntimeState, app: &App) {
         armed_banner::render(f, banner_area, armed, state.dry_run);
     }
 
-    if app.detail_mode() {
-        render_detail(f, body_area, state, app);
-    } else {
-        render_default(f, body_area, state, app);
-    }
+    // L2b removed the legacy "detail mode" toggle (`v` key + the
+    // 6-panel layout that surfaced rogues/culprits/audit). v0.3 §1
+    // defines a single layout, so the default render is the only
+    // path now.
+    render_default(f, body_area, state, app);
 
     if app.show_help() {
         help::render(f, body_area);
@@ -62,10 +60,9 @@ pub fn render(f: &mut Frame, state: &RuntimeState, app: &App) {
     }
 }
 
-/// Default view — what the operator sees on launch. Drops the
-/// secondary panels (Framework procs, All processes, Recent actions)
-/// so the screen is just the bits that answer "what's running and how
-/// did the last few runs go". Hit `v` to bring the others back.
+/// The default (and only) v1.0 layout. Status bar + vitals + AI
+/// Workloads + recent runs + footer. L11/L13/L15/L25 reshape the
+/// individual panels, but the top-level structure is locked here.
 fn render_default(f: &mut Frame, area: Rect, state: &RuntimeState, app: &App) {
     let layout = Layout::default()
         .direction(Direction::Vertical)
@@ -83,30 +80,6 @@ fn render_default(f: &mut Frame, area: Rect, state: &RuntimeState, app: &App) {
     registry::render(f, layout[2], state, app);
     completed::render(f, layout[3], state);
     render_footer(f, layout[4], app);
-}
-
-/// Detail view — the legacy six-panel layout, behind a `v` toggle.
-/// Kept for operators who actually want to see framework procs by PID
-/// or scroll through the audit trail without leaving the TUI.
-fn render_detail(f: &mut Frame, area: Rect, state: &RuntimeState, app: &App) {
-    let layout = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1), // status bar
-            Constraint::Length(7), // vitals
-            Constraint::Min(8),    // process panels (3 columns)
-            Constraint::Length(8), // recent runs
-            Constraint::Length(8), // recent actions
-            Constraint::Length(1), // hint footer
-        ])
-        .split(area);
-
-    render_status_bar(f, layout[0], state, app);
-    vitals::render(f, layout[1], state);
-    render_process_row(f, layout[2], state, app);
-    completed::render(f, layout[3], state);
-    audit::render(f, layout[4], state);
-    render_footer(f, layout[5], app);
 }
 
 fn render_status_bar(f: &mut Frame, area: Rect, state: &RuntimeState, app: &App) {
@@ -131,7 +104,6 @@ fn render_status_bar(f: &mut Frame, area: Rect, state: &RuntimeState, app: &App)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw(format!("  tick #{} ", state.tick_count)),
-        Span::raw(format!("focus: {} ", app.focus().label())),
     ];
 
     if app.mode() == super::app::Mode::Filter {
@@ -152,21 +124,6 @@ fn render_status_bar(f: &mut Frame, area: Rect, state: &RuntimeState, app: &App)
     f.render_widget(para, area);
 }
 
-fn render_process_row(f: &mut Frame, area: Rect, state: &RuntimeState, app: &App) {
-    let cols = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(40),
-            Constraint::Percentage(30),
-            Constraint::Percentage(30),
-        ])
-        .split(area);
-
-    registry::render(f, cols[0], state, app);
-    rogues::render(f, cols[1], state, app);
-    culprits::render(f, cols[2], state, app);
-}
-
 fn render_footer(f: &mut Frame, area: Rect, app: &App) {
     // An ephemeral status message wins over the keybind hints — the
     // operator-feedback path is more valuable than the always-visible
@@ -183,14 +140,14 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
         return;
     }
 
-    // Detail mode unlocks Tab; default mode locks focus to AI Workloads.
-    // The footer reflects what the operator can actually do right now —
-    // listing keys that no-op in default mode would be misleading.
-    let hints = if app.detail_mode() {
-        " q quit · v hide details · Tab focus · j/k select · / filter · k kill (×2) · h history · d dry-run · ? help "
-    } else {
-        " q quit · v show details · j/k select · / filter · k kill (×2) · h history · d dry-run · ? help "
-    };
+    // L2b removed `v` and Tab from the keymap; L2c will remove `/`.
+    // The string still mentions stale bindings — the locked v0.3
+    // footer ("Enter detail · k kill · g graph · h history · ? help
+    // · q quit") lands in L25 alongside the contract const
+    // `status::FOOTER_KEYMAP` (CAR-5). Until then this stub keeps the
+    // pre-L2b text minus `v hide/show details` and Tab focus, since
+    // those bindings genuinely no longer work.
+    let hints = " q quit · j/k select · / filter · k kill (×2) · h history · ? help ";
     let p = Paragraph::new(hints).style(Style::default().fg(Color::DarkGray));
     f.render_widget(p, area);
 }

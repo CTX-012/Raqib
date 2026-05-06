@@ -6,7 +6,7 @@ use ratatui::widgets::{List, ListItem, ListState, Paragraph, Wrap};
 
 use crate::runtime::RuntimeState;
 
-use super::super::app::{App, FocusedPanel};
+use super::super::app::App;
 use super::panel_block;
 
 /// Tier 3.3 — KV-cache pressure threshold. At or above this, the
@@ -17,13 +17,11 @@ use super::panel_block;
 const KV_HOT_PCT: f32 = 80.0;
 
 pub fn render(f: &mut Frame, area: Rect, state: &RuntimeState, app: &App) {
-    let focused = app.focus() == FocusedPanel::Registry;
-    let visible_pids = if focused {
-        app.visible(state)
-    } else {
-        // When unfocused, still list AI procs so the user sees them; just no cursor.
-        state.ai_processes().map(|p| p.pid).collect::<Vec<_>>()
-    };
+    // L2b — focus cycling is gone (panels/mod.rs no longer renders
+    // multiple list panels); the registry is always the focused
+    // selection target in v0.3 §1, so `focused = true` is locked here.
+    let focused = true;
+    let visible_pids = app.visible(state);
 
     let items: Vec<ListItem> = visible_pids
         .iter()

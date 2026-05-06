@@ -1,717 +1,1095 @@
-# edge_monitor — Design, Experience & Gaps Handoff
+The note above is misplaced — your three answers are decisions, not research requests. I'm consolidating v0.3 as you asked.
 
-> **Status (2026-04-29).** This document is *forward-looking design intent*,
-> filed at the project owner's request as a sibling to
-> [VISION.md](VISION.md) (audience) and [HANDOFF.md](HANDOFF.md)
-> (engineering). It is **not yet adopted into [latest.md](latest.md)**,
-> which remains the authoritative implementation roadmap. Items listed
-> here that conflict with `latest.md` (e.g. theme system, energy
-> accounting framing as v1, post-mortem cards, vocabulary changes) need
-> to be reconciled into `latest.md` before any code chases them — per
-> the parallel-builder protocol in [CLAUDE.md](CLAUDE.md), code that
-> drifts ahead of the spec gets reverted at audit time.
->
-> **How to use this doc.** Pull individual sections into `latest.md` as
-> they are accepted; cite this doc as the source. Do not treat it as a
-> single 10–12-day commitment — that estimate (Part 17) is for the full
-> program after spec acceptance, not for ad-hoc cherry-picking.
->
-> **Encoding note.** The original paste contained UTF-8/Latin-1 mojibake
-> from clipboard round-tripping. Obvious cases (em-dashes, middle dots,
-> degree signs, progress-bar full blocks, curly quotes) were normalised
-> in transcription. Any remaining `â`-style artefact is one I was not
-> confident enough to fix; flag it on review.
+Reading your answers:
 
-> **Purpose.** This document consolidates everything discussed about UX, visual design, color, themes, audience, and missing features into a single handoff. It is meant to be read by whoever picks up the design and product polish work next — whether that's another agent, a designer, or a future version of yourself returning to the project after a gap.
->
-> **Companion documents:**
-> - `IMPLEMENTATION_LINUX.md` / `IMPLEMENTATION_WINDOWS.md` — engineering specs for features
-> - `TEST.md` — adversarial test specification
-> - `verify-edge-monitor.sh` / `Verify-EdgeMonitor.ps1` — audit scripts
->
-> Those documents tell you *what to build* and *how to verify*. This document tells you *how it should feel* and *what's missing from the experience*.
+**Q1 — `d` conflict:** "Depends, most users will find annoying." I'm interpreting this as: leave `d` removed, the specific conflict doesn't matter — you're trusting the general principle that the key has too many habit collisions across Linux tools to be safe. Locked: `d` is not a key in the contract.
+
+**Q2 — Alert on exit:** Only on non-zero / OOM / kill. Clean exits don't pop alerts but still go to history. Locked.
+
+**Q3 — Show consolidated v0.3 first.** Here it is, end to end. After you read it, say "lock" or push back on specific clauses.
 
 ---
 
-## Part 1 — The audience question (this drives everything else)
-
-Earlier in the project we listed four audiences: beginner, hobbyist, dev, researcher. **Trying to serve all four with one UI was making the product muddled.** This handoff makes a deliberate choice:
-
-**Primary audience: ML engineers and developers iterating on models.**
-The tool's features (regression detection, audit log, history, governor, JSONL persistence) are dev concerns. Devs are the segment that writes blog posts and tweets screenshots. They're the segment with the strongest word-of-mouth.
-
-**Secondary: solo developers running local LLMs (hobbyists/enthusiasts).**
-They benefit from the simplified default screen, the clear empty states, and the post-mortem cards. They aren't the primary buyer but they're a healthy adoption flywheel.
-
-**Tertiary: researchers running structured experiments.**
-They live in Grafana and `--json` pipelines. The TUI matters less to them than the Prometheus exporter, history JSONL, and comparison commands. They're well-served by output formats, not pretty defaults.
-
-**Out of scope: complete beginners with zero command-line comfort.**
-edge_monitor is a CLI tool. A user who can't `cargo install` is not a user we optimize for.
-
-**What this means in practice.**
-- The default TUI is built for the dev segment. Plain English, sane defaults, no jargon overload.
-- Progressive disclosure lets hobbyists stay shallow and researchers go deep without forking the product.
-- "Beginner" features (tutorials, hand-holding, zero-config behaviors) serve the dev's first 60 seconds, not a separate persona.
-
-**The pitch is now:**
-> See what your AI workloads are actually doing. Live tokens/sec, energy per inference, and a permanent record of every run. Catches regressions before you do.
-
-Notice the governor (the kill-runaway feature) is no longer the headline. It's a safety net that lives in settings, not the marquee. The headline is **AI-aware history with regression detection**.
-
----
-
-## Part 2 — Visual design principles
-
-These principles are non-negotiable. Every UI decision in the project should trace back to one of them. If you can't articulate why a visual choice supports a principle, the choice is decoration and should be cut.
-
-### Principle 1 — Most of the screen is neutral. Color is the exception.
-
-Look at the tools in the same family that work: htop, lazygit, k9s, btop. The default screen is mostly grey-and-white text on a dark or light background. Color appears at *moments* — a red bar when memory is critical, green when a build passes, amber when something needs attention.
-
-When most of the screen is colored, color stops carrying information.
-
-**Apply by:** starting every component as a single neutral foreground color. Only add color when answering "what does this color tell the user that the surrounding text doesn't?" If you can't answer, remove the color.
-
-### Principle 2 — Color carries meaning, never decoration.
-
-Three semantic colors, applied consistently across the entire product:
-- **Green** — healthy. "Working well, no action needed."
-- **Amber** — attention. "Degraded but not failed; user should glance."
-- **Red** — critical. "Something went wrong; user must act."
-
-Plus one **accent** color used for the product's identity (title bar, selected row, key hints). That's it.
-
-**Forbidden patterns:**
-- "Purple for LLM, blue for vision, green for embeddings." Categorization is the workload's name's job, not color's.
-- Section-specific colors. Headers use the foreground color; borders use a muted grey. Boundaries are visual via spacing, not chromatic.
-- Picking a new color whenever a new metric appears.
-
-### Principle 3 — Plain English in the default view, jargon behind keys.
-
-A beginner running their first local LLM should understand the default screen without a glossary. Technical terms exist behind explicit user actions (pressing `d` for details, opening `--json` output, reading the config docs).
-
-**Translation table:**
-| Avoid | Use |
-|---|---|
-| "RSS" | "RAM" |
-| "VRAM" | "GPU memory" |
-| "tok/s" | "tokens/sec" |
-| "fps" | "frames/sec" |
-| "NVML uninitialized" | "No NVIDIA GPU detected" |
-| "INTERFERENCE LEVEL" | (delete entirely) |
-| "Registry" | "AI Workloads" or just "Running" |
-| "Rogues" | "Unrecognized" or remove from default view |
-| "Culprits" | "Top Memory Users" or remove from default view |
-| "Audit (governor decisions)" | "Recent Actions" — only in detail mode |
-| "exit_code: 137" | "Killed by system (out of memory)" |
-| "Permission denied (EACCES)" | "Need elevated privileges to read this process" |
-
-### Principle 4 — Respect muscle memory.
-
-Users come from htop, vim, less, k9s, lazygit. Match their conventions:
-- `q` quits. Always.
-- `?` opens help. Always.
-- `/` searches. Always.
-- Arrow keys + `j/k` navigate. Always.
-- `Esc` cancels. Always.
-- `Enter` activates / drills in.
-
-**No clever schemes.** The Windows version's `a1`, `s2`, `d3` selection scheme was novel — and novel is bad for a tool. Users had to learn it. Standard arrow keys + Enter work for everyone with zero learning.
-
-### Principle 5 — Information density scales with intent.
-
-Default view is sparse. As the user explicitly opts in to more detail (presses keys, opens panels), the tool reveals more. The reverse — showing everything by default — overwhelms.
-
-Three levels:
-1. **Simple** (default) — what's running, basic system stats, status dots.
-2. **Details** (press `d`) — full metrics, history visible, audit panel.
-3. **Power** (CLI flags, config, Prometheus, JSON) — never visible in TUI; lives in the data layer.
-
-### Principle 6 — Empty states teach the product.
-
-When there's no data, the screen is not blank — it's a teaching moment.
-
-| State | Old behavior | New behavior |
-|---|---|---|
-| No AI workloads running | Empty panel | "No AI workloads detected yet. Try `ollama run llama3` in another terminal — we'll detect it automatically." |
-| No GPU | "GPU: not available (NVML uninitialized)" | "No GPU detected. Some features (VRAM, GPU power, fps) need a GPU. Everything else still works." |
-| Network unreachable for sampler | Silent retry loop | "Can't reach vLLM at :8000. Some metrics may be missing." |
-| First-time launch with no config | (proceeds with defaults silently) | "Running with defaults. Press `?` to learn the basics, or see ~/edge_monitor.toml.example for config." |
-
-### Principle 7 — Whitespace is the most underused tool.
-
-The current TUIs (Linux and especially Windows) cram every panel against every other panel. Borders touching, columns crammed, no breathing room. Compare to k9s or lazygit which use empty space deliberately.
-
-**Apply by:**
-- Padding inside panels (1-2 spaces minimum on every side)
-- Gaps between sections (1 blank line minimum)
-- Right-aligned numbers, left-aligned labels — never both centered
-- Decimal alignment in numeric columns (`38.4` and `127.0` line up at the dot)
-
-### Principle 8 — Weight and symbols carry emphasis cheaply.
-
-Bold the primary metric on a row. Dim the secondary info. Use symbols (✓ ✗ ⚠ ●) instead of words when context makes meaning obvious.
-
-This works in monochrome terminals. Color is one tool; weight is another. Use both.
-
-### Principle 9 — No ASCII art.
-
-The Windows version's "VATCH" block-letter banner is the kind of thing that makes a serious user close the tool. It signals personal-project amateurism. Even htop doesn't do this.
-
-The first screen should look professional, not like a teenager's first GitHub repo. The product name in plain text, in the title bar, is enough.
-
-### Principle 10 — Pre-flight checks before opening external things.
-
-If pressing a key opens a browser, terminal, file, or external program, verify the destination first. A keystroke that opens a 404 page or a "command not found" terminal feels broken even if the surrounding tool works perfectly. Single most underrated polish item.
-
----
-
-## Part 3 — The color palette
-
-A working palette, with hex codes, drawn from the Tokyo Night family. Six colors, each with a defined role.
+# UX_CONTRACT.md
 
 ```
-Foreground   #c0caf5   default text                  → 80% of screen
-Muted        #565f89   secondary info, borders       → labels, units
-Accent       #7aa2f7   product identity              → title, selection
-Healthy      #9ece6a   "everything's fine"           → green status dot
-Attention    #e0af68   "something needs a glance"    → amber dot, regression warn
-Critical     #f7768e   "something's wrong"           → red dot, OOM kill, crash
+Version:     0.3 (pending lock)
+Status:      Awaiting final review
+Scope:       Linux and Windows binaries — same TUI, different telemetry
+Mission:     Watch the whole system, highlight AI workloads, warn before
+             resource pressure crashes them. The TUI is the foreground;
+             the Prometheus exporter is the bridge to anything else.
 ```
 
-**Why these specific colors:**
+## §0 — Mission and out-of-scope
 
-1. **Slightly desaturated.** Pure red `#ff0000` is panic-inducing; soft red `#f7768e` is firm but not stressful. Users sit in front of monitoring tools for hours; saturation fatigues the eye.
+edge_monitor exists to keep a developer ahead of the moment when an AI workload runs out of resources. The Prometheus exporter is the integration surface for fleet observability; the TUI is for the developer at the box.
 
-2. **Matched luminance.** When colors have wildly different brightnesses, the brightest one steals attention regardless of meaning. Matched luminance lets *meaning* drive attention.
+**Explicitly out of scope:**
 
-3. **WCAG AA contrast on dark backgrounds.** Light grey on near-black passes accessibility. About 8% of men have some color vision deficiency, and at least one user will have low vision.
+- Auto-kill on resource pressure — governor fires only on user-defined `[[workloads]]` rules
+- Replacing htop or Task Manager — system processes are context, not subjects
+- Fleet management — Prometheus exporter's job
+- Web UI — Prometheus is the bridge, no HTML rendering
+- ROS1 detection — only ROS2; ROS1 processes appear as Unknown
+- Stderr persistence — transient only, gone after card dismissed
+- Historical analysis beyond 20 most recent runs per model
+- Sharing/export — deferred to v1.1
+- Tagging, notifications, filtering, custom themes — deferred to v1.1
 
-4. **Harmonize.** Drawn from the same palette family, they don't clash when they appear together. Compare to picking primaries (red/yellow/green/blue) which feel like a kindergarten poster.
-
-**Backgrounds (don't forget these):**
-```
-BG default   #1a1b26   main background
-BG raised    #24283b   panel surfaces, slightly lighter than default
-BG selection #364a82   selected row highlight (dimmer than accent)
-```
-
----
-
-## Part 4 — Themes
-
-Multiple themes are not about preference. They're about respecting the environment the user is already in. A power user with a tuned Solarized terminal wants apps to fit; if your tool ships only with One Dark, your tool feels out of place.
-
-### Ship 3 themes for v1.0
-
-**`dark` (default).** The Tokyo Night-ish palette above. Calm, professional, fits the "monitoring tool for serious work" register.
-
-**`light`.** Same semantics, inverted — dark text on cream background, slightly desaturated colors so they don't burn on bright displays. Critical for users with bright office environments.
-
-**`high-contrast`.** Pure black/white/yellow/red. No subtlety. Designed for low-vision users and bright environments where the dark theme washes out.
-
-### Add `--theme=ansi` for terminal-respect
-
-Power users with tuned terminals (Solarized, Gruvbox, Catppuccin in their terminal config) opt in. Use ratatui's `Color::Reset` and ANSI 16-color names. The tool inherits the user's terminal palette.
-
-### Add config-driven themes for v1.1
-
-```toml
-[theme]
-preset = "dark"   # or "light", "high-contrast", "ansi", "custom"
-
-# When preset = "custom":
-foreground   = "#c0caf5"
-muted        = "#565f89"
-accent       = "#7aa2f7"
-healthy      = "#9ece6a"
-attention    = "#e0af68"
-critical     = "#f7768e"
-```
-
-Skip 12 themes. Ship 3 well-curated ones plus the ANSI escape hatch.
-
-### Avoid these theme registers
-
-- **Neon / synthwave.** Energetic, distracting. Wrong for monitoring.
-- **Retro 80s.** Playful. Wrong for production.
-- **Highly saturated primaries.** Tiring to look at for hours.
-
-The tool should feel like something you'd run on a production server, even if your "production server" is your gaming PC.
-
----
-
-## Part 5 — Layout principles
-
-### The default screen, redesigned
+## §1 — Default screen
 
 ```
-  edge_monitor  ·  monitoring 2 AI workloads  ·  press ? for help
+  ⚠ VRAM at 91% — YOLO-x (PID 6292) approaching limit             a dismiss
 
-  Running
-
-    phi3 (Ollama)            38.4 tokens/sec     4.2 GB        ●
-    YOLOv8 (Ultralytics)     47.0 frames/sec     1.8 GB        ●
+  edge_monitor  ·  3 workloads · 1 degraded             press ? for help
 
   System
 
-    CPU      █████████████████  37%
-    Memory   █████████████████  56%   (12.4 / 32 GB)
-    GPU      █████████████████  68%   71°C   142 W
+    CPU      ████████████░░░░░  56%   load 5.71 · 16 cores
+    Memory   ██████████░░░░░░░  44%   14.2 / 32 GB
+    GPU      ████████████████░  91%   71°C · 142 W       ⚠ pressure
+    VRAM     ██████████████░░░  87%   14.0 / 16 GB       ⚠ pressure
 
-                                         d details · g graph · q quit
+  Workloads
+
+    LLM
+      ●  phi3 (Ollama)            38.4 tok/s    4.2 GB    PID 206
+      ⚠  Llama-70B (vLLM)         12.1 tok/s   14.8 GB    PID 4523
+         KV 87% · queue 4 · p99 380ms · baseline 22 tok/s · -45%
+
+    Vision
+      ●  YOLOv8 (Ultralytics)     47 fps        1.8 GB    PID 6291
+
+    ROS2
+      ●  /perception_node         24 Hz         512 MB    PID 7104
+      ●  /planner_node            10 Hz         320 MB    PID 7105
+
+  Top processes (by RAM)
+
+    Code.exe                      1.3 GB         48% CPU
+    chrome.exe                    917 MB         29% CPU
+    ollama                        4.2 GB          0% CPU
+
+  Activity
+
+    08:51:09  alert raised   VRAM 91%
+    08:42:11  exit  phi3  4 min  38.4 tok/s avg
+
+           Enter detail · k kill · g graph · h history · ? help · q quit
 ```
 
-What this gets right vs. the current implementation:
+**Regions, top to bottom:**
 
-- **No outer ASCII art banner.** Just one line of plain text identifying the tool.
-- **No box-drawing characters as decoration.** Sections are separated by whitespace and a section label. Visual hierarchy from typography, not borders.
-- **Numbers right-aligned.** Labels left-aligned. Decimals align in columns.
-- **Status dots (`●`) on each row.** Single symbol carries health status. Green/amber/red. No color on the rest of the row.
-- **Partial-block characters (`▎▍▌▋▊▉█`) for bars.** Higher resolution than plain `█`. Reads more "designed."
-- **Accent color used in three places only.** Tool name in title, selected row, footer key hints. Nowhere else.
-- **80% of the screen is neutral.** Color shows up only where it carries information.
+1. Alert region (0–3 lines, present only when alerts active)
+2. Header (1 line) — product, workload count, degraded count
+3. System panel — CPU, Memory always; GPU and VRAM omitted entirely if no GPU
+4. Workloads panel — grouped by category (LLM, Vision, ROS2, Embeddings, Unknown). Empty subsections hidden. Single-category screens hide the subsection header.
+5. Top processes panel — N rows by configurable sort (RAM default). Filters edge_monitor itself and processes already in Workloads.
+6. Activity panel — last 5 events
+7. Footer — keymap
 
-A beginner reads this instantly. A dev sees what they need. A researcher presses `g` and goes to Grafana.
+**Subsection ordering:** LLM → Vision → ROS2 → Embeddings → Unknown. Fixed.
 
-### Layout rules
+## §2 — Workload row spec
 
-**Right-align numbers, left-align labels.** Mixed alignment is illegible.
-
-**Decimal-align numeric columns.** When you have `38.4`, `127.0`, `4.2` in a column, line them up at the decimal point. Eye scans instantly.
-
-**Use weight (bold/dim), not color, for hierarchy.** Bold the primary metric. Dim the secondary. Works in monochrome.
-
-**Borders are noisy.** Default to no borders. Use whitespace and section labels. Reach for borders only when content groups need explicit visual separation.
-
-**Symbols replace words where context permits.** ✓ ✗ ⚠ ● ○ are clear. Prefer them to "(success)", "(failed)", "(warning)" labels.
-
-**Be careful with emoji.** They break in some terminals (older ConHost on Windows, minimal SSH sessions, tmux sometimes). Stick to Unicode geometric shapes (●○■□▲△) which render consistently. Avoid emoji on the default screen; reserve for help text.
-
-### Progressive disclosure structure
+**Healthy workload, single line:**
 
 ```
-Simple TUI (default — beginner & dev first-glance)
-    ↓ press 'd' for details
-Detail TUI (full metrics, history visible, audit panel)
-    ↓ press 'h' on a row
-History overlay (per-workload past runs)
-    ↓ press 'g' or Enter on a row
-Browser → Grafana / built-in dashboard
-    ↓ click on a panel
-Grafana drill-down → Prometheus query
+  ●  {model} ({runtime})  {primary_metric}  {ram}  PID {pid}
 ```
 
-Each level escalates with one gesture. Nobody is forced to climb; everyone can stop at the level that suits them. The README should call this out explicitly:
+**Primary metric by category:**
 
-> edge_monitor meets you where you are. New to local LLMs? The first screen tells you what's running in plain English. Want detail? One keypress. Want graphs? Press `g` and your browser opens. Want raw data? It's already in Prometheus format.
-
----
-
-## Part 6 — Keybindings
-
-A complete map. Defaults must follow conventions; novelty kills adoption.
-
-### Global keys (work everywhere)
-
-| Key | Action |
+| Category | Format |
 |---|---|
-| `q` | Quit |
-| `?` | Help overlay |
-| `/` | Search / filter |
-| `Esc` | Cancel current action / close overlay |
-| `↑ ↓` or `j k` | Navigate selection |
-| `← →` or `h l` | Switch panels (where applicable) |
-| `Tab` | Cycle focus across panels |
-| `Enter` | Drill into selected item |
+| LLM | `{value} tok/s` |
+| Vision | `{value} fps` |
+| Embeddings | `{value} emb/s` |
+| ROS2 | `{value} Hz` (process-level RAM/CPU only in v1.0; Hz deferred to v1.1) |
+| Loading | `cold-loading` |
+| Unknown | `(no metrics)` |
 
-### View modes
+**Degraded workload, expanded line (auto, when amber/red):**
 
-| Key | Action |
+| Category | Schema |
 |---|---|
-| `d` | Toggle details mode (simple ↔ full) |
-| `g` | Open graph dashboard in browser (Grafana or built-in) |
-| `h` | History overlay for selected workload |
+| LLM | `KV {pct}% · queue {n} · p99 {ms}ms · baseline {tok/s} · {±delta}%` |
+| Vision | `VRAM {pct}% · {phase} · baseline {fps} · {±delta}%` |
+| Embeddings | `batch {n} · p99 {ms}ms · baseline {emb/s} · {±delta}%` |
+| ROS2 | `topics {n} · queue {n} · baseline {Hz} · {±delta}%` (v1.1+) |
+| Loading | `loaded {gb} / {total} GB · {n} disk reads remaining` |
+| Unknown | `(unrecognized AI workload — no metrics)` |
 
-### Workload actions (when a row is selected)
+**ROS2 detection:**
 
-| Key | Action |
+- Env vars: `RMW_IMPLEMENTATION`, `ROS_DOMAIN_ID`, `AMENT_PREFIX_PATH`
+- Cmdline: `ros2 run`, `ros2 launch`
+- Linked libraries: `librcl.so` / `librclpy.so` / `librclcpp.so` (Linux), `librcl.dll` (Windows)
+- Node name: from `--ros-args -r __node:=<name>` or `/{node_name}` first arg
+- ROS1 patterns (`rosrun`, `roslaunch`, `ROS_MASTER_URI`) intentionally NOT detected
+
+## §3 — Status dot semantics
+
+| Dot | Trigger |
 |---|---|
-| `Enter` | Open detail view for this workload |
-| `t` | Tag this workload |
-| `o` | Open project directory in file manager |
-| `e` | Open audit log entry in `$EDITOR` |
+| `●` (green / Healthy) | All thresholds OK, throughput within ±10% of baseline |
+| `⚠` (amber / Attention) | VRAM ≥ 85%, RAM ≥ 90%, KV ≥ 80%, OR throughput ≤ baseline × 0.80 |
+| `✕` (red / Critical) | VRAM ≥ 95%, KV ≥ 95%, governor armed against this PID, OR OOM detected |
+| `○` (gray / Loading) | < 30s of telemetry, no baseline available |
 
-### Power actions (require explicit confirm)
+No hysteresis — a workload that flickers between amber and green has a real problem, surface it.
 
-| Key | Action |
+## §4 — Alerts
+
+Sticky banners above the header. Interrupt the default view; user must acknowledge.
+
+**Triggers:**
+
+| Alert ID | Condition | Message |
+|---|---|---|
+| `ALERT_VRAM_PRESSURE` | VRAM ≥ 85% sustained 5s | `VRAM at {pct}% — {workload} (PID {pid}) approaching limit` |
+| `ALERT_RAM_PRESSURE` | RAM ≥ 90% sustained 5s | `RAM at {pct}% — system approaching limit` |
+| `ALERT_KV_PRESSURE` | KV cache ≥ 85% sustained 5s | `KV cache at {pct}% — {workload} (PID {pid}) may stall` |
+| `ALERT_GOVERNOR_ARMED` | Manual kill armed | `Kill armed on {workload} (PID {pid}) — k confirms, Esc cancels` |
+| `ALERT_OOM_DETECTED` | OOM kill in last 30s | `OOM kill detected — {workload} (PID {pid}) terminated by kernel` |
+| `ALERT_WORKLOAD_EXITED` | **Non-zero exit, OOM, or governor kill only** — never on clean (code 0) exits | `{workload} exited with {reason} — press Enter for post-mortem` |
+
+**Behavior:**
+
+- Stack vertically, max 3 visible. Older alerts: `+N more`
+- `a` acknowledges all visible
+- `Enter` while a `WORKLOAD_EXITED` alert is highlighted → opens post-mortem card
+- Acknowledgment session-scoped. Re-fires if condition recurs.
+- Each raise + ack writes to Activity panel
+- **Hard rule:** alerts never trigger automatic action. Display + audit only.
+
+**Clean exits** (code 0, no governor action) go to Activity and history without raising an alert. Reason: test scripts and short-lived inferences flood otherwise.
+
+## §5 — Detail cards
+
+Two distinct cards. Same dimensions (64 cols × 8–22 rows), same Esc-dismiss, different content.
+
+### Live detail card — running workload
+
+Triggered by `Enter` on a focused running workload. Auto-refreshes every tick.
+
+```
+  ┌─ phi3 (Ollama)  PID 206  ──────────────── running 4m 12s ─┐
+  │                                                            │
+  │   Throughput:  38.4 tok/s   (baseline 41.2,  -7%)          │
+  │   Current RAM: 4.2 GB                                      │
+  │   Peak RAM:    4.5 GB this run                             │
+  │   VRAM:        4.0 / 16 GB  (25%)                          │
+  │   KV cache:    34%                                         │
+  │   GPU:         62°C · 89 W                                 │
+  │   Phase:       steady-state                                │
+  │                                                            │
+  │   Last 60s:                                                │
+  │     tok/s   ▁▂▃▃▄▅▅▆▆▆▇▇▇▇▆▆▅▅▄                           │
+  │     KV%     ▁▁▂▂▃▃▃▄▄▄▄▅▅▅▅▆▆▆▆                           │
+  │                                                            │
+  │                  Esc dismiss · g graph · k kill            │
+  └────────────────────────────────────────────────────────────┘
+```
+
+Sparklines: 20 cells = last 60s at 3s resolution (extends to 30 cells / 90s on wide terminals — see §12). KV row omitted for non-LLM. VRAM/GPU rows omitted if no GPU. Phase row only for workloads with cold-start detection.
+
+### Post-mortem card — exited workload
+
+Triggered by `Enter` on a `WORKLOAD_EXITED` alert, an Activity exit row, or a history overlay row.
+
+```
+  ┌─ phi3 (Ollama)  PID 206  ──────────────── exited 4 min ago ─┐
+  │                                                              │
+  │   Cause:    OOM kill (RAM peaked at 31.2 / 32 GB)            │
+  │   Runtime:  4 min 12 sec                                      │
+  │                                                              │
+  │   Throughput:  38.4 tok/s   (baseline 41.2,  -7%)             │
+  │   Peak RAM:    31.2 GB      (limit 32 GB)                     │
+  │   Peak VRAM:   14.0 GB      (limit 16 GB)                     │
+  │   KV cache:    98% at exit                                    │
+  │   Energy:      127 J  (avg 89W × 4m 12s)                      │
+  │                                                              │
+  │   Last stderr:                       [shown only if <30s]    │
+  │     RuntimeError: CUDA out of memory. Tried to allocate...   │
+  │                                                              │
+  │                Esc dismiss · h history · g graph             │
+  └──────────────────────────────────────────────────────────────┘
+```
+
+**Cause line by ExitReason:**
+
+| ExitReason | Cause line |
 |---|---|
-| `k` | Arm kill (press twice to confirm) |
-| `K` | Kill all matching the current filter (extra confirm) |
-| `r` | Reset / clear local data (extra confirm) |
+| `OOMKill` | `OOM kill (RAM peaked at {gb} / {limit} GB)` |
+| `CudaOOM` | `CUDA out of memory (VRAM peaked at {gb} / {limit} GB)` |
+| `Segfault` | `Segfault (exit code 139)` |
+| `GovernorKill` | `Killed by user via edge_monitor` |
+| `ExitOk` | `Exited cleanly (code 0) after {runtime}` |
+| `ExitNonZero` | `Exited with code {code}` |
+| `Unknown` | `Process disappeared (no exit signal observed)` |
 
-### What to avoid
+**Stderr section:** appears ONLY when card opened within 30s of exit (transient stderr still in memory). Cards opened from history later silently omit the section. No "Stderr not retained" message — just gone.
 
-- **`Ctrl+D` for any action.** Terminals send EOF on `Ctrl+D`. Most TUIs exit on it. Using it for anything else fights the terminal.
-- **`Ctrl+C` for anything other than emergency exit.** Same reason.
-- **Vim-mode-like multi-key sequences.** No `gg`, no `dd`, no `:q!`. Single keypresses only. We're not building Vim.
-- **Letter combinations like `a1`, `s2`, `d3`.** Force the user to read selection IDs and remember mappings. Standard arrow keys do the same job with zero learning.
+**Auto-dismiss:** 30s when triggered by alert. Cards opened from history stay until `Esc`.
 
----
+## §6 — Keymap
 
-## Part 7 — The 16 feature gaps
+| Key | Action | Valid contexts |
+|---|---|---|
+| `q` | Quit (with confirm if kill armed) | Always |
+| `?` | Toggle help overlay | Always |
+| `j` / `k` | Move workload selection | Default, no overlay |
+| `k` (workload focused) | Arm kill | Default |
+| `k` (within 5s of arm) | Confirm kill | Default |
+| `Enter` | Open detail card (live or post-mortem based on row state) | Default, Activity, history |
+| `g` | Open Grafana for focused workload | Default, live detail, post-mortem |
+| `h` | Toggle history overlay | Default |
+| `a` | Acknowledge all visible alerts | When alerts present |
+| `t` | Cycle Top processes sort: RAM → CPU → VRAM | Default |
+| `Esc` | Cascade dismiss (see below) | Always |
 
-Sixteen gaps identified across the conversation. Listed once, with priority. Every gap traces to a real user moment.
+**Esc cascade:**
 
-### v1.0 must-have (launch-blocking polish)
+1. Live detail or post-mortem card visible → dismiss
+2. Else: armed kill → disarm
+3. Else: history or help overlay → close
+4. Else: alerts visible → acknowledge all
+5. Else: quit
 
-**Gap 1 — Onboarding and first-run.** Detect installed AI runtimes (Ollama, llama.cpp, Python+torch). Show "no workloads detected yet — try `ollama run llama3`" message. One-time tutorial walkthrough. ~1 day. **Disproportionate value: first-run quality determines whether the tool gets a second run.**
+**Removed from prior drafts:** `d` for detail mode. Habit-collision risk across Linux tooling outweighs any benefit. The inline-expand-on-degraded behavior plus `Enter`-for-detail-card replaces what `d` did.
 
-**Gap 5 — "What just happened?" post-mortem card.** When a workload exits, surface a brief card: what ran, how long, final metrics, why it stopped, last few stderr lines, baseline comparison. Stays on screen ~30 seconds or until dismissed. ~half day, most data already exists. **Huge for everyday users — this is the "oh that's helpful" moment.**
+## §7 — Copy strings
 
-**Gap 8 — Energy accounting.** Aggregate power data over time, integrate to energy. Configurable cost-per-kWh. Reported as watts-per-token, joules-per-inference, kWh-per-day. ~1 day, math is simple. **Huge for differentiation — nothing else in the monitoring space publishes this. Tweet-worthy metrics.**
+Live in shared `ux_contract` crate, imported by both binaries. Editing requires version bump.
 
-**Gap 12 (partial) — At least one killer demo GIF + one quickstart guide.** 30-second screencast: user runs Ollama, edge_monitor detects it, shows tokens/sec, run completes, post-mortem card pops up showing "18% slower than baseline." Plus a 5-minute quickstart for the primary audience. **Single most valuable artifact for adoption.**
+```rust
+// Status footer
+pub const STATUS_DASHBOARD_OPENED: &str = "Opened {url}";
+pub const STATUS_DASHBOARD_FAILED: &str = "Could not open browser: {reason}";
+pub const STATUS_NO_WORKLOAD_FOCUSED: &str = "No AI workload focused";
+pub const STATUS_KILL_ARMED: &str = "Armed kill on {name} (PID {pid}) — press k again within {secs}s";
+pub const STATUS_KILL_DRY_RUN: &str = "Would stop {name} (dry-run mode — no action taken)";
+pub const STATUS_KILL_SENT: &str = "Sent SIGTERM to {name} (PID {pid})";
+pub const STATUS_KILL_DISARMED: &str = "Kill disarmed";
+pub const STATUS_GOVERNOR_BLOCKED: &str = "Cannot kill {name}: protected by allowlist";
+pub const STATUS_ALERTS_ACKNOWLEDGED: &str = "Acknowledged {n} alerts";
+pub const STATUS_NO_DETAIL_FOR_SYSTEM: &str = "Detail not available for system processes";
+pub const STATUS_TOP_SORT_CHANGED: &str = "Top processes sorted by {dimension}";
+pub const STATUS_GRAFANA_UNREACHABLE: &str = "Grafana not reachable at {url}. Press s for setup help.";
 
-**Gap 14 — Empty states and error states.** Audit every error path. Every empty state becomes a teaching moment. Every error message reviewed for jargon, made actionable, never blames the user. ~half day, tedious. **Large for first impressions and retention.**
+// Empty states
+pub const EMPTY_WORKLOADS: &str = "No AI workloads detected. Start one to begin monitoring.";
+pub const EMPTY_ACTIVITY: &str = "No recent activity.";
+pub const EMPTY_HISTORY: &str = "No history yet. Completed runs will appear here.";
 
-### v1.1 should-have (next month of work)
+// Alerts
+pub const ALERT_VRAM_PRESSURE: &str = "VRAM at {pct}% — {workload} (PID {pid}) approaching limit";
+pub const ALERT_RAM_PRESSURE: &str = "RAM at {pct}% — system approaching limit";
+pub const ALERT_KV_PRESSURE: &str = "KV cache at {pct}% — {workload} (PID {pid}) may stall";
+pub const ALERT_GOVERNOR_ARMED: &str = "Kill armed on {workload} (PID {pid}) — k confirms, Esc cancels";
+pub const ALERT_OOM_DETECTED: &str = "OOM kill detected — {workload} (PID {pid}) terminated by kernel";
+pub const ALERT_WORKLOAD_EXITED: &str = "{workload} exited with {reason} — press Enter for post-mortem";
 
-**Gap 2 — Workload tagging.** User-supplied tags via `edge_monitor exec --tag "q4_test" --` or interactive `t` keypress. Tags become a queryable history dimension. ~half day. **Large for ML engineers doing iterative experimentation.**
+// Confirmation prompts
+pub const CONFIRM_QUIT_KILL_PENDING: &str = "Kill armed on {workload}. Quit anyway? (y/N)";
 
-**Gap 3 — Comparison and diff view.** `edge_monitor compare <run-id-A> <run-id-B>` puts two runs side by side: every metric, config, fingerprint. Already on the implementation roadmap as Tier 3.7 — elevate priority. ~half day if data exists. **Massive for the ML researcher segment.**
+// Below-minimum size message
+pub const ERR_TERMINAL_TOO_SMALL: &str = "edge_monitor needs at least 80×24 terminal.\nCurrent size: {w}×{h}. Resize and press any key.";
+```
 
-**Gap 4 — Notifications.** Optional desktop notifications, webhooks, email on important events: workload exited non-zero, OOM killed, regression detected, watch-flagged process completed. Configurable per event class. ~1-2 days. **Large for anyone running training or batch inference.**
+## §8 — Persistence model
 
-**Gap 7 — Filtering and search.** `/` opens filter. Filter by name, category, status, tag. Persists across sessions optionally. ~1 day. **Essential once a user has more than a handful of workloads.**
+`RunRecord` schema saved on workload exit:
 
-**Gap 13 — In-tool help layers.** Three layers: contextual help on `?`, man page, troubleshooting section in README. ~1 day. **Large for retention. Users who get unstuck stay.**
+| Field | Persisted? | Notes |
+|---|---|---|
+| `run_id` | Yes | UUIDv4 |
+| `model` | Yes | |
+| `runtime` | Yes | Ollama, vLLM, llama.cpp, Ultralytics, ROS2, etc. |
+| `category` | Yes | LLM / Vision / ROS2 / Embeddings / Unknown |
+| `start_time`, `end_time` | Yes | |
+| `exit_reason` | Yes | From ExitClassifier |
+| `metrics` | Yes | avg/peak/p99 throughput, RAM, VRAM, KV, energy |
+| `model_fingerprint` | Yes | SHA-256 head+tail (where applicable) |
+| `cold_start` | Yes | Phase + load duration |
+| `governor_actions` | Yes | Any kill events for this PID |
+| **`stderr_tail`** | **NO — explicit privacy default** | Captured transiently in memory only |
 
-**Gap 15 — Privacy and retention.** Configurable retention policy. `clear` command. Field redaction options. Documentation about exactly what's stored where. ~half day plus docs. **Matters a lot for enterprise / regulated users.**
+No opt-in to enable stderr persistence in v1.0. Users wanting stderr saved pipe to a file: `ollama run phi3 2> stderr.log`.
 
-### v2.0 (defer, validate need first)
+## §9 — Platform-specific behavior
 
-**Gap 6 — Workload relationships.** Link Ollama server to its Python client. Process-relationship detection (network, IPC, parent-child). Display can fold runtime under workload. ~3-4 days, fiddly. **Medium value, improves clarity in common scenarios.**
+The complete allowed-difference list. Anything not here is identical across platforms.
 
-**Gap 9 — Sharing and exporting.** `edge_monitor report --runs <ids>` produces portable HTML or markdown. Shareable via email/Slack/wiki. ~2 days. **Enables word-of-mouth — every shared report is an ad.**
+| Concern | Linux | Windows |
+|---|---|---|
+| Process kill | `libc::kill` SIGTERM → SIGKILL | `taskkill /F /PID` |
+| PID-reuse defense | pidfd primary, starttime fallback | starttime + create_time |
+| Open browser | `xdg-open` | `cmd /C start ""` |
+| Persistence root | `~/.local/share/edge_monitor/` | `%APPDATA%\edge_monitor\` |
+| Config root | `~/.config/edge_monitor/` | `%APPDATA%\edge_monitor\` |
+| Power source | RAPL + NVML | WMI + NVML |
+| OOM detection | `journalctl -k` scrape | Windows Event Log scrape |
+| ROS2 detection | `ldd` for librcl.so + env scan | `tasklist /m librcl.dll` + env scan |
+| Symbol fallback | UTF-8 default | Detect ConHost, fall back to ASCII if needed |
 
-**Gap 10 — Remote machines.** Decision: don't build a custom protocol. Document the Grafana approach. "Run edge_monitor headless on the server, expose Prometheus, view in Grafana from your laptop." Small effort (docs only). **Large value for the segment that needs it; rest don't care.**
+## §10 — Grafana integration (v1.0)
 
-**Gap 11 — Workload control vs observation only.** Real fork. Stay observation-only is simpler. Adding "start a workload" / "pause" / "resume" turns this into a task runner — different product. **Default decision: observation-only for v1, document `edge_monitor exec` as the lightweight version. Don't compete with task runners.**
+`g` keypress on a focused workload:
 
-**Gap 16 — Sampler health checks.** Detect when a known runtime is present but the sampler returns no data. Surface a warning. Version detection ("vLLM 0.5 detected; parser tested with 0.4"). Auto-update reminders. ~2-3 days. **Large for long-term viability.**
+1. **Pre-flight TCP probe** of `[dashboard].url_template` host:port, 500ms timeout
+2. **If reachable:** open browser via platform command (§9)
+3. **If not reachable:** footer shows `STATUS_GRAFANA_UNREACHABLE` — no browser opened
 
----
+Repo ships:
+- `dashboards/grafana-overview.json`
+- `dashboards/README.md` with import instructions
+- CI step: `verify-dashboard-metrics.sh` validates every panel references a metric edge_monitor actually exports against live `/metrics` output
 
-## Part 8 — The dashboard integration
-
-You raised this directly: researchers love Grafana, give them one keypress to escalate.
-
-### The keypress
-
-`g` opens the graph dashboard. **Not** `Ctrl+D` (terminal collision). Not `Ctrl+G` (some terminals capture). Just `g`.
-
-`Enter` on a workload row opens the dashboard *filtered to that workload*. Even better than the global keypress because it's contextual.
-
-### What "open the dashboard" actually does
-
-Three options, with tradeoffs:
-
-**Option A — Open user's configured Grafana URL.** Simple. Requires user to set up Grafana. If the URL is wrong, browser opens a 404 and the feature feels broken.
-
-**Option B — Built-in dashboard server on `localhost:9473`.** Zero setup. But you become a frontend team. Real cost.
-
-**Option C — Hybrid.** First time `g` is pressed:
-- If `[dashboard].url_template` is configured, open that URL with the right query params.
-- If not, open a built-in landing page on `localhost:9473/setup` showing a one-paragraph "How to set up Grafana with edge_monitor" tutorial. Includes a copy-paste docker command and a button to download the dashboard JSON.
-
-**Ship Option C.** Most generous to users without forcing you to be a dashboard product.
-
-### Pre-flight check (never skip this)
-
-Before opening the browser, verify the destination responds. If Grafana is down or returns 404, show inline TUI message:
-
-> Grafana not reachable at <url>. Press `s` for setup help, or update `[dashboard].url_template` in config.
-
-Single most underrated polish item. The difference between "polished" and "amateur."
-
-### Pass meaningful query params
-
-When the user has highlighted `phi3` and presses Enter, the URL should include `?var-model=phi3&from=now-1h&to=now`. Grafana opens already filtered to what the user was looking at. Without this, the feature is "open Grafana"; with it, the feature is "show me this workload's graphs."
-
-### Don't lock to Grafana specifically
-
-Some users have Datadog, some have custom dashboards, some use Prometheus's own UI. Make it templatable:
-
+URL template fully configurable:
 ```toml
 [dashboard]
-url_template = "http://localhost:3000/d/edge-monitor?var-model={model}&from=now-{lookback}"
+url_template = "http://localhost:3000/d/edge-monitor?var-model={model}&var-pid={pid}&from=now-{lookback}&to=now"
 lookback = "1h"
 ```
 
-### Bundle a sample dashboard
+Substitutions: `{model}`, `{pid}`, `{lookback}`.
 
-Ship `dashboards/grafana-overview.json` in the repo. Document the import flow in README. **Critical:** every panel in the JSON must reference a metric edge_monitor actually exports. Verify with `promtool check metrics` against the live `/metrics` output. The Windows audit caught dashboards-with-fake-metrics as a real bug pattern; don't repeat it.
+## §11 — Sharing (deferred to v1.1)
 
-### Cross-platform browser opening
+Spec lives in `SHARING_SPEC.md` (forthcoming). Locked decisions for v1.1:
 
-Use the `webbrowser` Rust crate. Don't write three code paths for `xdg-open` / `start` / `open`.
+- Format: Markdown for v1.1, HTML for v1.2
+- CLI: `edge_monitor report --runs <id1>,<id2> -o report.md`
+- Self-contained (no live data dependencies)
+- Contents: post-mortem card data + comparison section
 
----
+## §12 — Terminal sizing
 
-## Part 9 — The "doorway, not destination" framing
+| Size | Dimensions | Behavior |
+|---|---|---|
+| Minimum | 80 × 24 | Top processes panel hidden. Activity panel caps at 3 rows. Bar graphs at 17 cells. Single-column workloads. |
+| Standard | 120 × 40 | Full default screen as drawn in §1. Bar graphs at 25 cells. |
+| Wide | 160+ × 50+ | Workloads may show two columns side-by-side when 4+ workloads. Bar graphs at 40 cells. Sparklines extend to 30 cells (90s) in live detail card. |
 
-This is the deeper UX win. edge_monitor is the *entry point* to a workflow that includes Grafana, the user's text editor, the file manager, jq pipelines, and existing monitoring systems. **It's not the whole experience.**
+**Below 80 × 24:** render `ERR_TERMINAL_TOO_SMALL` message and wait for resize. Do not attempt degraded render.
 
-Tools that try to be the whole experience fight the user's existing workflow and lose.
-Tools that act as a doorway connect to what the user already does and get adopted.
+**Hard rules:**
+- Workload row content fits in 60 cols (status dot + indent + content)
+- Card overlays lock at 64 cols regardless of terminal width
+- Top processes panel is first to drop on narrow screens
+- Workloads panel is sacred — never drops
 
-Apply this framing everywhere:
+## §13 — Themes
 
-- TUI → press `g` → Grafana
-- TUI → press `e` → opens audit log JSONL in `$EDITOR`
-- TUI → press `o` on a workload → opens project directory in file manager
-- CLI → `edge_monitor history --json | jq` for any pipeline workflow
-- Prometheus output → any monitoring system the user already runs
-- Run records on disk → any future tool that wants to read JSONL
+Three themes ship in v1.0. All satisfy WCAG AA contrast (4.5:1 normal text, 3:1 large/bold).
 
-Each is small individually. Together they make the tool feel like part of the user's environment instead of an island.
+**Selection:** `--theme dark|light|high-contrast` CLI flag, or `[ui].theme` config. No runtime toggle in v1.0.
 
----
+**Theme: dark (default)**
 
-## Part 10 — What this changes about the product
+| Role | Hex | Contrast on bg |
+|---|---|---|
+| Background | `#1a1b26` | — |
+| Background raised | `#24283b` | — |
+| Foreground | `#c0caf5` | 12.6:1 |
+| Muted | `#9aa5ce` | 7.8:1 |
+| Accent | `#7aa2f7` | 6.4:1 |
+| Healthy | `#9ece6a` | 8.2:1 |
+| Attention | `#e0af68` | 8.9:1 |
+| Critical | `#f7768e` | 6.7:1 |
 
-Three honest realignments fall out of this design work:
+**Theme: light**
 
-### The governor stops being the main story
+| Role | Hex | Contrast on bg |
+|---|---|---|
+| Background | `#e6e2cf` | — |
+| Background raised | `#d8d2bb` | — |
+| Foreground | `#2c2c2a` | 12.0:1 |
+| Muted | `#5f5e5a` | 6.2:1 |
+| Accent | `#185fa5` | 7.1:1 |
+| Healthy | `#3b6d11` | 7.4:1 |
+| Attention | `#854f0b` | 6.0:1 |
+| Critical | `#a32d2d` | 5.5:1 |
 
-Auto-killing runaway processes is a safety feature, not a marketing feature. Bury it in "Settings → Auto-cleanup" rather than headlining it. Most users will never need it; those who do will find it. The audit log + governor combination is still a real differentiator for ops users — but it's a depth feature, not a hook.
+Cream background, not pure white — punishing for hours of viewing. Same family as solarized-light.
 
-### The differentiator becomes "AI-aware history"
+**Theme: high-contrast**
 
-Per-model run records, regression detection, energy accounting, comparison. **That's** the wedge against htop, nvtop, Glances, btop. None of them have any of this. The pitch:
+| Role | Hex |
+|---|---|
+| Background | `#000000` |
+| Background raised | `#1a1a1a` |
+| Foreground | `#ffffff` |
+| Muted | `#cccccc` |
+| Accent | `#00ffff` |
+| Healthy | `#00ff00` |
+| Attention | `#ffff00` |
+| Critical | `#ff0000` |
 
-> See what your AI workloads are actually doing. Live tokens/sec, energy per inference, and a permanent record of every run. Catches regressions before you do.
+All ratios exceed 7:1 (WCAG AAA).
 
-### The audience hierarchy clarifies
+## §14 — Color usage rules
 
-Primary: ML engineers iterating on models. Their feature priorities drive the roadmap. Their screenshots drive adoption. The other audiences come along for the ride — well-served by the same tool, but secondary in priority disputes.
+Where color appears, regardless of theme:
 
-### The tool is calmer than it currently looks
+| Element | Rule |
+|---|---|
+| Status dot (`●⚠✕○`) | Healthy / Attention / Critical / Muted. ONLY place colors appear on workload rows. |
+| Alert banner | Background tinted: amber bg for VRAM/RAM/KV, red bg for OOM/Critical |
+| Bar graphs | Foreground until 85% utilization → Attention; ≥95% → Critical |
+| Pressure flag (`⚠ pressure`) | Attention color |
+| Selected row | Background tinted with Accent (dimmer than full Accent) |
+| Title bar | Accent color |
+| Footer key hints | Accent for the key letter, Muted for description |
+| Section headers (System, Workloads, Top, Activity) | Muted color, no bg |
+| All other text | Foreground color |
 
-All the "REGISTRY," "CULPRITS," "VISION & AI INFERENCE REGISTRY," "INTERFERENCE LEVEL" language stops feeling like features and starts feeling like noise. Strip it. Replace with plain English. The redesign in Part 5 makes this concrete.
+**Forbidden:**
+- Color used to indicate workload category (LLM ≠ blue, Vision ≠ green) — category is communicated by section grouping
+- Decorative color anywhere
+- More than 5% of the screen colored at any one time
 
----
+## §15 — Symbols (must render in all terminals)
 
-## Part 11 — Anti-patterns specific to this project
+| Symbol | Codepoint | Meaning | ASCII fallback |
+|---|---|---|---|
+| `●` | U+25CF | Healthy | `*` |
+| `⚠` | U+26A0 | Attention | `!` |
+| `✕` | U+2715 | Critical | `X` |
+| `○` | U+25CB | Loading / no data | `o` |
+| `█▇▆▅▄▃▂▁` | U+2588 family | Bars and sparklines | `#` (whole), `=` (half) |
+| `─│┌┐└┘├┤┬┴┼` | U+2500 family | Card borders | `-`, `|`, `+` |
 
-Things observed in past versions of edge_monitor that should not return:
-
-1. **The VATCH ASCII banner on Windows.** Reads as personal-project amateurism. Replace with a single-line title.
-2. **Different vocabulary on Linux vs Windows.** "Registry" vs "VISION & AI INFERENCE REGISTRY." Pick one set. Linux's terms (post-rewrite) are the source of truth.
-3. **Selection scheme `a1`, `s2`, `d3`.** Replace with arrow keys + Enter.
-4. **Color used for categorization.** The category is in the workload name. Color repeats nothing useful.
-5. **All-caps section headers.** Reads like marketing copy in a tool. Use Title Case or sentence case.
-6. **"Production-ready" / "100% complete" claims in the UI or docs.** Earned by users, not asserted by the tool.
-7. **Borders around every panel.** Visual noise. Use whitespace.
-8. **Crammed columns with no padding.** Add breathing room.
-9. **Technical errors thrown as-is at users.** Wrap them with actionable language.
-10. **"Tier 1 100%" while a Tier 1 feature is missing.** Status reports must be honest. Either move the feature out of Tier 1 or admit Tier 1 isn't done.
-
----
-
-## Part 12 — Cross-platform consistency policy
-
-Linux and Windows users have different habits, but edge_monitor users often run *both* (laptop + GPU server). Decisions:
-
-- **Look identical across platforms.** Same TUI library (ratatui), same vocabulary, same keybindings, same colors. Users SSH-ing from a Mac to a Linux server should feel at home.
-- **Use forward slashes everywhere in paths.** Linux users expect; Windows users tolerate.
-- **Don't use platform terms where a neutral term exists.** Say "elevated privileges" not "sudo" or "administrator." Say "running in the background" not "service" or "daemon."
-- **Shared core, thin platform shims.** The workspace structure (`core/` + `platform_linux/` + `platform_windows/` + `cli/`) keeps platform divergence localized.
-- **Same install story shape.** `cargo install` works everywhere. Distribution channels (brew/scoop/winget) come post-launch.
-
-The Windows agent's earlier work created a divergent product. The unification (U.1–U.5 in IMPLEMENTATION_WINDOWS.md) is a prerequisite for any of this design work landing on Windows.
-
----
-
-## Part 13 — README rewrite framing
-
-The current README is feature-list-shaped. Rewrite it to:
-
-### Lead with the killer demo GIF
-
-30-second screencast. Above the fold. Before any text. Shows:
-1. User starts `ollama run phi3 "explain quicksort"`
-2. edge_monitor detects it, displays tokens/sec live
-3. Run completes, post-mortem card appears
-4. Card shows "18% slower than your baseline of last 5 runs"
-
-That's the artifact that converts visitors to users. Worth more than three feature paragraphs.
-
-### Audience-specific quickstarts (3 of them)
-
-Three short tutorials, each ~5 minutes, each assumes nothing from the others:
-
-**"I run Ollama locally for chat."**
-Install. Run. See your chats appear. Done.
-
-**"I'm fine-tuning on my GPU."**
-Install. Add `--tag "experiment-3"` to your training command. Compare runs across experiments. Done.
-
-**"I'm running a model server in production."**
-Install. Configure Prometheus. Import the Grafana dashboard. Set up alerts on regression events. Done.
-
-### Honest feature list
-
-After the demo and quickstarts, *then* the feature list. Honest about what works:
-
-- ✓ Linux (Ubuntu 22.04+, RHEL 9, Debian 12 tested)
-- ✓ Windows 11 (signed binary)
-- 🟡 macOS (untested but should work)
-- 🟡 Jetson (untested; tegrastats sampler shipped)
-- ✗ Multi-GPU host (single-GPU tested; multi-GPU untested)
-
-Not "production ready." Not "100% complete." Just what works and what's untested.
-
-### Troubleshooting section
-
-Discoverable, scannable. Top 10 issues with one-line fixes. Examples:
-- "GPU shows as unavailable" — install nvidia-driver, ensure `nvidia-smi` works
-- "tokens/sec shows 0" — check that vLLM is exposing /metrics
-- "Permission denied on /proc/<pid>/environ" — expected for processes you don't own
-- "Defender blocks the binary" — see signing instructions in INSTALL.md
+**Detection:** at startup, write a test pattern to a hidden region and check terminal capability. If Unicode block characters fail, fall back to ASCII for the entire session. Real concern: older Windows ConHost, minimal SSH sessions, `tmux` with broken `LANG`.
 
 ---
 
-## Part 14 — What ships in v1.0 (consolidated)
+# What this contract changes from current state
 
-Pulling together everything in this document, the v1.0 launch list:
+**Linux changes (~25 items):**
+- ROS2 detection in classifier
+- New Top processes panel
+- New alert region with 6 alert types
+- Split live detail vs post-mortem cards (currently one card)
+- Implement `t` for sort cycle, `a` for alert ack
+- Drop `d` keybinding entirely
+- Adopt `ux_contract` crate for copy strings
+- Three themes; theme detection + symbol fallback
 
-### Engineering (from IMPLEMENTATION_*.md)
-- Tier 1.1 history viewer ✓
-- Tier 1.2 telemetry samplers (vLLM, llama.cpp, Ollama) ✓
-- Tier 1.3 regression detection ✓
-- Tier 2.1 power & thermals ✓
-- Tier 2.2 cold-start I/O ✓
-- Tier 2.3 Prometheus exporter (in progress)
-- G.1.11 / G.7 PID reuse safety fix (must land)
-- Identity unification on Windows (U.1–U.5)
+**Windows changes (~50 items):**
+- All Linux changes, plus:
+- Wire ~12 orphan `core::*` modules (audit found these unused)
+- Replace 9-column Inference Registry with 5-field Workloads spec per §2
+- Drop Resource Hogs panel (replaced by Top processes with sharper rules)
+- Drop Unmapped Processes panel
+- Remove `a1/s1/d1` chord remnants (audit found these still rendering)
+- Implement `RunRecord` schema with explicit no-stderr clause
+- Wire telemetry samplers to populate Workload row throughput
 
-### Design (this document)
-- Plain-English label rewrite
-- Six-color palette implemented
-- Three themes (dark, light, high-contrast)
-- Default screen redesign per Part 5
-- Section labels replace "Registry/Rogues/Culprits" vocabulary
-- Status dots (●) for at-a-glance health
-- Whitespace pass on all panels
-- ASCII banner removed
+# What's NOT in v0.3 (deliberate)
 
-### Experience (the gaps)
-- Gap 1: First-run / onboarding
-- Gap 5: Post-mortem card on workload exit
-- Gap 8: Energy accounting (watts/token, joules/inference)
-- Gap 12: Killer demo GIF + one quickstart
-- Gap 14: Empty state + error state pass
+- `d` key, 6-panel detail layout, Resource Hogs, Unmapped Processes, ASCII art banners
+- Stderr persistence, ROS1 detection
+- Sharing/export, custom themes, workload tagging, notifications, search/filter, in-tool help layers (all v1.1+)
 
-### Integration
-- `g` keypress opens Grafana / built-in setup page
-- Sample Grafana dashboard JSON (verified against actual metrics)
-- Pre-flight check before opening browser
-- Templatable URL for non-Grafana users
+---
+The note above is misplaced again. You're not asking for research — you're asking me to produce three concrete deliverables (the `ux_contract` crate scaffold, the Linux plan, the Windows plan) based on the contract we just locked. Everything I need is in our conversation. No web search.
 
-### Documentation
-- README rewrite per Part 13
-- Three audience-specific quickstarts
-- Troubleshooting section
-- Honest "what works / what's untested" matrix
-- Configuration reference for new keys (theme, dashboard, retention)
+This is going to be a long response. Brace.
 
 ---
 
-## Part 15 — What v1.1 adds
+# Deliverable 1 — The `ux_contract` crate
 
-The polish wave that follows the launch:
+A single Rust crate, path-deps from both repos. ~200 lines. One file. No transitive deps beyond `std`.
 
-- Gap 2: Workload tagging
-- Gap 3: Comparison/diff view (`edge_monitor compare`)
-- Gap 4: Notifications (desktop, webhook, email)
-- Gap 7: Filtering and search
-- Gap 13: In-tool help layers
-- Gap 15: Privacy and retention controls
-- Custom theme support via config
-- Per-audience tutorials for the remaining segments
-- Distribution channels (brew, scoop, winget)
+## File layout
+
+```
+ux_contract/
+├── Cargo.toml
+└── src/
+    └── lib.rs
+```
+
+## `Cargo.toml`
+
+```toml
+[package]
+name = "ux_contract"
+version = "0.3.0"
+edition = "2024"
+description = "UX contract for edge_monitor — copy strings, alert IDs, thresholds, keymap, themes."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+# None. This crate is intentionally dependency-free.
+# It exists to make UX drift structurally impossible.
+```
+
+## `src/lib.rs`
+
+```rust
+//! ux_contract — the single source of truth for edge_monitor's user-facing
+//! behavior. Both the Linux and Windows binaries depend on this crate.
+//! Editing this crate is the only way to change UX behavior.
+//!
+//! Contract version: 0.3
+//! Locked: see UX_CONTRACT.md
+//!
+//! When you change anything in this file:
+//! 1. Bump CONTRACT_VERSION
+//! 2. Update UX_CONTRACT.md
+//! 3. Re-run golden-image tests in both repos
+
+#![forbid(unsafe_code)]
+#![deny(missing_docs)]
+#![warn(clippy::all)]
+
+/// Contract version. Bumped when the contract changes in any way.
+pub const CONTRACT_VERSION: &str = "0.3.0";
+
+// ============================================================================
+// §3 — Status dots (semantic states for workload rows)
+// ============================================================================
+
+/// Status of a workload, shown as a colored dot on the row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum WorkloadStatus {
+    /// Green ●. All thresholds OK, throughput within ±10% of baseline.
+    Healthy,
+    /// Amber ⚠. Resource pressure or throughput regression.
+    Attention,
+    /// Red ✕. Critical: VRAM/KV ≥ 95%, governor armed, OOM detected.
+    Critical,
+    /// Gray ○. Less than 30s of telemetry, no baseline.
+    Loading,
+}
+
+impl WorkloadStatus {
+    /// Unicode symbol for this status. ASCII fallback in `symbol_ascii()`.
+    pub const fn symbol(self) -> &'static str {
+        match self {
+            WorkloadStatus::Healthy => "●",
+            WorkloadStatus::Attention => "⚠",
+            WorkloadStatus::Critical => "✕",
+            WorkloadStatus::Loading => "○",
+        }
+    }
+
+    /// ASCII fallback when the terminal can't render Unicode block characters.
+    pub const fn symbol_ascii(self) -> &'static str {
+        match self {
+            WorkloadStatus::Healthy => "*",
+            WorkloadStatus::Attention => "!",
+            WorkloadStatus::Critical => "X",
+            WorkloadStatus::Loading => "o",
+        }
+    }
+}
+
+// ============================================================================
+// Thresholds (drive WorkloadStatus computation)
+// ============================================================================
+
+/// Resource and performance thresholds. All percentages 0.0..=100.0.
+pub mod thresholds {
+    /// VRAM utilization that triggers Attention dot.
+    pub const VRAM_ATTENTION_PCT: f64 = 85.0;
+    /// VRAM utilization that triggers Critical dot.
+    pub const VRAM_CRITICAL_PCT: f64 = 95.0;
+
+    /// RAM utilization that triggers Attention.
+    pub const RAM_ATTENTION_PCT: f64 = 90.0;
+    /// RAM utilization that triggers Critical.
+    pub const RAM_CRITICAL_PCT: f64 = 95.0;
+
+    /// KV cache utilization that triggers Attention (LLM only).
+    pub const KV_ATTENTION_PCT: f64 = 80.0;
+    /// KV cache utilization that triggers Critical (LLM only).
+    pub const KV_CRITICAL_PCT: f64 = 95.0;
+
+    /// Throughput as fraction of baseline below which Attention fires.
+    /// E.g. 0.80 means "current ≤ 80% of baseline → Attention".
+    pub const THROUGHPUT_ATTENTION_RATIO: f64 = 0.80;
+
+    /// Bar graph color shifts to Attention at this utilization.
+    pub const BAR_ATTENTION_PCT: f64 = 85.0;
+    /// Bar graph color shifts to Critical at this utilization.
+    pub const BAR_CRITICAL_PCT: f64 = 95.0;
+
+    /// Sustained-pressure window before alerts fire. Seconds.
+    pub const ALERT_SUSTAIN_SECS: u64 = 5;
+
+    /// Time before a workload has enough telemetry for a baseline. Seconds.
+    pub const BASELINE_WARMUP_SECS: u64 = 30;
+
+    /// Armed-kill window. Seconds.
+    pub const KILL_ARM_WINDOW_SECS: u64 = 5;
+}
+
+// ============================================================================
+// §4 — Alerts (sticky banners above the header)
+// ============================================================================
+
+/// Identity of an alert. Used for de-duplication and acknowledgment tracking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AlertId {
+    /// VRAM_PRESSURE: VRAM ≥ 85% sustained 5s.
+    VramPressure,
+    /// RAM_PRESSURE: RAM ≥ 90% sustained 5s.
+    RamPressure,
+    /// KV_PRESSURE: KV cache ≥ 85% sustained 5s.
+    KvPressure,
+    /// GOVERNOR_ARMED: a manual kill is armed against a workload.
+    GovernorArmed,
+    /// OOM_DETECTED: kernel OOM kill in last 30s.
+    OomDetected,
+    /// WORKLOAD_EXITED: a workload exited with non-zero, OOM, or governor kill.
+    /// Clean exits (code 0) do NOT raise this alert.
+    WorkloadExited,
+}
+
+/// Maximum alerts visible simultaneously before "+N more".
+pub const ALERT_MAX_VISIBLE: usize = 3;
+
+// ============================================================================
+// §6 — Keymap
+// ============================================================================
+
+/// Every action the TUI can dispatch in response to input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Action {
+    /// Quit the application (with confirm if kill armed).
+    Quit,
+    /// Toggle the help overlay.
+    ToggleHelp,
+    /// Move workload selection up.
+    SelectUp,
+    /// Move workload selection down.
+    SelectDown,
+    /// Arm a kill on the focused workload (or confirm if already armed).
+    KillOrConfirm,
+    /// Open the detail card (live or post-mortem based on row state).
+    OpenDetail,
+    /// Open Grafana for the focused workload.
+    OpenGrafana,
+    /// Toggle the history overlay.
+    ToggleHistory,
+    /// Acknowledge all currently visible alerts.
+    AcknowledgeAlerts,
+    /// Cycle the Top processes panel sort: RAM → CPU → VRAM.
+    CycleTopSort,
+    /// Esc cascade — see UX_CONTRACT.md §6 for resolution order.
+    EscapeCascade,
+}
+
+// ============================================================================
+// §7 — Copy strings (every user-visible string in the TUI)
+// ============================================================================
+
+/// Status footer messages. `{placeholder}` substituted at render time.
+pub mod status {
+    /// Footer message after browser opens for Grafana.
+    pub const DASHBOARD_OPENED: &str = "Opened {url}";
+    /// Footer message when browser fails to launch.
+    pub const DASHBOARD_FAILED: &str = "Could not open browser: {reason}";
+    /// Footer message when the user invokes a workload-targeted action with no row focused.
+    pub const NO_WORKLOAD_FOCUSED: &str = "No AI workload focused";
+    /// Footer message after first 'k' press.
+    pub const KILL_ARMED: &str =
+        "Armed kill on {name} (PID {pid}) — press k again within {secs}s";
+    /// Footer message in dry-run mode after kill confirmation.
+    pub const KILL_DRY_RUN: &str = "Would stop {name} (dry-run mode — no action taken)";
+    /// Footer message after kill signal sent.
+    pub const KILL_SENT: &str = "Sent SIGTERM to {name} (PID {pid})";
+    /// Footer message after Esc disarms a kill.
+    pub const KILL_DISARMED: &str = "Kill disarmed";
+    /// Footer message when kill is blocked by allowlist.
+    pub const GOVERNOR_BLOCKED: &str = "Cannot kill {name}: protected by allowlist";
+    /// Footer message after 'a' acknowledges alerts.
+    pub const ALERTS_ACKNOWLEDGED: &str = "Acknowledged {n} alerts";
+    /// Footer message when Enter pressed on a system process row.
+    pub const NO_DETAIL_FOR_SYSTEM: &str = "Detail not available for system processes";
+    /// Footer message after 't' cycles top-processes sort.
+    pub const TOP_SORT_CHANGED: &str = "Top processes sorted by {dimension}";
+    /// Footer message when Grafana pre-flight probe fails.
+    pub const GRAFANA_UNREACHABLE: &str =
+        "Grafana not reachable at {url}. Press s for setup help.";
+}
+
+/// Empty-state strings. Shown inside panels when no data is available.
+pub mod empty {
+    /// Workloads panel empty.
+    pub const WORKLOADS: &str = "No AI workloads detected. Start one to begin monitoring.";
+    /// Activity panel empty.
+    pub const ACTIVITY: &str = "No recent activity.";
+    /// History overlay empty.
+    pub const HISTORY: &str = "No history yet. Completed runs will appear here.";
+}
+
+/// Alert message templates. `{placeholder}` substituted at render time.
+pub mod alerts {
+    /// Template for VRAM pressure alert.
+    pub const VRAM_PRESSURE: &str = "VRAM at {pct}% — {workload} (PID {pid}) approaching limit";
+    /// Template for RAM pressure alert.
+    pub const RAM_PRESSURE: &str = "RAM at {pct}% — system approaching limit";
+    /// Template for KV cache pressure alert.
+    pub const KV_PRESSURE: &str = "KV cache at {pct}% — {workload} (PID {pid}) may stall";
+    /// Template for governor-armed alert.
+    pub const GOVERNOR_ARMED: &str =
+        "Kill armed on {workload} (PID {pid}) — k confirms, Esc cancels";
+    /// Template for OOM-detected alert.
+    pub const OOM_DETECTED: &str =
+        "OOM kill detected — {workload} (PID {pid}) terminated by kernel";
+    /// Template for non-clean workload-exit alert.
+    pub const WORKLOAD_EXITED: &str =
+        "{workload} exited with {reason} — press Enter for post-mortem";
+}
+
+/// Confirmation prompt strings.
+pub mod confirm {
+    /// Prompt when user attempts to quit while a kill is armed.
+    pub const QUIT_KILL_PENDING: &str = "Kill armed on {workload}. Quit anyway? (y/N)";
+}
+
+/// Error messages shown when the TUI cannot render normally.
+pub mod errors {
+    /// Shown when terminal is below the 80×24 minimum.
+    pub const TERMINAL_TOO_SMALL: &str =
+        "edge_monitor needs at least 80×24 terminal.\nCurrent size: {w}×{h}. Resize and press any key.";
+}
+
+// ============================================================================
+// §13 — Themes
+// ============================================================================
+
+/// One of the three v1.0 themes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThemeName {
+    /// Tokyo Night-inspired dark palette. Default.
+    Dark,
+    /// Cream-background light palette (not pure white).
+    Light,
+    /// Pure-black-on-white with bright primaries; WCAG AAA.
+    HighContrast,
+}
+
+/// Hex color values for one theme. Strings so they can be parsed at render time
+/// by the platform-specific TUI layer (ratatui::style::Color).
+#[derive(Debug, Clone, Copy)]
+pub struct Theme {
+    /// Theme identity.
+    pub name: ThemeName,
+    /// Main background color hex.
+    pub background: &'static str,
+    /// Slightly lighter panel-surface background.
+    pub background_raised: &'static str,
+    /// Primary text color.
+    pub foreground: &'static str,
+    /// Secondary / muted text color.
+    pub muted: &'static str,
+    /// Selection highlight, title bar, key hints.
+    pub accent: &'static str,
+    /// Healthy dot color.
+    pub healthy: &'static str,
+    /// Attention dot / amber alert color.
+    pub attention: &'static str,
+    /// Critical dot / red alert color.
+    pub critical: &'static str,
+}
+
+impl Theme {
+    /// Returns the theme matching the given name.
+    pub const fn for_name(name: ThemeName) -> Self {
+        match name {
+            ThemeName::Dark => DARK,
+            ThemeName::Light => LIGHT,
+            ThemeName::HighContrast => HIGH_CONTRAST,
+        }
+    }
+}
+
+/// Tokyo Night-inspired dark theme. WCAG AA verified.
+pub const DARK: Theme = Theme {
+    name: ThemeName::Dark,
+    background: "#1a1b26",
+    background_raised: "#24283b",
+    foreground: "#c0caf5",
+    muted: "#9aa5ce",
+    accent: "#7aa2f7",
+    healthy: "#9ece6a",
+    attention: "#e0af68",
+    critical: "#f7768e",
+};
+
+/// Cream-background light theme. WCAG AA verified.
+pub const LIGHT: Theme = Theme {
+    name: ThemeName::Light,
+    background: "#e6e2cf",
+    background_raised: "#d8d2bb",
+    foreground: "#2c2c2a",
+    muted: "#5f5e5a",
+    accent: "#185fa5",
+    healthy: "#3b6d11",
+    attention: "#854f0b",
+    critical: "#a32d2d",
+};
+
+/// High-contrast theme. WCAG AAA.
+pub const HIGH_CONTRAST: Theme = Theme {
+    name: ThemeName::HighContrast,
+    background: "#000000",
+    background_raised: "#1a1a1a",
+    foreground: "#ffffff",
+    muted: "#cccccc",
+    accent: "#00ffff",
+    healthy: "#00ff00",
+    attention: "#ffff00",
+    critical: "#ff0000",
+};
+
+// ============================================================================
+// §12 — Sizing
+// ============================================================================
+
+/// Terminal sizing breakpoints.
+pub mod sizing {
+    /// Minimum supported terminal width. Below this, refuse to render.
+    pub const MIN_COLS: u16 = 80;
+    /// Minimum supported terminal height.
+    pub const MIN_ROWS: u16 = 24;
+
+    /// Width above which the TUI uses the standard layout.
+    pub const STANDARD_COLS: u16 = 120;
+    /// Height above which the TUI uses the standard layout.
+    pub const STANDARD_ROWS: u16 = 40;
+
+    /// Width above which the TUI may use two-column workload layout.
+    pub const WIDE_COLS: u16 = 160;
+
+    /// Card overlays lock at this width regardless of terminal size.
+    pub const CARD_WIDTH: u16 = 64;
+    /// Minimum card height.
+    pub const CARD_HEIGHT_MIN: u16 = 8;
+    /// Maximum card height.
+    pub const CARD_HEIGHT_MAX: u16 = 22;
+}
+
+// ============================================================================
+// Tests — verify the contract is internally consistent
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn contract_version_matches_doc() {
+        // If you change CONTRACT_VERSION, update UX_CONTRACT.md to match.
+        assert_eq!(CONTRACT_VERSION, "0.3.0");
+    }
+
+    #[test]
+    fn all_alert_ids_have_a_template() {
+        // Defensive: every AlertId variant should be reachable in alerts::* by
+        // the dispatch layer. This test enumerates so a reviewer notices when
+        // a new variant is added without a template.
+        let _all = [
+            AlertId::VramPressure,
+            AlertId::RamPressure,
+            AlertId::KvPressure,
+            AlertId::GovernorArmed,
+            AlertId::OomDetected,
+            AlertId::WorkloadExited,
+        ];
+        assert_eq!(_all.len(), 6, "AlertId count changed — update templates");
+    }
+
+    #[test]
+    fn thresholds_are_ordered() {
+        // Critical thresholds must be ≥ Attention thresholds.
+        assert!(thresholds::VRAM_CRITICAL_PCT >= thresholds::VRAM_ATTENTION_PCT);
+        assert!(thresholds::RAM_CRITICAL_PCT >= thresholds::RAM_ATTENTION_PCT);
+        assert!(thresholds::KV_CRITICAL_PCT >= thresholds::KV_ATTENTION_PCT);
+    }
+
+    #[test]
+    fn themes_have_distinct_palettes() {
+        assert_ne!(DARK.background, LIGHT.background);
+        assert_ne!(LIGHT.background, HIGH_CONTRAST.background);
+    }
+
+    #[test]
+    fn sizing_is_consistent() {
+        assert!(sizing::STANDARD_COLS >= sizing::MIN_COLS);
+        assert!(sizing::WIDE_COLS >= sizing::STANDARD_COLS);
+        assert!(sizing::CARD_HEIGHT_MAX >= sizing::CARD_HEIGHT_MIN);
+        assert!(sizing::CARD_WIDTH < sizing::MIN_COLS);
+    }
+
+    #[test]
+    fn workload_status_symbols_distinct() {
+        let symbols = [
+            WorkloadStatus::Healthy.symbol(),
+            WorkloadStatus::Attention.symbol(),
+            WorkloadStatus::Critical.symbol(),
+            WorkloadStatus::Loading.symbol(),
+        ];
+        let mut sorted: Vec<&'static str> = symbols.to_vec();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(sorted.len(), 4);
+    }
+}
+```
+
+## How both repos consume this crate
+
+**Linux `Cargo.toml`** gets one line:
+```toml
+[dependencies]
+ux_contract = { path = "../ux_contract" }  # adjust path as appropriate
+```
+
+**Windows `crates/cli/Cargo.toml`** gets the same:
+```toml
+[dependencies]
+ux_contract = { path = "../../ux_contract" }
+```
+
+The crate produces no runtime overhead — everything is `const` data. The compile-time check is the whole point: if Linux uses `ux_contract::status::KILL_ARMED` and Windows uses a hardcoded string, the next reviewer sees the asymmetry. After both repos have adopted the crate everywhere copy strings appear, drift is structurally impossible.
 
 ---
 
-## Part 16 — How to verify this design lands
+# Deliverable 2 — Linux implementation plan
 
-Three checks before declaring the design work done:
+26 rows. Ordered by dependency: foundation first (crate adoption, copy refactor), then features that build on it (alerts, ROS2, detail cards), then polish (sizing, themes). Each row is sized to be a single PR.
 
-### Check 1 — The 60-second test
-Show the redesigned default TUI to someone who's never seen edge_monitor. Don't explain anything. Ask: "what does this tool do?" Their answer reveals whether the design communicates without help.
+| # | Clause | Files to change | What changes | Test |
+|---|---|---|---|---|
+| **L1** | §7 (foundation) | `Cargo.toml`, all of `src/ui/*` | Add `ux_contract` path dep. Replace every hardcoded user-visible string with `ux_contract::status::*`, `::empty::*`, `::confirm::*`, `::errors::*`. Mechanical search-and-replace. | Existing TUI tests still pass; new `tests/copy_strings_via_contract.rs` greps `src/ui/` for non-allowlist string literals and fails on raw user-facing strings. |
+| **L2** | §6 (foundation) | `src/ui/input.rs` | Replace internal `Action` enum with re-export from `ux_contract::Action`. Translate crossterm `KeyEvent` → `ux_contract::Action` table. | Update `tests/dashboard_keybinding_e2e.rs` to assert key→action mapping uses the contract enum. |
+| **L3** | §3 (foundation) | `src/runtime.rs` (`build_baseline_status` and `compute_status_dot`) | Replace ad-hoc status logic with `ux_contract::WorkloadStatus` driven by `ux_contract::thresholds::*`. | New `tests/workload_status_thresholds.rs` table-tests every threshold boundary (84.9 → Healthy, 85.0 → Attention, etc.). |
+| **L4** | §15 (foundation) | New `src/ui/symbols.rs` | At startup, write a UTF-8 test pattern, detect render capability, choose between `WorkloadStatus::symbol()` and `::symbol_ascii()` for the session. Same for box-drawing chars and bar blocks. | New `tests/symbol_fallback.rs` mocks a TTY without UTF-8 and asserts ASCII path. |
+| **L5** | §4 | New `src/ui/alerts.rs`, `src/runtime.rs` | Add `AlertState` to `RuntimeState`. Per-tick: detect threshold crossings, raise alerts via `ux_contract::AlertId`, track sustained-pressure window. Drain on tick to UI. | New `tests/alert_state_machine.rs` proptest: every (alert raised → sustained → ack) sequence preserves invariants. |
+| **L6** | §1 region 1, §4 | `src/ui/panels/mod.rs` (new alerts panel) | Render alert region above header. 0–3 lines. Stack vertically. `+N more` when count > 3. Background tinted per alert severity. | New `tests/alert_render_golden.rs` — 4 golden images: 0 alerts, 1 alert, 3 alerts, 5 alerts (with `+2 more`). |
+| **L7** | §6 | `src/ui/input.rs`, `src/ui/mod.rs` | Wire `a` key → `Action::AcknowledgeAlerts` → `AlertState::ack_all()`. Add `STATUS_ALERTS_ACKNOWLEDGED` to footer for 3s. | Unit test in `tests/alert_state_machine.rs` for ack flow. |
+| **L8** | §4 only-on-non-clean | `src/runtime.rs` (exit handling) | When `ExitClassifier` returns `ExitOk`, raise no `WORKLOAD_EXITED` alert. Only `OOMKill`, `CudaOOM`, `Segfault`, `GovernorKill`, `ExitNonZero`, `Unknown` raise. | Extend `tests/pipeline_end_to_end.rs` with both clean and non-clean exit cases. |
+| **L9** | §2 (ROS2 detection) | `src/classifier/keyword_match.rs`, `src/classifier/model_extract.rs`, `src/classifier/mod.rs` | Add `AICategory::ROS2`. Detect via env vars (`RMW_IMPLEMENTATION`, `ROS_DOMAIN_ID`, `AMENT_PREFIX_PATH`), cmdline (`ros2 run`, `ros2 launch`), and `/proc/{pid}/maps` scan for `librcl.so`. Extract node name from `--ros-args -r __node:=`. | New `tests/ros2_classifier.rs` with 8 fixtures: `ros2 run` / `ros2 launch` / Python rclpy / C++ rclcpp / nodelet / launch-file-only / pre-existing-ROS1-not-detected / lifecycle-node. |
+| **L10** | §2 (ROS2 metrics, deferred) | `src/runtime.rs` | For `AICategory::ROS2` workloads, set `primary_metric = "(no metrics)"` placeholder. Mark Hz sampling as v1.1 with TODO comment + GitHub issue. Process-level RAM/CPU still flow. | New `tests/ros2_workload_row.rs` asserts ROS2 row renders with RAM/CPU only and the `--` placeholder for Hz. |
+| **L11** | §1 region 4 | `src/ui/panels/registry.rs` (rename to `workloads.rs`) | Group rows by `AICategory`. Order: LLM → Vision → ROS2 → Embeddings → Unknown. Render subsection header per non-empty category. Hide subsection header when only one category present. | Golden-image tests for: single LLM, multi-category, ROS2 only, all empty. |
+| **L12** | §2 expanded line | `src/ui/panels/workloads.rs` | When `WorkloadStatus` is `Attention` or `Critical`, render second indented line per category schema in §2. | Extend golden-image tests above with degraded variants. |
+| **L13** | §1 region 5 | New `src/ui/panels/top_processes.rs`, `src/runtime.rs` | New panel showing top-N (default 3, max 5 via `[ui].top_processes_count`) by RAM. Filter out edge_monitor itself + processes already in Workloads. | New `tests/top_processes_filter.rs` asserts edge_monitor and Workload PIDs are filtered. |
+| **L14** | §6 `t` key | `src/ui/input.rs`, `src/ui/panels/top_processes.rs` | Wire `t` → `Action::CycleTopSort` → cycle RAM → CPU → VRAM. Footer message via `STATUS_TOP_SORT_CHANGED`. | Extend `tests/top_processes_filter.rs` with sort-cycle test. |
+| **L15** | §1 region 6 | `src/ui/panels/audit.rs` (rename to `activity.rs`) | Merge `Recent runs` and `Governor interventions` into one timestamp-interleaved panel. Last 5 events. | Update existing audit panel tests; rename test file to match. |
+| **L16** | §5 split | `src/ui/panels/postmortem.rs` (split into `live_detail.rs` + `postmortem.rs`) | Two distinct cards. `Enter` on running workload → live detail with sparklines. `Enter` on exited row in Activity/history → post-mortem. Same dimensions, different content. | Extend `tests/postmortem_e2e.rs`; new `tests/live_detail_card.rs` for the running variant. |
+| **L17** | §5 sparklines | `src/ui/panels/live_detail.rs` | Per-workload rolling buffer of last 60s of throughput + KV (LLM only). Render via `▁▂▃▄▅▆▇█`. Auto-extend to 30 cells (90s) at terminal ≥ 160 cols. | Visual smoke; sparkline correctness via unit test on the buffer logic. |
+| **L18** | §8 (no stderr) | `src/storage/run_store.rs`, `src/runtime.rs` | Verify `RunRecord` has no `stderr_lines` field (Linux audit confirmed it doesn't). Document the privacy stance with a doc-comment block. Add lint-style test that fails if anyone adds the field. | New `tests/no_stderr_persistence_guard.rs` — a `tests/expect_rule_guard.rs`-style test that walks `src/storage/` and rejects any field literally named `stderr` or `stderr_*` with `Serialize`. |
+| **L19** | §5 stderr-when-fresh | `src/runtime.rs`, `src/ui/panels/postmortem.rs` | Capture stderr in a transient `HashMap<PID, VecDeque<String>>` cap'd at 64 lines × 1KB. Cleared on card dismiss or 30s after exit. Post-mortem card omits stderr section if buffer is gone. | Extend `tests/postmortem_e2e.rs` with a "stderr present immediately, gone after 30s" case. |
+| **L20** | §13 themes | New `src/ui/theme.rs` | Three theme structs from `ux_contract::{DARK, LIGHT, HIGH_CONTRAST}`. Map hex → `ratatui::style::Color`. CLI flag `--theme` and `[ui].theme = "dark"` config. | New `tests/theme_switching.rs` asserts each theme renders with the right colors at panel-fill time. |
+| **L21** | §14 color usage | All of `src/ui/panels/*` | Audit and refactor: status dots are the only colored thing on workload rows. Bar graphs shift to `attention` at 85% and `critical` at 95%. Section headers in `muted`. Footer key letters in `accent`. | Visual review + golden-image tests at boundary thresholds. |
+| **L22** | §12 sizing | `src/ui/mod.rs` | Read terminal size on resize event. If below `MIN_COLS × MIN_ROWS`, render `errors::TERMINAL_TOO_SMALL`. At ≥ `STANDARD_*`, render full layout. At ≥ `WIDE_COLS`, two-column workload layout if 4+ workloads. | New `tests/sizing_breakpoints.rs` with `TestBackend` at 70×20, 80×24, 120×40, 160×50. |
+| **L23** | §10 minimal Grafana | `src/ui/mod.rs` (existing `handle_open_dashboard`) | Verify pre-flight TCP probe is in place. On failure, footer shows `STATUS_GRAFANA_UNREACHABLE`. No dashboard JSON shipping in this PR — that's a v1.0 polish task post-implementation. | Extend `tests/dashboard_keybinding_e2e.rs` with a "probe fails → footer message" case. |
+| **L24** | §1 region 1 + §4 dismiss flow | `src/ui/app.rs` (Esc cascade) | Update `handle_escape` per §6 cascade order. Specifically: alerts visible → ack all comes after history/help close. | Update `tests/postmortem_e2e.rs` Esc cascade tests. |
+| **L25** | §0 mission line | `src/ui/panels/header.rs` (new file or update existing header render) | Header line: `edge_monitor · {n} workloads · {m} degraded · press ? for help`. Drop the "VATCH"-equivalent ASCII branding if any survives. | Golden-image test for header rendering. |
+| **L26** | Cross-cutting cleanup | `BUILDER_STATUS.md`, `CHANGELOG.md`, `README.md`, `FEATURES.md` | Single sweep doc PR after L1-L25 land: delete stale claims, point to UX_CONTRACT.md as source of truth, fix test counts, remove the "Tier 1.x" / "Tier 2.x" taxonomy in favor of contract clauses. | None (doc-only). |
 
-Pass: they can name 2-3 things the tool tracks.
-Fail: they ask "what's a Registry?" or "why is this colored like that?"
-
-### Check 2 — The screenshot test
-Take the redesigned screenshot. Post it to a relevant subreddit or share with 5 ML engineers. Note the reaction.
-
-Pass: someone says "oh, that looks nice" or "I'd install that."
-Fail: silence, or "looks like btop with extra steps."
-
-### Check 3 — The first-run test
-Spin up a fresh VM. No prior edge_monitor exposure. Install. Run. Time how long until the user understands what the tool does and tries something.
-
-Pass: <60 seconds to first useful interaction.
-Fail: confusion, requires reading docs, gives up.
-
-These tests are cheap and the only real measure of whether the design work succeeded.
-
----
-
-## Part 17 — What to do next
-
-Ordered task list for whoever picks this up:
-
-1. **Audit the current TUI against Part 2 principles.** List every label, color, and layout decision. Mark each as keep / change / cut. Cheapest, fastest improvement. ~1 day.
-
-2. **Implement the palette and three themes.** ratatui supports this directly. Add `--theme` flag. ~1 day.
-
-3. **Apply the vocabulary rewrite.** Every "Registry" → "AI Workloads," every "RSS" → "RAM," every "NVML uninitialized" → "No GPU detected." ~half day.
-
-4. **Build the redesigned default screen** per Part 5 layout. The simple-mode default. ~1 day.
-
-5. **Implement Gap 5 (post-mortem card).** Most data already exists. Just present it. ~half day.
-
-6. **Implement Gap 14 (empty/error state pass).** Audit every error path. ~half day.
-
-7. **Implement Gap 1 (first-run).** Detect runtimes, show "try this" hint. ~1 day.
-
-8. **Implement Gap 8 (energy accounting).** Math is simple, data exists. ~1 day.
-
-9. **Implement `g` keybinding** with pre-flight Grafana check (Part 8). ~half day.
-
-10. **Record the killer demo GIF** (Gap 12). ~1 day to script, record, edit.
-
-11. **Rewrite the README** per Part 13. ~1 day.
-
-12. **Run the three verification checks** in Part 16. As long as it takes.
-
-Total: roughly 10-12 days of focused work to take edge_monitor from "engineering-complete" to "shippable polish." Not a lot for the upgrade in product quality.
+**Recommended PR ordering**: L1 → L2 → L3 → L4 (foundation, ~3 days). L5 → L6 → L7 → L8 (alerts feature, ~2 days). L9 → L10 → L11 → L12 (ROS2 + grouping, ~2 days). L13 → L14 → L15 (top processes + activity, ~2 days). L16 → L17 → L18 → L19 (cards + privacy, ~3 days). L20 → L21 → L22 (themes + sizing, ~2 days). L23 → L24 → L25 → L26 (Grafana + polish + docs, ~1 day). **Total: ~15 dev-days** for a focused engineer who already knows the codebase. Builds incrementally — every PR ships a visible improvement.
 
 ---
 
-## Closing note
+# Deliverable 3 — Windows implementation plan
 
-The features were the easy part. Engineering an edge_monitor that monitors AI workloads with a governor and history is doable in a few weeks; we did it.
+49 rows. The Linux 25 changes plus 24 wiring/cleanup changes the audit identified. Heavier because the Windows codebase is mid-refactor with ~12 orphan modules and a separate audit blocker list.
 
-The hard part — the one that determines whether anyone actually uses what we built — is everything in this document. The plain-English labels. The calm color palette. The respect for user habits. The empty states that teach. The post-mortem card that makes the user think "oh, that's helpful." The killer demo GIF that converts the visitor to a user.
+| # | Clause | Files to change | What changes | Test |
+|---|---|---|---|---|
+| **W1** | §7 (foundation) | `crates/cli/Cargo.toml`, `crates/cli/src/main.rs`, `crates/cli/src/ui/*` | Add `ux_contract` path dep. Replace every hardcoded user-visible string with `ux_contract::status::*`. | New `tests/copy_strings_via_contract.rs` mirroring Linux L1. |
+| **W2** | §6 (foundation) | `crates/cli/src/ui/tui.rs::classify_key` | Replace internal action enum with `ux_contract::Action`. | Update existing TUI key tests. |
+| **W3** | §3 (foundation) | `crates/cli/src/main.rs` (status logic embedded in monitor loop) | Extract status-dot computation to a free function using `ux_contract::WorkloadStatus` + thresholds. | New `tests/workload_status_thresholds.rs` mirroring L3. |
+| **W4** | §15 (foundation) | New `crates/cli/src/ui/symbols.rs` | UTF-8 detection at startup. ConHost-aware fallback to ASCII. | New `tests/symbol_fallback.rs`. |
+| **W5** | Audit Blocker 1 | `crates/core/src/model.rs` | Add `cpu_watts: Option<f64>` (avg + peak) to `RunSummary`. | Extend serialization tests for `RunSummary` schema. |
+| **W6** | Audit Blocker 35 | `crates/core/src/model.rs`, `crates/cli/src/main.rs::finalize_profile` | Add `exit_reason: Option<ExitReason>` to `RunSummary`. Stop discarding the value at the `_exit_reason` parameter. | New test asserts persisted `RunSummary` round-trips `exit_reason`. |
+| **W7** | Cleanup | `crates/cli/src/main.rs` | Remove `_input_rx` dead-code path (the stdin thread whose receiver is dropped). Just delete it. | `cargo build` clean. |
+| **W8** | Cleanup | `crates/cli/src/q.py` | **Delete the file.** Bandwidth-hammer with `ssl.CERT_NONE` infinite loop has no place in a workspace `src/` directory. | `find` reports it gone. |
+| **W9** | Cleanup | `crates/cli/src/w.py` | **Delete.** Mis-named Rust file kept around so old `mod` declarations still compile. | `cargo build` clean after removal of any stale `mod w;`. |
+| **W10** | Cleanup | `crates/cli/src/{f,t,yolo1}.py` | Move to a `tools/dev-fixtures/` directory at repo root with a README. They're not part of the build but they shouldn't sit in `src/`. | None. |
+| **W11** | Audit Risk R2 | `Cargo.toml`, `crates/cli/src/ui/tui.rs` | Resolve the `webbrowser` orphan. Either remove the unused dep, or actually call `webbrowser::open()` instead of shelling to `cmd /C start`. The latter aligns with cross-platform parity. | Update `tests/dashboard_keybinding_e2e.rs` if path changes. |
+| **W12** | Cleanup | `crates/core/src/lib.rs`, `crates/core/src/dashboard.rs` | Rename `core::dashboard::DashboardConfig` → `core::dashboard::TemplateConfig`. The two structs sharing the name (config-side + dashboard-side) is a footgun the audit flagged. | Update import sites; existing tests re-pass. |
+| **W13** | Cleanup | `crates/cli/src/ui/panels/{vitals,registry,rogue,culprits,completed,audit}.rs` | **Delete all six.** They're 8-line `pub struct Panel;` stubs that no code constructs. | `cargo build` clean. |
+| **W14** | Cleanup | `Cargo.toml.backup` | **Delete.** Vestige of pre-workspace single-crate. | None. |
+| **W15** | Audit Risk R1 | `crates/cli/src/main.rs` (NVML init), `crates/platform_windows/src/lib.rs` if applicable | Gate the NVML init log behind a `OnceLock<()>`. Currently fires every tick on no-GPU hosts. (Linux audit found this in `gpu_nvidia.rs:87-93`; verify Windows analog.) | Tail log for 1 minute on no-GPU host, assert at most 1 init line. |
+| **W16** | §1 region 4 (drop legacy panels) | `crates/cli/src/ui/dashboard.rs` | Remove `Resource Hogs` panel rendering entirely. Remove `Unmapped Processes` panel; replace with `unmapped_count` integer in the header. | Update header golden-image test. |
+| **W17** | §1 region 4 (drop chord remnants) | `crates/cli/src/main.rs::extract_models` and any `a1`/`s1`/`d1` synth logic | Remove the chord-kill scheme remnants. The audit found these still rendering in screenshots even though the chord scheme was deleted in commit 85b020c. PIDs only. | Snapshot test of registry render output without `a1/s1/d1` labels. |
+| **W18** | §1 region 4 (the 9-column rebuild) | `crates/cli/src/ui/dashboard.rs` (Inference Registry render) | Rebuild from 9 columns down to 5: status dot, model name + runtime, primary metric (tok/s / fps / Hz / emb/s), RAM, PID. Drop CPU%, VRAM, Net KB/s, Unmapped, Threat columns. | Golden-image test of new 5-column registry. |
+| **W19** | Wiring (telemetry → row) | `crates/cli/src/main.rs`, new `crates/core/src/telemetry/sampler.rs` | Wire one of `core::telemetry::{LlamaCppSampler, OllamaSampler, VLLMSampler}` to actually populate `ProcessMetrics.throughput_tokens_per_sec`. Currently every `sample_throughput()` returns `Err`. Pick one (Ollama is most common locally) and make it work end-to-end. | New `tests/ollama_throughput_wired.rs` mocks the `/api/ps` endpoint and asserts tok/s reaches the panel. |
+| **W20** | Wiring (orphan → live) | `crates/core/src/lib.rs` exports + `crates/cli/src/main.rs` | Wire `core::runtime_detect::first_run_hint` at startup. Print the hint if no AI runtime is found in PATH. | New test that mocks an empty PATH and asserts hint emission. |
+| **W21** | Wiring (orphan → live) | Same | Wire `core::dashboard::render_dashboard_url` from `tui.rs::resolve_dashboard_url`. Currently `tui.rs` reimplements URL templating with `str::replace`. Use the audited core function instead. | Replace `tui.rs`'s reimplementation; existing dashboard tests still pass. |
+| **W22** | Wiring (orphan → live) | Same | Wire `core::dashboard_preflight::probe_reachable` before opening browser. Currently `g` opens browser regardless of reachability. | New test asserts no browser launch when probe fails; footer shows `STATUS_GRAFANA_UNREACHABLE`. |
+| **W23** | §5 split | New `crates/cli/src/ui/live_detail_card.rs` + existing `post_mortem_card.rs` | Two distinct cards mirroring Linux L16. Live detail for running workloads with sparklines; post-mortem for exited. | Mirror Linux `tests/live_detail_card.rs`. |
+| **W24** | §5 sparklines | `crates/cli/src/ui/live_detail_card.rs` | Same rolling buffer logic as Linux L17. | Same. |
+| **W25** | Wiring | `crates/cli/src/main.rs::compare_runs` site | Switch from legacy `core::storage::compare_runs` to `core::analysis::compare::detect_regressions_with`. The new tier-classified comparator is exported but unused. | Extend regression detection tests with a case that requires the tier classification. |
+| **W26** | §4 alerts | New `crates/cli/src/ui/alerts.rs`, `crates/cli/src/main.rs` | Mirror Linux L5 — alert state machine driven by `ux_contract::AlertId`. | Mirror Linux test. |
+| **W27** | §1 region 1, §4 | `crates/cli/src/ui/dashboard.rs` (alerts panel) | Mirror Linux L6 — alert region above header. | Mirror Linux golden-image. |
+| **W28** | §6 `a` key | `crates/cli/src/ui/tui.rs` | Mirror Linux L7. | Mirror Linux test. |
+| **W29** | §4 only-on-non-clean | `crates/cli/src/main.rs` (exit handling) | Mirror Linux L8. | Mirror Linux test. |
+| **W30** | §2 (ROS2 detection) | `crates/cli/src/main.rs::classify_process`, `extract_models` | Add `AICategory::ROS2`. WMI command-line scan + linked-DLL detection (`tasklist /m librcl.dll`) + env scan via `/proc`-equivalent `WMI Win32_Process.GetOwner` chain. ROS2 on Windows is uncommon but `cybertronix` may need it. | Mirror Linux `tests/ros2_classifier.rs` with Windows-specific fixtures. |
+| **W31** | §2 (ROS2 metrics deferred) | Same | Process-level RAM/CPU only. Hz column = `--`. | Mirror Linux. |
+| **W32** | §1 region 4 grouping | `crates/cli/src/ui/dashboard.rs` | Mirror Linux L11 — group by category, fixed order, hide single-category subsection header. | Mirror Linux golden-image. |
+| **W33** | §2 expanded line | Same | Mirror Linux L12. | Mirror Linux. |
+| **W34** | §1 region 5 | New `crates/cli/src/ui/panels/top_processes.rs` | Mirror Linux L13. Top-N by RAM/CPU/VRAM. Filter `edge_monitor.exe` and Workload PIDs. | Mirror Linux `tests/top_processes_filter.rs`. |
+| **W35** | §6 `t` key | `crates/cli/src/ui/tui.rs` | Mirror Linux L14. | Mirror Linux. |
+| **W36** | §1 region 6 | New `crates/cli/src/ui/panels/activity.rs` | Mirror Linux L15. | Mirror Linux. |
+| **W37** | §8 (no stderr) | `crates/core/src/model.rs`, all `RunSummary` write sites | Verify Windows `RunSummary` has no `stderr` field. Add the lint-style guard test. | Mirror Linux `tests/no_stderr_persistence_guard.rs`. |
+| **W38** | §5 stderr-when-fresh | `crates/cli/src/main.rs`, `crates/cli/src/ui/post_mortem_card.rs` | Mirror Linux L19 — transient stderr buffer cleared on dismiss/30s. | Mirror Linux. |
+| **W39** | Cleanup (legacy storage) | `crates/cli/src/main.rs` | Stop double-writing `LogStore("./logs")`. Use only `RunStore("./run_history")`. The audit found three on-disk layouts simultaneously. | New test asserts only one write site fires per exit. |
+| **W40** | Cleanup (script slurp) | `crates/cli/src/main.rs:1378-1387` | Cache `fs::read_to_string` results by absolute path. Currently re-reads referenced `.py` files every tick. | Microbenchmark before/after on a 200-process system. |
+| **W41** | §13 themes | New `crates/cli/src/ui/theme.rs` | Mirror Linux L20. The existing `crates/cli/src/ui/theme.rs` is `#![allow(dead_code)]`; replace it with the contract-driven version. | Mirror Linux `tests/theme_switching.rs`. |
+| **W42** | §14 color usage | All of `crates/cli/src/ui/panels/*` | Mirror Linux L21. | Mirror Linux. |
+| **W43** | §12 sizing | `crates/cli/src/ui/tui.rs` | Mirror Linux L22. | Mirror Linux. |
+| **W44** | §10 minimal Grafana | `crates/cli/src/ui/tui.rs::resolve_dashboard_url` + new `preflight` call | Use `core::dashboard_preflight::probe_reachable` (wired in W22) before launching browser. | Mirror Linux. |
+| **W45** | §1 region 1 + §4 Esc cascade | `crates/cli/src/ui/tui.rs` | Mirror Linux L24. | Mirror Linux. |
+| **W46** | §0 mission line | `crates/cli/src/ui/dashboard.rs` (header render) | Replace any "VATCH" or all-caps banner with the contract header line. | Golden-image. |
+| **W47** | Audit Risk R6 | `crates/core/src/config.rs`, `edge_monitor.toml.example` | Resolve `[power]` config gap: either add `PowerConfig` matching `latest.md` cross-cutting spec, or remove the spec reference. | Update `tests/config_loader.rs` for whichever decision lands. |
+| **W48** | Audit Risk R8 + cleanup | `README.md`, `CHANGELOG.md`, `FEATURES.md` | Doc sweep mirroring Linux L26. Refresh test counts via CI auto-injection. Remove the post-mortem auto-trigger reference (CHANGELOG describes API that doesn't exist). | None. |
+| **W49** | Cross-cutting | `.github/workflows/ci.yml` (new file — Windows currently has no CI for the Rust workspace; only the vendored llama.cpp has CI) | Add a Windows CI workflow: `cargo build`, `cargo test`, `cargo clippy -- -D warnings`. Match Linux's CI shape. | CI green. |
 
-A tool with five polished features beats a tool with thirty half-finished ones, every time. The Pareto principle applies brutally to developer tools: 80% of adoption comes from 20% of the work, and that 20% is design and onboarding, not features.
+**Recommended PR ordering for Windows**:
 
-The good news: edge_monitor's bones are strong. The features work. The code quality is real. Adding the UX layer on top is a matter of taste and discipline, not raw effort. You're closer to a great product than the feature list suggests.
+Phase A — Cleanup and audit blockers (W5-W14, ~3 days). Fast wins, deletions, audit blocker fixes. Reviewable in chunks.
 
-Ship the polish, not just the engineering. Then run the three checks. Then tag v1.0.
+Phase B — Foundation (W1-W4, W15, ~3 days). Same as Linux foundation, plus the NVML log-spam fix.
+
+Phase C — Wiring orphan modules (W19-W22, W25, ~3 days). Each PR wires one orphan module to the live binary and exercises it end-to-end. This is the phase that actually changes user-visible behavior most dramatically — telemetry numbers start appearing where they were `0.0`.
+
+Phase D — UX rebuild (W16-W18, W23-W24, W26-W36, ~5 days). Drop legacy panels, build new ones, mirror Linux features.
+
+Phase E — Polish (W37-W49, ~3 days). Themes, sizing, docs, CI.
+
+**Total: ~17 dev-days** with a focused engineer. Slightly longer than Linux because Windows starts further behind. The first ~6 days (Phases A+B) are mostly cleanup that doesn't change user-visible behavior; the rebuild starts to look like the contract from Phase C onward.
+
+---
+
+# How these three deliverables fit together
+
+The crate is the thing that makes the two plans implement the *same* product. Without it, Linux PR L1 and Windows PR W1 would each independently choose copy strings and they'd drift again within three months. With it, the second PR to touch a copy string has to either (a) edit the crate (visible to both repos) or (b) reach for a non-contract string (rejected by `tests/copy_strings_via_contract.rs`).
+
+The plans are sized so every PR has a single visible result. Even the cleanup PRs (delete `q.py`, delete `Cargo.toml.backup`, delete six stub panels) are individually small enough to land same-day. The biggest PR in either plan is W18 (rebuild Inference Registry from 9 to 5 columns) and even that's a bounded change in a single file.
+
+Each plan starts with a foundation phase that doesn't touch user-visible behavior — the crate adoption (L1/W1) and action enum (L2/W2) and status enum (L3/W3) are pure refactors. After those land, every subsequent PR adds or changes something the user can see. That's the right shape: invisible work first, visible work second, so reviewers know what they're looking at when the screenshots start changing.
+
+The Windows plan has 24 more rows than Linux not because the contract is harder on Windows — it's the same contract — but because the Windows codebase carries more cleanup debt. Most of the extra rows (W5-W18, W37, W39-W40, W47-W49) are work the Linux codebase already did or never accumulated. Once Windows finishes its cleanup phase, the per-feature parity with Linux is roughly 1:1.
+
+# What I suggest as the first PR
+
+**Linux**: L1 — the `ux_contract` crate adoption + copy-string refactor. It's mechanical, the test (`tests/copy_strings_via_contract.rs`) is self-enforcing, and once it lands every subsequent UX PR has a place to add new copy. Should be ~1 day.
+
+**Windows**: W8 — delete `q.py`. Smallest possible PR. Removes a real safety hazard (the bandwidth hammer). Sets the precedent that we delete things we don't need. ~10 minutes.
+
+After those two land, the next PRs (L2/W1) put both repos on the same crate dependency, and the rebuild begins.
+

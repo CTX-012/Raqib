@@ -1,89 +1,48 @@
 # CLAUDE.md
 
-> Read this every session. If it conflicts with what the user says in the
-> current session, surface the conflict — do not silently drift.
+> Read this every session. If it conflicts with what the user (or the
+> orchestrator running a multi-agent session) says, surface the conflict —
+> do not silently drift.
 >
-> For audience/vision: see [VISION.md](VISION.md).
-> For detailed build plan per module: see [HANDOFF.md](HANDOFF.md).
+> **Locked source of truth: [DESIGN_HANDOFF.md](DESIGN_HANDOFF.md).**
+> UX_CONTRACT.md v0.3 lives inside it (§0–§15). The Linux implementation
+> plan (L1–L26) lives there too. Read both before editing user-visible
+> code.
 
 ## What this project is
 
 Model-aware resource monitor and governor for edge AI workloads.
 Linux-first. Target: Ubuntu 22.04+ and JetPack 6 on Jetson Orin.
 
-## Scope (v1 / Phase 0)
+A sibling Windows binary lives in a separate repo and shares the same
+UX contract; this repo is the Linux reference implementation.
 
-- `/proc` + sysinfo process/CPU/RAM/network sampling
-- NVML for GPU utilization, VRAM, per-process VRAM
-- Classifier: keyword match, model path extraction, script sniffing,
-  AI category assignment
-- Governor: allowlist, dry-run default, SIGTERM→grace→SIGKILL, audit log,
-  rate limit
-- Manual kill by PID (respects allowlist with confirm)
-- Process run summary on termination
-- ratatui TUI (built last)
+## Scope
 
-## Scope (post-Phase-1, follows latest.md)
+Current scope is whatever the locked UX_CONTRACT.md v0.3 (in
+`DESIGN_HANDOFF.md`) describes. Out-of-scope items are listed in
+UX_CONTRACT.md §0 — push back on requests for them rather than
+silently expanding scope.
 
-The `latest.md` spec at the repo root is now the authoritative roadmap.
-Foundations A (RunStore) + C (baseline / regression) and Tier 1.1
-(history viewer) are implemented; Tier 1.2 / 1.3 / 2.x / 3.x are the
-queue. Read `latest.md` before adding or removing scope.
+## Multi-agent workflow
 
-## Out of scope (still deferred unless `latest.md` adds them)
+This repo is currently being driven by a parallel-agent workflow
+coordinated by an orchestrator:
 
-ROS2 node detection, Intel NPU, AMD ROCm, Hailo, web UI, Windows
-support, cgroup-based enforcement, rosbag correlation. Anti-goals at
-the bottom of `latest.md` are also still off the table:
+- **Agent A** owns the shared `ux_contract` crate at `~/ux_contract`.
+- **Agent B** (this repo) consumes `ux_contract` via path dependency
+  and ships the Linux L1–L26 plan, one PR per row.
+- **Agent C** owns the Windows repo and the W1–W49 plan.
 
-- Web UI (Prometheus + Grafana is the answer once 2.3 ships).
-- Cloud cost tracking.
-- Multi-host fleet aggregation.
-- ML-based anomaly detection.
-- Automatic regression remediation.
+**No UX changes without a contract amendment.** If implementing a row
+reveals a string template, alert ID, threshold, action, theme, or sizing
+constant that v0.3.0 of `ux_contract` does not provide, do **not** edit
+`~/ux_contract` from this repo — file a "Contract Amendment Request" in
+the status report and stop. Agent A is the only writer for that crate.
 
-If the user asks for an out-of-scope item, push back: "That's not in
-`latest.md`. Confirm you want to expand scope, or defer."
-
-Items previously off the list that **`latest.md` brings into scope** —
-do *not* push back on these any more, just implement them in tier
-order: tegrastats (2.1), thermal zones (2.1), Prometheus exporter
-(2.3), OOM post-mortem (3.5).
-
-## Module build order (strict, no parallel)
-
-1. Classifier — pure logic, no hardware
-2. Platform layer — `/proc` + sysinfo
-3. NVML GPU backend
-4. Lifecycle + run summaries
-5. Governor (dry-run first)
-6. Manual kill wiring
-7. ratatui TUI
-8. main.rs wiring + CLI + config
-
-Each module must:
-
-- Have passing unit tests before the next starts
-- Pass `cargo clippy --all-targets -- -D warnings`
-- Have no `unwrap()` outside tests
-- Have no `expect()` outside tests **except for documented invariants
-  that are equivalent to "the binary is malformed (or its baseline
-  runtime environment is broken beyond recovery) if this fails"**.
-  Each such call **must** be preceded by an `// ok: expect — <one-line
-  reason>` comment so reviewers and auditors can skip them, and
-  `rg 'expect\(' src/` outside `#[cfg(test)]` must show only annotated
-  lines. The currently accepted patterns are:
-  1. **Mutex-poison recovery** on a writer whose corruption is worse
-     than a crash (e.g. the audit writer in `governor/audit.rs`, the
-     lifecycle log store).
-  2. **`Regex::new` inside `OnceLock`-initialised statics** where the
-     pattern is a compile-time constant.
-  3. **`reqwest::Client::builder().build()` in a sampler constructor**
-     where the only failure mode is "the system's TLS / DNS resolver
-     stack is broken" — at that point we cannot run anyway.
-  Any new pattern beyond these requires updating this list (and a
-  reviewer signoff) — a one-off `// ok: expect` comment is not a
-  licence to invent a new exemption.
+**Plan ordering is strict.** L1 lands first; subsequent rows depend on
+the foundation L1–L4 establishes. Do not chain rows without explicit
+"ship it" approval from the orchestrator.
 
 ## Architecture
 
@@ -94,8 +53,9 @@ Platform → Classifier → Lifecycle → Governor → UI
 
 One tick per second by default. UI renders at 10 Hz with cached data.
 
-`Platform` is an enum, not a trait — we have 2 backends in v1 (Linux,
-Jetson). Refactor to `Box<dyn PlatformMetrics>` at 4+ backends, not before.
+`Platform` is an enum, not a trait — two backends in v1 (Linux,
+Jetson). Refactor to `Box<dyn PlatformMetrics>` at 4+ backends, not
+before.
 
 ## Coding conventions
 
@@ -111,6 +71,32 @@ Jetson). Refactor to `Box<dyn PlatformMetrics>` at 4+ backends, not before.
 - No blocking I/O in the tick loop
 - No `std::thread::sleep` — use `std::time::Instant` and elapsed checks,
   or `mpsc::Receiver::recv_timeout` as the TUI/headless park points
+- User-visible strings come from `ux_contract::{status,empty,confirm,
+  errors,alerts}::*`. Hardcoded literals in `src/ui/` are caught by
+  `tests/copy_strings_via_contract.rs` (added in L1).
+
+### `unwrap()` and `expect()` rules
+
+- No `unwrap()` outside tests.
+- No `expect()` outside tests **except for documented invariants
+  equivalent to "the binary is malformed (or its baseline runtime
+  environment is broken beyond recovery) if this fails"**. Each such
+  call **must** be preceded by an `// ok: expect — <one-line reason>`
+  comment so reviewers and auditors can skip them, and
+  `rg 'expect\(' src/` outside `#[cfg(test)]` must show only annotated
+  lines. Accepted patterns:
+  1. **Mutex-poison recovery** on a writer whose corruption is worse
+     than a crash (e.g. the audit writer in `governor/audit.rs`, the
+     lifecycle log store).
+  2. **`Regex::new` inside `OnceLock`-initialised statics** where the
+     pattern is a compile-time constant.
+  3. **`reqwest::Client::builder().build()` in a sampler constructor**
+     where the only failure mode is "the system's TLS / DNS resolver
+     stack is broken" — at that point we cannot run anyway.
+
+  Any new pattern beyond these requires updating this list (and
+  reviewer signoff) — a one-off `// ok: expect` comment is not a
+  licence to invent a new exemption.
 
 ## Safety rules (never violate)
 
@@ -133,19 +119,25 @@ Jetson). Refactor to `Box<dyn PlatformMetrics>` at 4+ backends, not before.
 
 ## When the user pushes for shortcuts
 
-The user's system prompt says they want mentor-style pushback, not
+The user's system prompt asks for mentor-style pushback, not
 convenience. If asked to:
 
 - Skip tests → refuse, write tests first
-- Parallelize modules → refuse, cite build order above
+- Merge or skip a row in the L1–L26 plan → refuse, cite the
+  one-row-one-PR rule in the orchestrator instructions
+- Edit `~/ux_contract` from this repo → refuse, file a Contract
+  Amendment Request instead (Agent A owns it)
+- Change UX behavior without amending v0.3 → refuse, cite the locked
+  contract; the user can ask for an amendment if they want a change
 - Stub hardware calls "for later" → refuse, handle errors now
-- Add a Phase 2 feature → push back, cite [VISION.md](VISION.md) guardrails
-- Ship without dry-run default → refuse, cite safety rules
+- Ship without dry-run default → refuse, cite safety rule 2
 
 ## Session rhythm
 
-- Start of session: re-read this file + current module section in
-  [HANDOFF.md](HANDOFF.md)
-- End of each non-trivial change: run `cargo test && cargo clippy`
-- Before switching modules: all tests for current module green, doc
-  comments written, section in HANDOFF.md marked complete
+- Start of session: re-read this file + the relevant clause(s) of
+  UX_CONTRACT.md and the relevant L-row in DESIGN_HANDOFF.md.
+- End of each non-trivial change: run
+  `cargo test --workspace && cargo clippy --all-targets -- -D warnings`.
+- Before opening a PR: confirm the row's "Test" column is satisfied,
+  the binary still launches, and the diff stays inside the row's
+  declared "Files to change" set.

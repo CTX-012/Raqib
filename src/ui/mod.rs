@@ -28,7 +28,7 @@ use ratatui::backend::CrosstermBackend;
 use crate::runtime::Runtime;
 use crate::ui::panels::armed_banner::ArmedKill;
 
-use app::{Action, App, Dispatch, LegacyAction};
+use app::{Action, App};
 
 /// Drive the TUI tick/render loop until the user quits or `shutdown` is set.
 /// Caller is responsible for handling SIGINT/SIGTERM via `shutdown`.
@@ -79,9 +79,9 @@ fn run_loop(
 
         if event::poll(wait)?
             && let Ok(Event::Key(key)) = event::read()
-            && let Some(dispatch) = input::translate(key, &app)
+            && let Some(action) = input::translate(key, &app)
         {
-            apply_action(dispatch, runtime, &mut app);
+            apply_action(action, runtime, &mut app);
         }
 
         if last_tick.elapsed() >= tick {
@@ -105,14 +105,7 @@ fn run_loop(
     Ok(())
 }
 
-fn apply_action(dispatch: Dispatch, runtime: &mut Runtime, app: &mut App) {
-    match dispatch {
-        Dispatch::Contract(action) => apply_contract(action, runtime, app),
-        Dispatch::Legacy(legacy) => apply_legacy(legacy, runtime, app),
-    }
-}
-
-fn apply_contract(action: Action, runtime: &mut Runtime, app: &mut App) {
+fn apply_action(action: Action, runtime: &mut Runtime, app: &mut App) {
     match action {
         Action::Quit => app.request_quit(),
         Action::ToggleHelp => app.toggle_help(),
@@ -197,11 +190,9 @@ fn apply_contract(action: Action, runtime: &mut Runtime, app: &mut App) {
         Action::OpenGrafana => handle_open_dashboard(runtime, app),
         Action::OpenDetail => handle_show_postmortem(runtime, app),
         Action::EscapeCascade => {
-            // Cascading priority is in `App::handle_escape`. Filter
-            // mode's Esc is handled earlier by `input::translate`
-            // (CancelFilter), so we never get here in filter mode.
-            // The pre-L2a `DismissPostmortem` action is gone; dismiss
-            // now flows through this cascade.
+            // Cascading priority is in `App::handle_escape`. The
+            // pre-L2a `DismissPostmortem` action is gone; dismiss now
+            // flows through this cascade.
             app.handle_escape();
         }
         // §4 — `a` acknowledges all visible alerts. The alert state
@@ -212,19 +203,6 @@ fn apply_contract(action: Action, runtime: &mut Runtime, app: &mut App) {
         // §1 region 5 — `t` cycles Top processes sort. Wired in L14
         // alongside the new panel.
         Action::CycleTopSort => {}
-    }
-}
-
-fn apply_legacy(legacy: LegacyAction, _runtime: &mut Runtime, app: &mut App) {
-    match legacy {
-        // Filter family — L2c deletes these arms together with
-        // `Mode::Filter`, the filter buffer, and the registry's
-        // filter empty-state copy (former L1 CAR-3).
-        LegacyAction::StartFilter => app.start_filter(),
-        LegacyAction::CommitFilter => app.commit_filter(),
-        LegacyAction::CancelFilter => app.cancel_filter(),
-        LegacyAction::FilterChar(c) => app.filter_push(c),
-        LegacyAction::FilterBackspace => app.filter_pop(),
     }
 }
 

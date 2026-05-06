@@ -74,65 +74,42 @@ pub fn render(f: &mut Frame, area: Rect, state: &RuntimeState, app: &App) {
     let block = panel_block("AI Workloads", focused);
 
     // DESIGN_HANDOFF Principle 6 — empty states teach the product.
-    // When no AI workloads are running we used to render an empty
-    // List inside the panel border, leaving a confused user staring
-    // at a blank box. A short Paragraph with concrete launch
-    // examples turns the void into a "press here next" moment. We
-    // distinguish two cases: the registry is genuinely empty
-    // (`state.ai_processes()` empty), and a filter has just hidden
-    // every row (state has AI procs but `visible_pids` is empty —
-    // the filter substring didn't match). The latter teaches a
-    // different lesson: "your filter excluded everything, press Esc
-    // or `/` to clear."
+    // When no AI workloads are running we render concrete launch
+    // examples instead of an empty box. L2c removed the filter UX
+    // (deferred to v1.1 per the contract), so the dual filter-empty /
+    // genuinely-empty branching collapsed back to a single empty path.
     if items.is_empty() {
-        let any_ai_at_all = state.ai_processes().next().is_some();
-        let lines: Vec<Line> = if any_ai_at_all {
-            vec![
-                Line::from(""),
-                Line::from(Span::styled(
-                    "  No workloads match the current filter.",
-                    Style::default().add_modifier(Modifier::BOLD),
-                )),
-                Line::from(""),
-                Line::from(Span::raw(
-                    "  Press Esc to clear the filter, or `/` to edit it.",
-                )),
-            ]
-        } else {
-            vec![
-                Line::from(""),
-                Line::from(Span::styled(
-                    "  No AI workloads detected yet.",
-                    Style::default().add_modifier(Modifier::BOLD),
-                )),
-                Line::from(""),
-                Line::from(Span::raw(
-                    "  Try one of these in another terminal — edge_monitor",
-                )),
-                Line::from(Span::raw(
-                    "  will detect the workload on the next tick:",
-                )),
-                Line::from(""),
-                Line::from(Span::styled(
-                    "      ollama run llama3 'hello'",
-                    Style::default().fg(Color::Cyan),
-                )),
-                Line::from(Span::styled(
-                    "      vllm serve <model>",
-                    Style::default().fg(Color::Cyan),
-                )),
-                Line::from(Span::styled(
-                    "      yolo predict model=yolov8n.pt source=...",
-                    Style::default().fg(Color::Cyan),
-                )),
-                Line::from(""),
-                Line::from(Span::raw("  Or wrap an existing command:")),
-                Line::from(Span::styled(
-                    "      edge_monitor exec -- <your command>",
-                    Style::default().fg(Color::Cyan),
-                )),
-            ]
-        };
+        let lines: Vec<Line> = vec![
+            Line::from(""),
+            Line::from(Span::styled(
+                "  No AI workloads detected yet.",
+                Style::default().add_modifier(Modifier::BOLD),
+            )),
+            Line::from(""),
+            Line::from(Span::raw(
+                "  Try one of these in another terminal — edge_monitor",
+            )),
+            Line::from(Span::raw("  will detect the workload on the next tick:")),
+            Line::from(""),
+            Line::from(Span::styled(
+                "      ollama run llama3 'hello'",
+                Style::default().fg(Color::Cyan),
+            )),
+            Line::from(Span::styled(
+                "      vllm serve <model>",
+                Style::default().fg(Color::Cyan),
+            )),
+            Line::from(Span::styled(
+                "      yolo predict model=yolov8n.pt source=...",
+                Style::default().fg(Color::Cyan),
+            )),
+            Line::from(""),
+            Line::from(Span::raw("  Or wrap an existing command:")),
+            Line::from(Span::styled(
+                "      edge_monitor exec -- <your command>",
+                Style::default().fg(Color::Cyan),
+            )),
+        ];
         let paragraph = Paragraph::new(lines).block(block).wrap(Wrap { trim: false });
         f.render_widget(paragraph, area);
         return;

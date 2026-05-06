@@ -82,7 +82,7 @@ fn render_default(f: &mut Frame, area: Rect, state: &RuntimeState, app: &App) {
     render_footer(f, layout[4], app);
 }
 
-fn render_status_bar(f: &mut Frame, area: Rect, state: &RuntimeState, app: &App) {
+fn render_status_bar(f: &mut Frame, area: Rect, state: &RuntimeState, _app: &App) {
     let mode_label = if state.dry_run { "DRY-RUN" } else { "ENFORCE" };
     let mode_color = if state.dry_run {
         Color::Yellow
@@ -90,7 +90,7 @@ fn render_status_bar(f: &mut Frame, area: Rect, state: &RuntimeState, app: &App)
         Color::Red
     };
 
-    let mut spans = vec![
+    let spans = vec![
         Span::styled(
             " edge_monitor ",
             Style::default().add_modifier(Modifier::BOLD),
@@ -106,14 +106,9 @@ fn render_status_bar(f: &mut Frame, area: Rect, state: &RuntimeState, app: &App)
         Span::raw(format!("  tick #{} ", state.tick_count)),
     ];
 
-    if app.mode() == super::app::Mode::Filter {
-        spans.push(Span::styled(
-            format!(" filter: {}_ ", app.filter()),
-            Style::default().fg(Color::Cyan),
-        ));
-    } else if !app.filter().is_empty() {
-        spans.push(Span::raw(format!("(filter: {}) ", app.filter())));
-    }
+    // L2c removed the filter-mode prompt and the post-commit
+    // `(filter: ...)` indicator from the status bar — the `/` key is
+    // unbound and the App no longer carries a filter buffer.
 
     // The full-row armed-kill banner ([UX-1]) supersedes the old
     // inline status-bar marker. Leaving them both would double-render
@@ -147,7 +142,7 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
     // `status::FOOTER_KEYMAP` (CAR-5). Until then this stub keeps the
     // pre-L2b text minus `v hide/show details` and Tab focus, since
     // those bindings genuinely no longer work.
-    let hints = " q quit · j/k select · / filter · k kill (×2) · h history · ? help ";
+    let hints = " q quit · j/k select · k kill (×2) · h history · ? help ";
     let p = Paragraph::new(hints).style(Style::default().fg(Color::DarkGray));
     f.render_widget(p, area);
 }

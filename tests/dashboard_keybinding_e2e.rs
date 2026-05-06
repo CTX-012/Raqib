@@ -8,7 +8,7 @@
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use edge_monitor::config::Config;
-use edge_monitor::ui::app::{App, Dispatch};
+use edge_monitor::ui::app::App;
 use edge_monitor::ui::input::translate;
 use edge_monitor::ui::{compute_dashboard_url, resolve_dashboard_template};
 use ux_contract::Action;
@@ -116,17 +116,15 @@ fn url_priority_hardcoded_fallback_when_both_empty() {
     assert_eq!(template, "http://localhost:3000/d/edge_monitor");
 }
 
-/// L2a / UX_CONTRACT.md §6 — pressing `g` on the focused workload
-/// must surface as `ux_contract::Action::OpenGrafana`. Pinned at the
-/// integration-test level so the input-layer rename
-/// (`OpenDashboard` → `OpenGrafana`) and the contract Action surface
-/// stay locked together; future drift on either side fails this test.
+/// L2a/L2c — pressing `g` on the focused workload must surface as
+/// `ux_contract::Action::OpenGrafana`. Pinned at the integration-test
+/// level so the input-layer rename (`OpenDashboard` → `OpenGrafana`)
+/// and the contract Action surface stay locked together; future drift
+/// on either side fails this test. L2c collapsed the L2a `Dispatch`
+/// wrapper, so `translate` now returns `Option<Action>` directly.
 #[test]
 fn g_keybinding_emits_open_grafana_from_contract_enum() {
     let app = App::new();
     let key = KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE);
-    assert_eq!(
-        translate(key, &app),
-        Some(Dispatch::Contract(Action::OpenGrafana)),
-    );
+    assert_eq!(translate(key, &app), Some(Action::OpenGrafana));
 }

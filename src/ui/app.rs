@@ -19,44 +19,11 @@ pub(crate) const STATUS_TTL: Duration = Duration::from_secs(3);
 /// not through this re-export.
 pub use ux_contract::Action;
 
-/// L2a — variants without a `ux_contract::Action` analog live here
-/// transitionally. **L2b** removed Group D (the `d`/`v`/Tab/BackTab
-/// bindings the contract §6 omits). **L2c** removes the `/` filter
-/// family (deferred to v1.1 per the contract) and deletes this enum
-/// entirely along with `Dispatch::Legacy`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LegacyAction {
-    /// `/` — start filter mode. Removed by L2c (filter deferred to v1.1).
-    StartFilter,
-    /// `Enter` while in filter mode — commit the filter. Removed by L2c.
-    CommitFilter,
-    /// `Esc` while in filter mode — cancel and clear. Removed by L2c.
-    CancelFilter,
-    /// Printable char while in filter mode. Removed by L2c.
-    FilterChar(char),
-    /// `Backspace` while in filter mode. Removed by L2c.
-    FilterBackspace,
-}
-
-/// L2a dispatch container: either a contract-aligned `Action` or a
-/// transitional `LegacyAction`. `input::translate` returns this wrapped
-/// in `Option` (None = unmapped key, idiomatic replacement for the old
-/// `Action::None` no-op variant). L2c collapses `Dispatch` back to
-/// `Action` directly once Group D and the filter family are gone.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Dispatch {
-    /// A locked-keymap action from `ux_contract::Action`.
-    Contract(Action),
-    /// A transitional binding (`d`/`v`/Tab/BackTab/`/`-filter) that
-    /// L2b or L2c will delete.
-    Legacy(LegacyAction),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Mode {
-    Normal,
-    Filter,
-}
+// L2a introduced a transitional `LegacyAction` enum and a `Dispatch`
+// wrapper to carry bindings the contract didn't define. L2b removed
+// Group D (`d`/`v`/Tab/BackTab) and L2c removes the filter family.
+// Both enums are gone now: `input::translate` returns `Option<Action>`
+// directly, and the §6 keymap is the entire input surface.
 
 /// Cached per-model run history shown by the overlay. Loaded on `h`
 /// keypress and cleared on Esc; not refreshed every frame to avoid
@@ -70,16 +37,16 @@ pub struct HistoryOverlay {
 /// Pure state machine for the TUI. No I/O, no rendering. Cheap to clone.
 ///
 /// L2b removed the `focus` and `detail_mode` fields together with the
-/// Group D bindings (`d`/`v`/Tab/BackTab). The v1.0 layout has a single
-/// focusable element (Workloads), so panel-focus cycling has no UI
-/// affordance; selection state lives on `selected`.
+/// Group D bindings (`d`/`v`/Tab/BackTab). L2c removed the `mode` and
+/// `filter` fields together with the `/` filter UX (deferred to v1.1
+/// per the contract). The v1.0 input surface is the §6 keymap and a
+/// single selectable list (AI Workloads); selection state lives on
+/// `selected`.
 #[derive(Debug, Clone)]
 pub struct App {
     selected: usize,
     show_help: bool,
     quit_requested: bool,
-    mode: Mode,
-    filter: String,
     /// Two-stage manual-kill ([UX-1]). `Some(_)` after the first `k`
     /// press; auto-disarms after `ArmedKill::WINDOW`. Carries pid +
     /// name + allowlisted so the banner can render without re-reading
@@ -112,8 +79,6 @@ impl App {
             selected: 0,
             show_help: false,
             quit_requested: false,
-            mode: Mode::Normal,
-            filter: String::new(),
             armed_kill: None,
             postmortem: None,
             history: None,
@@ -148,12 +113,6 @@ impl App {
     pub fn should_quit(&self) -> bool {
         self.quit_requested
     }
-    pub fn mode(&self) -> Mode {
-        self.mode
-    }
-    pub fn filter(&self) -> &str {
-        &self.filter
-    }
     pub fn armed_kill_pid(&self) -> Option<u32> {
         self.armed_kill.as_ref().map(|a| a.pid)
     }
@@ -176,29 +135,6 @@ impl App {
 
     pub fn toggle_help(&mut self) {
         self.show_help = !self.show_help;
-    }
-
-    pub fn start_filter(&mut self) {
-        self.mode = Mode::Filter;
-    }
-
-    pub fn cancel_filter(&mut self) {
-        self.mode = Mode::Normal;
-        self.filter.clear();
-    }
-
-    pub fn commit_filter(&mut self) {
-        self.mode = Mode::Normal;
-    }
-
-    pub fn filter_push(&mut self, c: char) {
-        self.filter.push(c);
-        self.selected = 0;
-    }
-
-    pub fn filter_pop(&mut self) {
-        self.filter.pop();
-        self.selected = 0;
     }
 
     /// Arm a kill on `armed`. Replaces any prior arm (e.g. user moves
@@ -319,20 +255,13 @@ impl App {
         self.visible(state).get(self.selected).copied()
     }
 
-    /// PIDs visible in the AI Workloads panel after applying the filter.
+    /// PIDs visible in the AI Workloads panel.
     /// Stable PID-sorted so user selection doesn't jump between ticks.
     /// L2b removed the focus-panel switch (Registry/Rogues/Culprits) —
-    /// only the AI Workloads list remains in the v1.0 layout.
+    /// only the AI Workloads list remains in the v1.0 layout. L2c
+    /// removed the substring filter (deferred to v1.1).
     pub fn visible(&self, state: &RuntimeState) -> Vec<u32> {
-        let needle = self.filter.to_lowercase();
-        let matches = |p: &crate::runtime::AnnotatedProcess| {
-            needle.is_empty() || p.name.to_lowercase().contains(&needle)
-        };
-        let mut pids: Vec<u32> = state
-            .ai_processes()
-            .filter(|p| matches(p))
-            .map(|p| p.pid)
-            .collect();
+        let mut pids: Vec<u32> = state.ai_processes().map(|p| p.pid).collect();
         pids.sort();
         pids
     }
@@ -385,21 +314,6 @@ mod tests {
     }
 
     #[test]
-    fn filter_substring_narrows_visible() {
-        let s = state_with(vec![
-            ann(1, "ollama", AICategory::Inference),
-            ann(2, "vllm", AICategory::Inference),
-        ]);
-        let mut app = App::new();
-        app.start_filter();
-        for c in "vllm".chars() {
-            app.filter_push(c);
-        }
-        let pids = app.visible(&s);
-        assert_eq!(pids, vec![2]);
-    }
-
-    #[test]
     fn select_next_clamps_to_visible_len() {
         let s = state_with(vec![ann(1, "a", AICategory::Inference)]);
         let mut app = App::new();
@@ -426,12 +340,15 @@ mod tests {
         assert_eq!(app.armed_kill_pid(), None);
     }
 
+    /// Safety invariant: any navigation movement clears a pending arm
+    /// so the user can't accidentally fire on a different PID after
+    /// the selection drifts. This invariant survived the
+    /// focus-mechanism removal in L2b — keep it locked even though
+    /// `select_next` (j) and `select_prev` (K/Up) are the only nav
+    /// paths now, and stays load-bearing if v1.1 ever re-introduces
+    /// multi-panel focus. Don't remove this test as redundant.
     #[test]
     fn select_disarms_kill_for_safety() {
-        // L2b — focus cycling is gone; selection movement (j/K) is
-        // the only navigation, and it must still disarm a pending
-        // kill so the user can't accidentally fire on a different
-        // PID after the selection moves.
         let s = state_with(vec![
             ann(1, "ollama", AICategory::Inference),
             ann(2, "vllm", AICategory::Inference),
@@ -551,16 +468,6 @@ mod tests {
             },
             shown_at: std::time::Instant::now(),
         }
-    }
-
-    #[test]
-    fn cancel_filter_clears_text_and_returns_to_normal() {
-        let mut app = App::new();
-        app.start_filter();
-        app.filter_push('x');
-        app.cancel_filter();
-        assert_eq!(app.mode(), Mode::Normal);
-        assert!(app.filter().is_empty());
     }
 
     #[test]

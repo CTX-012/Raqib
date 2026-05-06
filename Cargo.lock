@@ -488,6 +488,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "ux_contract",
  "webbrowser",
 ]
 
@@ -2381,6 +2382,10 @@ dependencies = [
  "serde_core",
  "wasm-bindgen",
 ]
+
+[[package]]
+name = "ux_contract"
+version = "0.3.0"
 
 [[package]]
 name = "valuable"

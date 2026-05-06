@@ -59,8 +59,15 @@ pub fn render(f: &mut Frame, full: Rect, app: &App) {
 
 fn header_paragraph(overlay: &HistoryOverlay) -> Paragraph<'_> {
     let line = if overlay.records.is_empty() {
+        // L1 / UX_CONTRACT.md §7 — empty-state copy is locked in
+        // `ux_contract::empty::HISTORY`. The previous, more diagnostic
+        // wording ("has this model exited at least once with
+        // persistence enabled?") is preserved as a comment for the
+        // contract-amendment record; if the diagnostic value is worth
+        // re-introducing, file a CAR against v0.3 — do not inline a
+        // replacement string here.
         Line::from(Span::styled(
-            "no runs found — has this model exited at least once with persistence enabled?",
+            ux_contract::empty::HISTORY,
             Style::default().fg(Color::Yellow),
         ))
     } else {

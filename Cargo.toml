@@ -38,6 +38,11 @@ sha2 = "0.10"
 # cost is acceptable.
 webbrowser = { version = "1", default-features = false }
 
+# UX_CONTRACT.md v0.3 source of truth — copy strings, alert IDs, thresholds,
+# action enum, themes, sizing. Sibling crate, owned by Agent A. Do not edit
+# from this repo; file a Contract Amendment Request instead.
+ux_contract = { path = "../ux_contract" }
+
 [dev-dependencies]
 pretty_assertions = "1"
 tempfile = "3"

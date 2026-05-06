@@ -1,5 +1,5 @@
 use std::collections::{HashMap, VecDeque};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use thiserror::Error;
 
@@ -769,6 +769,94 @@ fn build_baseline_status(
     BaselineStatus::from_metric(current, baseline_mean)
 }
 
+/// Inputs to [`compute_workload_status`]. Gathered each tick from
+/// `RuntimeState.live_telemetry`, the platform RAM snapshot, the
+/// governor's armed-kill state, and the OOM-detection window.
+///
+/// Optional fields denote "telemetry not available for this workload"
+/// (no GPU, non-LLM, missing throughput sample) and contribute nothing
+/// to the status — they don't escalate to a worse band by absence.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct WorkloadStatusInputs {
+    /// VRAM utilization for this workload, percent (0..=100). `None`
+    /// when no GPU or no per-process allocation reading.
+    pub vram_pct: Option<f64>,
+    /// Host RAM utilization (system-wide), percent (0..=100).
+    pub ram_pct: Option<f64>,
+    /// KV-cache occupancy for LLM workloads, percent (0..=100). `None`
+    /// for non-LLM (vision / embeddings / ROS2 / unknown).
+    pub kv_cache_pct: Option<f64>,
+    /// Throughput vs. baseline as `(current, baseline)`. `None` when
+    /// telemetry has no current sample, or when no baseline exists
+    /// for this model yet — without a baseline, throughput contributes
+    /// nothing per UX_CONTRACT.md §3 ("throughput ≤ baseline × 0.80"
+    /// requires the baseline to exist).
+    pub throughput_vs_baseline: Option<(f64, f64)>,
+    /// True when the manual-kill arm is active against this PID.
+    pub governor_armed: bool,
+    /// True when the OOM detector has fired against this PID within
+    /// the recent detection window.
+    pub oom_detected: bool,
+    /// How long telemetry has been collected for this PID. Workloads
+    /// younger than `ux_contract::thresholds::BASELINE_WARMUP_SECS`
+    /// render as `Loading` regardless of current values — there's no
+    /// baseline yet and current readings haven't stabilized.
+    pub telemetry_age: Duration,
+}
+
+/// Compute the live workload-status dot per UX_CONTRACT.md §3.
+///
+/// **No hysteresis** per contract §3 — a workload that flickers
+/// between Attention and Healthy has a real problem; smoothing it
+/// would mask the signal. If a future row introduces a debounce
+/// timer, audit it carefully against the contract before merging.
+///
+/// Priority order:
+/// 1. Loading (warmup gate; before anything else can fire),
+/// 2. Critical (any of: VRAM ≥ 95%, KV ≥ 95%, governor armed, OOM),
+/// 3. Attention (any of: VRAM ≥ 85%, RAM ≥ 90%, KV ≥ 80%, throughput
+///    ≤ baseline × 0.80),
+/// 4. Healthy (everything else).
+///
+/// L3 produces only the enum value. Symbol/colour rendering belongs
+/// to L21 + the workloads panel — this function must not reach into
+/// `ratatui` or `Span` types.
+pub fn compute_workload_status(inputs: &WorkloadStatusInputs) -> ux_contract::WorkloadStatus {
+    use ux_contract::WorkloadStatus;
+    use ux_contract::thresholds::{
+        BASELINE_WARMUP_SECS, KV_ATTENTION_PCT, KV_CRITICAL_PCT, RAM_ATTENTION_PCT,
+        THROUGHPUT_ATTENTION_RATIO, VRAM_ATTENTION_PCT, VRAM_CRITICAL_PCT,
+    };
+
+    if inputs.telemetry_age < Duration::from_secs(BASELINE_WARMUP_SECS) {
+        return WorkloadStatus::Loading;
+    }
+
+    let critical = inputs.governor_armed
+        || inputs.oom_detected
+        || inputs.vram_pct.is_some_and(|v| v >= VRAM_CRITICAL_PCT)
+        || inputs.kv_cache_pct.is_some_and(|kv| kv >= KV_CRITICAL_PCT);
+    if critical {
+        return WorkloadStatus::Critical;
+    }
+
+    let throughput_regressed =
+        inputs
+            .throughput_vs_baseline
+            .is_some_and(|(current, baseline)| {
+                baseline > 0.0 && current <= baseline * THROUGHPUT_ATTENTION_RATIO
+            });
+    let attention = throughput_regressed
+        || inputs.vram_pct.is_some_and(|v| v >= VRAM_ATTENTION_PCT)
+        || inputs.ram_pct.is_some_and(|r| r >= RAM_ATTENTION_PCT)
+        || inputs.kv_cache_pct.is_some_and(|kv| kv >= KV_ATTENTION_PCT);
+    if attention {
+        return WorkloadStatus::Attention;
+    }
+
+    WorkloadStatus::Healthy
+}
+
 /// Construct the telemetry [`Dispatcher`] from the toggles in
 /// `config.telemetry`. Returns `None` (and logs an error) if the
 /// Tokio runtime cannot be built — the rest of the runtime degrades
@@ -1063,5 +1151,254 @@ mod tests {
         // and verify the buffer trims.
         check_regressions(&rs, &bad, "phi3", &cfg, &mut sink, 1);
         assert!(sink.len() <= 1, "sink overflowed cap: {sink:?}");
+    }
+
+    // ========================================================================
+    // L3 / UX_CONTRACT.md §3 — `compute_workload_status` tests.
+    // ========================================================================
+
+    /// Inputs that would produce `Healthy` after warmup. Tests start
+    /// from this baseline and perturb individual fields so the
+    /// "Healthy" assertions catch any drift in the default-construction
+    /// path.
+    fn healthy_inputs() -> WorkloadStatusInputs {
+        WorkloadStatusInputs {
+            vram_pct: Some(50.0),
+            ram_pct: Some(50.0),
+            kv_cache_pct: Some(50.0),
+            throughput_vs_baseline: Some((40.0, 40.0)),
+            governor_armed: false,
+            oom_detected: false,
+            telemetry_age: Duration::from_secs(60),
+        }
+    }
+
+    #[test]
+    fn compute_workload_status_returns_loading_during_warmup() {
+        let mut inputs = healthy_inputs();
+        inputs.telemetry_age = Duration::from_secs(0);
+        assert_eq!(
+            compute_workload_status(&inputs),
+            ux_contract::WorkloadStatus::Loading
+        );
+    }
+
+    #[test]
+    fn compute_workload_status_loading_at_warmup_boundary_minus_one() {
+        // 1s before the warmup gate releases.
+        let mut inputs = healthy_inputs();
+        inputs.telemetry_age =
+            Duration::from_secs(ux_contract::thresholds::BASELINE_WARMUP_SECS - 1);
+        assert_eq!(
+            compute_workload_status(&inputs),
+            ux_contract::WorkloadStatus::Loading
+        );
+    }
+
+    #[test]
+    fn compute_workload_status_healthy_at_warmup_boundary() {
+        let mut inputs = healthy_inputs();
+        inputs.telemetry_age = Duration::from_secs(ux_contract::thresholds::BASELINE_WARMUP_SECS);
+        assert_eq!(
+            compute_workload_status(&inputs),
+            ux_contract::WorkloadStatus::Healthy
+        );
+    }
+
+    #[test]
+    fn compute_workload_status_critical_on_vram_at_95pct() {
+        let mut inputs = healthy_inputs();
+        inputs.vram_pct = Some(ux_contract::thresholds::VRAM_CRITICAL_PCT);
+        assert_eq!(
+            compute_workload_status(&inputs),
+            ux_contract::WorkloadStatus::Critical
+        );
+    }
+
+    #[test]
+    fn compute_workload_status_attention_on_vram_at_85pct() {
+        let mut inputs = healthy_inputs();
+        inputs.vram_pct = Some(ux_contract::thresholds::VRAM_ATTENTION_PCT);
+        assert_eq!(
+            compute_workload_status(&inputs),
+            ux_contract::WorkloadStatus::Attention
+        );
+    }
+
+    #[test]
+    fn compute_workload_status_healthy_on_vram_just_below_attention() {
+        let mut inputs = healthy_inputs();
+        inputs.vram_pct = Some(ux_contract::thresholds::VRAM_ATTENTION_PCT - 0.1);
+        assert_eq!(
+            compute_workload_status(&inputs),
+            ux_contract::WorkloadStatus::Healthy
+        );
+    }
+
+    #[test]
+    fn compute_workload_status_critical_on_kv_at_95pct() {
+        let mut inputs = healthy_inputs();
+        inputs.kv_cache_pct = Some(ux_contract::thresholds::KV_CRITICAL_PCT);
+        assert_eq!(
+            compute_workload_status(&inputs),
+            ux_contract::WorkloadStatus::Critical
+        );
+    }
+
+    #[test]
+    fn compute_workload_status_attention_on_kv_at_80pct() {
+        let mut inputs = healthy_inputs();
+        inputs.kv_cache_pct = Some(ux_contract::thresholds::KV_ATTENTION_PCT);
+        assert_eq!(
+            compute_workload_status(&inputs),
+            ux_contract::WorkloadStatus::Attention
+        );
+    }
+
+    #[test]
+    fn compute_workload_status_attention_on_ram_at_90pct() {
+        let mut inputs = healthy_inputs();
+        inputs.ram_pct = Some(ux_contract::thresholds::RAM_ATTENTION_PCT);
+        assert_eq!(
+            compute_workload_status(&inputs),
+            ux_contract::WorkloadStatus::Attention
+        );
+    }
+
+    #[test]
+    fn compute_workload_status_attention_only_on_ram_above_critical_const() {
+        // Per UX_CONTRACT.md §3, RAM does NOT have a Critical condition
+        // for the live status dot — only Attention at ≥ 90%. The
+        // contract defines `RAM_CRITICAL_PCT = 95.0` for alerting
+        // purposes (§4 RAM_PRESSURE) but the status dot omits RAM from
+        // its Critical conditions. This test pins that intentional
+        // asymmetry: RAM at 99% is Attention, not Critical.
+        let mut inputs = healthy_inputs();
+        inputs.ram_pct = Some(99.0);
+        assert_eq!(
+            compute_workload_status(&inputs),
+            ux_contract::WorkloadStatus::Attention
+        );
+    }
+
+    #[test]
+    fn compute_workload_status_critical_on_governor_armed() {
+        let mut inputs = healthy_inputs();
+        inputs.governor_armed = true;
+        assert_eq!(
+            compute_workload_status(&inputs),
+            ux_contract::WorkloadStatus::Critical
+        );
+    }
+
+    #[test]
+    fn compute_workload_status_critical_on_oom() {
+        let mut inputs = healthy_inputs();
+        inputs.oom_detected = true;
+        assert_eq!(
+            compute_workload_status(&inputs),
+            ux_contract::WorkloadStatus::Critical
+        );
+    }
+
+    #[test]
+    fn compute_workload_status_attention_on_throughput_below_80pct_baseline() {
+        let mut inputs = healthy_inputs();
+        // 31 tok/s vs baseline 40 → 0.775, below the 0.80 ratio.
+        inputs.throughput_vs_baseline = Some((31.0, 40.0));
+        assert_eq!(
+            compute_workload_status(&inputs),
+            ux_contract::WorkloadStatus::Attention
+        );
+    }
+
+    #[test]
+    fn compute_workload_status_healthy_at_exactly_80pct_baseline() {
+        let mut inputs = healthy_inputs();
+        // 32.0 / 40.0 = 0.80 exactly. The contract band is "≤ baseline
+        // × 0.80" → Attention; 32.0 lands on Attention.
+        inputs.throughput_vs_baseline = Some((32.0, 40.0));
+        assert_eq!(
+            compute_workload_status(&inputs),
+            ux_contract::WorkloadStatus::Attention
+        );
+
+        // 32.01 / 40.0 = 0.80025 — just above the threshold → Healthy.
+        inputs.throughput_vs_baseline = Some((32.01, 40.0));
+        assert_eq!(
+            compute_workload_status(&inputs),
+            ux_contract::WorkloadStatus::Healthy
+        );
+    }
+
+    #[test]
+    fn compute_workload_status_no_throughput_contribution_without_baseline() {
+        // Per UX_CONTRACT.md §3, throughput regression triggers
+        // Attention only when a baseline exists. Without a baseline
+        // the throughput side contributes None to the status; if every
+        // resource value is below its Attention band, the workload is
+        // Healthy.
+        let mut inputs = healthy_inputs();
+        inputs.throughput_vs_baseline = None;
+        assert_eq!(
+            compute_workload_status(&inputs),
+            ux_contract::WorkloadStatus::Healthy
+        );
+    }
+
+    #[test]
+    fn compute_workload_status_healthy_when_all_within_bounds() {
+        // Healthy baseline: every metric is comfortably under its
+        // Attention band, no governor / OOM, baseline matches current.
+        assert_eq!(
+            compute_workload_status(&healthy_inputs()),
+            ux_contract::WorkloadStatus::Healthy
+        );
+    }
+
+    #[test]
+    fn compute_workload_status_critical_overrides_attention() {
+        // VRAM at 95% (Critical) AND throughput regressed (Attention)
+        // must resolve to Critical — the priority order in §3 is
+        // Critical → Attention → Healthy.
+        let mut inputs = healthy_inputs();
+        inputs.vram_pct = Some(ux_contract::thresholds::VRAM_CRITICAL_PCT);
+        inputs.throughput_vs_baseline = Some((10.0, 40.0));
+        assert_eq!(
+            compute_workload_status(&inputs),
+            ux_contract::WorkloadStatus::Critical
+        );
+    }
+
+    #[test]
+    fn compute_workload_status_loading_overrides_critical_during_warmup() {
+        // Warmup gate is the outermost: even with Critical-band VRAM
+        // and OOM, a workload that hasn't been observed for
+        // BASELINE_WARMUP_SECS is Loading (no baseline yet, readings
+        // not stable). This locks the priority order so a future PR
+        // doesn't accidentally swap Loading and Critical.
+        let mut inputs = healthy_inputs();
+        inputs.telemetry_age = Duration::from_secs(0);
+        inputs.vram_pct = Some(ux_contract::thresholds::VRAM_CRITICAL_PCT);
+        inputs.oom_detected = true;
+        assert_eq!(
+            compute_workload_status(&inputs),
+            ux_contract::WorkloadStatus::Loading
+        );
+    }
+
+    #[test]
+    fn compute_workload_status_zero_baseline_does_not_fire_attention() {
+        // Defensive: if a degenerate baseline of 0.0 sneaks in (ratio
+        // would multiply to 0, current ≤ 0 is impossible without
+        // negative tok/s), treat the throughput input as "no useful
+        // baseline" so we don't accidentally fire Attention against
+        // every healthy workload.
+        let mut inputs = healthy_inputs();
+        inputs.throughput_vs_baseline = Some((40.0, 0.0));
+        assert_eq!(
+            compute_workload_status(&inputs),
+            ux_contract::WorkloadStatus::Healthy
+        );
     }
 }

@@ -28,7 +28,7 @@ use ratatui::backend::CrosstermBackend;
 use crate::runtime::Runtime;
 use crate::ui::panels::armed_banner::ArmedKill;
 
-use app::{Action, App};
+use app::{Action, App, Dispatch, LegacyAction};
 
 /// Drive the TUI tick/render loop until the user quits or `shutdown` is set.
 /// Caller is responsible for handling SIGINT/SIGTERM via `shutdown`.
@@ -79,9 +79,9 @@ fn run_loop(
 
         if event::poll(wait)?
             && let Ok(Event::Key(key)) = event::read()
+            && let Some(dispatch) = input::translate(key, &app)
         {
-            let action = input::translate(key, &app);
-            apply_action(action, runtime, &mut app);
+            apply_action(dispatch, runtime, &mut app);
         }
 
         if last_tick.elapsed() >= tick {
@@ -105,21 +105,20 @@ fn run_loop(
     Ok(())
 }
 
-fn apply_action(action: Action, runtime: &mut Runtime, app: &mut App) {
+fn apply_action(dispatch: Dispatch, runtime: &mut Runtime, app: &mut App) {
+    match dispatch {
+        Dispatch::Contract(action) => apply_contract(action, runtime, app),
+        Dispatch::Legacy(legacy) => apply_legacy(legacy, runtime, app),
+    }
+}
+
+fn apply_contract(action: Action, runtime: &mut Runtime, app: &mut App) {
     match action {
         Action::Quit => app.request_quit(),
-        Action::ToggleDryRun => runtime.toggle_dry_run(),
-        Action::FocusNext => app.focus_next(),
-        Action::FocusPrev => app.focus_prev(),
-        Action::SelectNext => app.select_next(runtime.state()),
-        Action::SelectPrev => app.select_prev(runtime.state()),
         Action::ToggleHelp => app.toggle_help(),
-        Action::StartFilter => app.start_filter(),
-        Action::CancelFilter => app.cancel_filter(),
-        Action::CommitFilter => app.commit_filter(),
-        Action::FilterChar(c) => app.filter_push(c),
-        Action::FilterBackspace => app.filter_pop(),
-        Action::ConfirmKill => {
+        Action::SelectUp => app.select_prev(runtime.state()),
+        Action::SelectDown => app.select_next(runtime.state()),
+        Action::KillOrConfirm => {
             // FIRE branch: once armed, the kill is committed to the
             // armed PID. A second `k` must fire on `armed_kill_pid`
             // (not `selected_pid`) — otherwise selection drift between
@@ -170,7 +169,13 @@ fn apply_action(action: Action, runtime: &mut Runtime, app: &mut App) {
                 });
             }
         }
-        Action::OpenHistory => {
+        Action::ToggleHistory => {
+            // L2a merge — pre-L2a `OpenHistory` + `CloseHistory` collapse
+            // into a single toggle per UX_CONTRACT §6 (`h` toggles).
+            if app.is_history_open() {
+                app.close_history();
+                return;
+            }
             // Resolve the focused row to a model name (preferring the
             // resolved model over the bare process name so multiple
             // PIDs of the same model cluster).
@@ -189,18 +194,43 @@ fn apply_action(action: Action, runtime: &mut Runtime, app: &mut App) {
                 app.open_history(key, records);
             }
         }
-        Action::CloseHistory => app.close_history(),
-        Action::ToggleDetailMode => app.toggle_detail_mode(),
-        Action::OpenDashboard => handle_open_dashboard(runtime, app),
-        Action::DismissPostmortem => app.dismiss_postmortem(),
-        Action::ShowPostmortemForFocused => handle_show_postmortem(runtime, app),
-        Action::Escape => {
+        Action::OpenGrafana => handle_open_dashboard(runtime, app),
+        Action::OpenDetail => handle_show_postmortem(runtime, app),
+        Action::EscapeCascade => {
             // Cascading priority is in `App::handle_escape`. Filter
             // mode's Esc is handled earlier by `input::translate`
             // (CancelFilter), so we never get here in filter mode.
+            // The pre-L2a `DismissPostmortem` action is gone; dismiss
+            // now flows through this cascade.
             app.handle_escape();
         }
-        Action::None => {}
+        // §4 — `a` acknowledges all visible alerts. The alert state
+        // machine lands in L7; this arm is intentionally a no-op until
+        // then so the binding is reserved (and clippy doesn't gripe
+        // about an incomplete match).
+        Action::AcknowledgeAlerts => {}
+        // §1 region 5 — `t` cycles Top processes sort. Wired in L14
+        // alongside the new panel.
+        Action::CycleTopSort => {}
+    }
+}
+
+fn apply_legacy(legacy: LegacyAction, runtime: &mut Runtime, app: &mut App) {
+    match legacy {
+        // Group D — L2b deletes these arms together with the bindings
+        // and App-state fields they touch.
+        LegacyAction::ToggleDryRun => runtime.toggle_dry_run(),
+        LegacyAction::ToggleDetailMode => app.toggle_detail_mode(),
+        LegacyAction::FocusNext => app.focus_next(),
+        LegacyAction::FocusPrev => app.focus_prev(),
+        // Filter family — L2c deletes these arms together with
+        // `Mode::Filter`, the filter buffer, and the registry's
+        // filter empty-state copy (former L1 CAR-3).
+        LegacyAction::StartFilter => app.start_filter(),
+        LegacyAction::CommitFilter => app.commit_filter(),
+        LegacyAction::CancelFilter => app.cancel_filter(),
+        LegacyAction::FilterChar(c) => app.filter_push(c),
+        LegacyAction::FilterBackspace => app.filter_pop(),
     }
 }
 

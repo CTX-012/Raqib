@@ -1,61 +1,73 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use super::app::{Action, App, Mode};
+use super::app::{Action, App, Dispatch, LegacyAction, Mode};
 
-/// Translate a single keystroke into an `Action`. Pure: depends only on the
-/// key + the current `App` mode (Normal vs Filter input).
+/// Translate a single keystroke into an action. Pure: depends only on
+/// the key + the current `App` mode (Normal vs Filter input).
 ///
-/// Filter mode swallows printable keys into the filter buffer so the user
-/// can type process names without colliding with the navigation hotkeys.
-pub fn translate(key: KeyEvent, app: &App) -> Action {
+/// Returns `None` for unmapped keys — the outer loop simply skips
+/// dispatch on `None` (replaces the pre-L2a `Action::None` no-op
+/// variant with idiomatic `Option`).
+///
+/// L2a maps each binding to either a `ux_contract::Action` (the
+/// locked v0.3 §6 keymap) or a transitional `LegacyAction` (Group D
+/// bindings + filter family) which L2b and L2c will remove.
+pub fn translate(key: KeyEvent, app: &App) -> Option<Dispatch> {
     // Ctrl-C is universally "quit" — works even mid-filter / overlay.
     if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('c')) {
-        return Action::Quit;
+        return Some(Dispatch::Contract(Action::Quit));
     }
 
-    // History overlay swallows input until dismissed. j/k still scroll
-    // (future), Esc closes; everything else is a no-op so the user
-    // doesn't accidentally fire navigation actions on the panel beneath.
+    // History overlay swallows input until dismissed. Esc cascades to
+    // the close path via `App::handle_escape`; `q` toggles the
+    // overlay shut (preserving the pre-L2a "q closes history"
+    // behavior); `h` toggles likewise; everything else is dropped so
+    // the user doesn't accidentally fire navigation actions on the
+    // panel beneath.
     if app.is_history_open() {
         return match key.code {
-            KeyCode::Esc | KeyCode::Char('q') => Action::CloseHistory,
-            _ => Action::None,
+            KeyCode::Esc => Some(Dispatch::Contract(Action::EscapeCascade)),
+            KeyCode::Char('q') | KeyCode::Char('h') => {
+                Some(Dispatch::Contract(Action::ToggleHistory))
+            }
+            _ => None,
         };
     }
 
     match app.mode() {
         Mode::Filter => match key.code {
-            KeyCode::Esc => Action::CancelFilter,
-            KeyCode::Enter => Action::CommitFilter,
-            KeyCode::Backspace => Action::FilterBackspace,
-            KeyCode::Char(c) => Action::FilterChar(c),
-            _ => Action::None,
+            KeyCode::Esc => Some(Dispatch::Legacy(LegacyAction::CancelFilter)),
+            KeyCode::Enter => Some(Dispatch::Legacy(LegacyAction::CommitFilter)),
+            KeyCode::Backspace => Some(Dispatch::Legacy(LegacyAction::FilterBackspace)),
+            KeyCode::Char(c) => Some(Dispatch::Legacy(LegacyAction::FilterChar(c))),
+            _ => None,
         },
         Mode::Normal => match key.code {
-            // Esc cascades through overlays / armed kill. App::handle_escape
-            // owns the priority order; we just route the press there.
-            KeyCode::Esc => Action::Escape,
-            // Enter cascade: dismiss if a card is up, else show the
-            // card for the focused row. Per UI Contract v2 (UX-2),
-            // post-mortem cards are *demand-triggered* — the runtime
-            // no longer auto-pushes them on AI exit.
-            KeyCode::Enter if app.postmortem().is_some() => Action::DismissPostmortem,
-            KeyCode::Enter => Action::ShowPostmortemForFocused,
-            KeyCode::Char('q') => Action::Quit,
-            KeyCode::Char('?') => Action::ToggleHelp,
-            KeyCode::Char('d') => Action::ToggleDryRun,
-            KeyCode::Char('k') => Action::ConfirmKill,
-            KeyCode::Char('h') => Action::OpenHistory,
-            KeyCode::Char('/') => Action::StartFilter,
-            KeyCode::Char('v') => Action::ToggleDetailMode,
-            // [UX-3] open dashboard. Refusal cases (no row, empty
-            // template) are handled in `handle_open_dashboard`.
-            KeyCode::Char('g') => Action::OpenDashboard,
-            KeyCode::Char('j') | KeyCode::Down => Action::SelectNext,
-            KeyCode::Char('K') | KeyCode::Up => Action::SelectPrev,
-            KeyCode::Tab => Action::FocusNext,
-            KeyCode::BackTab => Action::FocusPrev,
-            _ => Action::None,
+            // §6 — Esc cascades through overlays / armed kill / quit.
+            // App::handle_escape owns the priority order.
+            KeyCode::Esc => Some(Dispatch::Contract(Action::EscapeCascade)),
+            // §6 — Enter opens the detail card. `apply_action` decides
+            // live-detail vs post-mortem based on row state. The
+            // pre-L2a "Enter dismisses card when card visible" path is
+            // gone; dismissal flows through Esc per §6 cascade.
+            KeyCode::Enter => Some(Dispatch::Contract(Action::OpenDetail)),
+            KeyCode::Char('q') => Some(Dispatch::Contract(Action::Quit)),
+            KeyCode::Char('?') => Some(Dispatch::Contract(Action::ToggleHelp)),
+            KeyCode::Char('k') => Some(Dispatch::Contract(Action::KillOrConfirm)),
+            KeyCode::Char('h') => Some(Dispatch::Contract(Action::ToggleHistory)),
+            // §6 — `g` opens Grafana for the focused workload.
+            KeyCode::Char('g') => Some(Dispatch::Contract(Action::OpenGrafana)),
+            KeyCode::Char('j') | KeyCode::Down => Some(Dispatch::Contract(Action::SelectDown)),
+            KeyCode::Char('K') | KeyCode::Up => Some(Dispatch::Contract(Action::SelectUp)),
+            // Group D — `d`/`v`/Tab/BackTab — removed by L2b. Routing
+            // through LegacyAction keeps L2a a pure-rename refactor.
+            KeyCode::Char('d') => Some(Dispatch::Legacy(LegacyAction::ToggleDryRun)),
+            KeyCode::Char('v') => Some(Dispatch::Legacy(LegacyAction::ToggleDetailMode)),
+            KeyCode::Tab => Some(Dispatch::Legacy(LegacyAction::FocusNext)),
+            KeyCode::BackTab => Some(Dispatch::Legacy(LegacyAction::FocusPrev)),
+            // Filter family — removed by L2c.
+            KeyCode::Char('/') => Some(Dispatch::Legacy(LegacyAction::StartFilter)),
+            _ => None,
         },
     }
 }
@@ -72,7 +84,10 @@ mod tests {
     #[test]
     fn q_quits_in_normal_mode() {
         let app = App::new();
-        assert_eq!(translate(key(KeyCode::Char('q')), &app), Action::Quit);
+        assert_eq!(
+            translate(key(KeyCode::Char('q')), &app),
+            Some(Dispatch::Contract(Action::Quit))
+        );
     }
 
     #[test]
@@ -80,7 +95,7 @@ mod tests {
         let mut app = App::new();
         app.start_filter();
         let ev = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
-        assert_eq!(translate(ev, &app), Action::Quit);
+        assert_eq!(translate(ev, &app), Some(Dispatch::Contract(Action::Quit)));
     }
 
     #[test]
@@ -88,7 +103,7 @@ mod tests {
         let app = App::new();
         assert_eq!(
             translate(key(KeyCode::Char('/')), &app),
-            Action::StartFilter
+            Some(Dispatch::Legacy(LegacyAction::StartFilter))
         );
     }
 
@@ -98,7 +113,7 @@ mod tests {
         app.start_filter();
         assert_eq!(
             translate(key(KeyCode::Char('a')), &app),
-            Action::FilterChar('a')
+            Some(Dispatch::Legacy(LegacyAction::FilterChar('a')))
         );
     }
 
@@ -106,14 +121,20 @@ mod tests {
     fn esc_cancels_filter() {
         let mut app = App::new();
         app.start_filter();
-        assert_eq!(translate(key(KeyCode::Esc), &app), Action::CancelFilter);
+        assert_eq!(
+            translate(key(KeyCode::Esc), &app),
+            Some(Dispatch::Legacy(LegacyAction::CancelFilter))
+        );
     }
 
     #[test]
     fn enter_commits_filter() {
         let mut app = App::new();
         app.start_filter();
-        assert_eq!(translate(key(KeyCode::Enter), &app), Action::CommitFilter);
+        assert_eq!(
+            translate(key(KeyCode::Enter), &app),
+            Some(Dispatch::Legacy(LegacyAction::CommitFilter))
+        );
     }
 
     #[test]
@@ -121,23 +142,26 @@ mod tests {
         let app = App::new();
         assert_eq!(
             translate(key(KeyCode::Char('d')), &app),
-            Action::ToggleDryRun
+            Some(Dispatch::Legacy(LegacyAction::ToggleDryRun))
         );
     }
 
     #[test]
-    fn k_triggers_confirm_kill() {
+    fn k_triggers_kill_or_confirm() {
         let app = App::new();
         assert_eq!(
             translate(key(KeyCode::Char('k')), &app),
-            Action::ConfirmKill
+            Some(Dispatch::Contract(Action::KillOrConfirm))
         );
     }
 
     #[test]
     fn tab_cycles_focus_forward() {
         let app = App::new();
-        assert_eq!(translate(key(KeyCode::Tab), &app), Action::FocusNext);
+        assert_eq!(
+            translate(key(KeyCode::Tab), &app),
+            Some(Dispatch::Legacy(LegacyAction::FocusNext))
+        );
     }
 
     #[test]
@@ -145,29 +169,35 @@ mod tests {
         let app = App::new();
         assert_eq!(
             translate(key(KeyCode::Char('v')), &app),
-            Action::ToggleDetailMode,
+            Some(Dispatch::Legacy(LegacyAction::ToggleDetailMode)),
         );
     }
 
     #[test]
-    fn g_emits_open_dashboard() {
+    fn g_emits_open_grafana() {
         let app = App::new();
         assert_eq!(
             translate(key(KeyCode::Char('g')), &app),
-            Action::OpenDashboard,
+            Some(Dispatch::Contract(Action::OpenGrafana)),
         );
     }
 
     #[test]
     fn esc_in_normal_mode_routes_to_app_handle_escape() {
         let app = App::new();
-        assert_eq!(translate(key(KeyCode::Esc), &app), Action::Escape);
+        assert_eq!(
+            translate(key(KeyCode::Esc), &app),
+            Some(Dispatch::Contract(Action::EscapeCascade))
+        );
     }
 
-    /// Enter dismisses the post-mortem card when a card is visible;
-    /// otherwise it's a no-op (filter-mode Enter is handled earlier).
+    /// L2a — Enter unconditionally emits `OpenDetail`. The dispatch
+    /// layer (`apply_action` in `ui/mod.rs`) is responsible for the
+    /// "card already visible → replace" semantics; the pre-L2a
+    /// `DismissPostmortem` action is gone, and dismissal flows
+    /// through the Esc cascade per UX_CONTRACT.md §6.
     #[test]
-    fn enter_dismisses_postmortem_when_visible() {
+    fn enter_emits_open_detail_when_card_visible() {
         use crate::storage::run_store::ExitReason;
         use crate::ui::panels::postmortem::{BaselineStatus, PostMortem, PostMortemCard};
         use std::time::Instant;
@@ -189,19 +219,47 @@ mod tests {
         });
         assert_eq!(
             translate(key(KeyCode::Enter), &app),
-            Action::DismissPostmortem,
+            Some(Dispatch::Contract(Action::OpenDetail)),
         );
     }
 
-    /// Without a card visible, Enter requests the card for the
-    /// focused row. The handler is responsible for the no-row /
-    /// no-history fallthrough; the input layer just routes the press.
     #[test]
-    fn enter_in_normal_mode_without_postmortem_shows_focused_card() {
+    fn enter_in_normal_mode_without_postmortem_emits_open_detail() {
         let app = App::new();
         assert_eq!(
             translate(key(KeyCode::Enter), &app),
-            Action::ShowPostmortemForFocused,
+            Some(Dispatch::Contract(Action::OpenDetail)),
         );
+    }
+
+    /// History overlay swallow: Esc routes through the cascade, `q`
+    /// and `h` both toggle the overlay shut (preserving pre-L2a
+    /// behavior), other keys are dropped (no-op).
+    #[test]
+    fn esc_in_history_overlay_emits_escape_cascade() {
+        let mut app = App::new();
+        app.open_history("phi3-mini".into(), Vec::new());
+        assert_eq!(
+            translate(key(KeyCode::Esc), &app),
+            Some(Dispatch::Contract(Action::EscapeCascade))
+        );
+    }
+
+    #[test]
+    fn q_in_history_overlay_toggles_it_shut() {
+        let mut app = App::new();
+        app.open_history("phi3-mini".into(), Vec::new());
+        assert_eq!(
+            translate(key(KeyCode::Char('q')), &app),
+            Some(Dispatch::Contract(Action::ToggleHistory))
+        );
+    }
+
+    #[test]
+    fn unmapped_key_returns_none_in_normal_mode() {
+        let app = App::new();
+        // `x` is not bound to anything in §6, Group D, or the filter
+        // family — the dispatch loop skips silently.
+        assert_eq!(translate(key(KeyCode::Char('x')), &app), None);
     }
 }

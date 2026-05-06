@@ -46,50 +46,53 @@ impl FocusedPanel {
     }
 }
 
-/// One discrete intent produced by an input event. Kept narrow so the
-/// outer loop is a flat match — no nested control flow inside `input::`.
+/// L2a / UX_CONTRACT.md §6 — input actions are owned by `ux_contract`.
+/// The 11 contract variants (Quit, ToggleHelp, SelectUp, SelectDown,
+/// KillOrConfirm, OpenDetail, OpenGrafana, ToggleHistory,
+/// AcknowledgeAlerts, CycleTopSort, EscapeCascade) are the locked
+/// surface. New keymaps go through Agent A via a contract amendment,
+/// not through this re-export.
+pub use ux_contract::Action;
+
+/// L2a — variants without a `ux_contract::Action` analog live here
+/// transitionally. **L2b** removes Group D (the `d`/`v`/Tab/BackTab
+/// bindings the contract §6 omits). **L2c** removes the `/` filter
+/// family (deferred to v1.1 per the contract). Both rows delete this
+/// enum entirely.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Action {
-    None,
-    Quit,
+pub enum LegacyAction {
+    /// `d` — toggle dry-run/enforce. Removed by L2b (key not in §6).
     ToggleDryRun,
-    FocusNext,
-    FocusPrev,
-    SelectNext,
-    SelectPrev,
-    ToggleHelp,
-    StartFilter,
-    CommitFilter,
-    CancelFilter,
-    FilterChar(char),
-    FilterBackspace,
-    /// First press arms; second press confirms. Two-step for safety.
-    ConfirmKill,
-    /// Open the history overlay for the focused row's model. Tier 1.1.
-    OpenHistory,
-    /// Close the history overlay (Esc).
-    CloseHistory,
-    /// Toggle the secondary panels (Framework procs / All processes /
-    /// Recent actions) on or off. They stay hidden by default so the
-    /// main view is just AI Workloads + Recent runs.
+    /// `v` — toggle detail mode. Removed by L2b (key not in §6).
     ToggleDetailMode,
-    /// `g` keybinding ([UX-3]). Open `[dashboard].url_template` in the
-    /// default browser with `{model}` and `{pid}` substituted against
-    /// the focused row.
-    OpenDashboard,
-    /// Dismiss the post-mortem card ([UX-2]). Triggered by `Enter`
-    /// when a card is visible; `Esc` also dismisses via the cascading
-    /// priority handled in `apply_action`.
-    DismissPostmortem,
-    /// Show the post-mortem card for the currently focused row
-    /// ([UX-2], UI Contract v2). Triggered by `Enter` in Normal mode
-    /// when no card is already visible. Skipped silently when no row
-    /// is focused or the focused workload has no run history yet.
-    ShowPostmortemForFocused,
-    /// Cascading-priority Esc: dismisses post-mortem first, then
-    /// disarms a pending kill, then closes any other overlay. Filter
-    /// mode handles its own Esc before this runs.
-    Escape,
+    /// `Tab` — cycle panel focus forward. Removed by L2b (key not in §6).
+    FocusNext,
+    /// `Shift-Tab` — cycle panel focus backward. Removed by L2b (key not in §6).
+    FocusPrev,
+    /// `/` — start filter mode. Removed by L2c (filter deferred to v1.1).
+    StartFilter,
+    /// `Enter` while in filter mode — commit the filter. Removed by L2c.
+    CommitFilter,
+    /// `Esc` while in filter mode — cancel and clear. Removed by L2c.
+    CancelFilter,
+    /// Printable char while in filter mode. Removed by L2c.
+    FilterChar(char),
+    /// `Backspace` while in filter mode. Removed by L2c.
+    FilterBackspace,
+}
+
+/// L2a dispatch container: either a contract-aligned `Action` or a
+/// transitional `LegacyAction`. `input::translate` returns this wrapped
+/// in `Option` (None = unmapped key, idiomatic replacement for the old
+/// `Action::None` no-op variant). L2c collapses `Dispatch` back to
+/// `Action` directly once Group D and the filter family are gone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Dispatch {
+    /// A locked-keymap action from `ux_contract::Action`.
+    Contract(Action),
+    /// A transitional binding (`d`/`v`/Tab/BackTab/`/`-filter) that
+    /// L2b or L2c will delete.
+    Legacy(LegacyAction),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

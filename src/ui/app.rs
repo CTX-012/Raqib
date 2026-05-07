@@ -4,6 +4,7 @@ use crate::runtime::RuntimeState;
 use crate::storage::RunRecord;
 use crate::ui::panels::armed_banner::ArmedKill;
 use crate::ui::panels::postmortem::PostMortemCard;
+use crate::ui::symbols::SymbolSet;
 
 /// How long an ephemeral status footer message stays on screen
 /// before `tick_overlays` clears it. Mirrors the operator-feedback
@@ -65,6 +66,12 @@ pub struct App {
     /// the operator gets confirmation a keypress was received even
     /// when the underlying signal was suppressed.
     status: Option<(String, Instant)>,
+    /// L4 / UX_CONTRACT.md §15 — symbol set resolved at TUI startup.
+    /// Render sites must route status-dot rendering through
+    /// `symbol_set.workload_status(status)` rather than calling
+    /// `WorkloadStatus::symbol()` directly. Once-per-session — never
+    /// re-evaluated after a resize or reconnect.
+    symbol_set: SymbolSet,
 }
 
 impl Default for App {
@@ -75,6 +82,13 @@ impl Default for App {
 
 impl App {
     pub fn new() -> Self {
+        Self::with_symbol_set(SymbolSet::default())
+    }
+
+    /// Constructor used by `ui::run` to pin the symbol set resolved
+    /// from the process locale at TUI startup. Tests use this to
+    /// force a specific set without touching env vars.
+    pub fn with_symbol_set(symbol_set: SymbolSet) -> Self {
         Self {
             selected: 0,
             show_help: false,
@@ -83,7 +97,13 @@ impl App {
             postmortem: None,
             history: None,
             status: None,
+            symbol_set,
         }
+    }
+
+    /// Symbol set resolved at TUI startup. See `ui::symbols`.
+    pub fn symbol_set(&self) -> SymbolSet {
+        self.symbol_set
     }
 
     /// Set an ephemeral status footer message. Replaces any prior
@@ -476,5 +496,35 @@ mod tests {
         assert!(!app.should_quit());
         app.request_quit();
         assert!(app.should_quit());
+    }
+
+    #[test]
+    fn default_app_uses_unicode_symbol_set() {
+        // App::new() defaults to Unicode (matches the SymbolSet
+        // default and the contract's preferred glyphs). ui::run
+        // overrides this with the detected set at startup.
+        let app = App::new();
+        assert_eq!(app.symbol_set(), SymbolSet::Unicode);
+        assert_eq!(
+            app.symbol_set()
+                .workload_status(ux_contract::WorkloadStatus::Healthy),
+            "●"
+        );
+    }
+
+    #[test]
+    fn app_with_ascii_symbol_set_renders_ascii_glyphs() {
+        let app = App::with_symbol_set(SymbolSet::Ascii);
+        assert_eq!(app.symbol_set(), SymbolSet::Ascii);
+        assert_eq!(
+            app.symbol_set()
+                .workload_status(ux_contract::WorkloadStatus::Healthy),
+            "*"
+        );
+        assert_eq!(
+            app.symbol_set()
+                .workload_status(ux_contract::WorkloadStatus::Critical),
+            "X"
+        );
     }
 }

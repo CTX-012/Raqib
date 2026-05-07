@@ -11,6 +11,7 @@
 pub mod app;
 pub mod input;
 pub mod panels;
+pub mod symbols;
 
 use std::io;
 use std::sync::Arc;
@@ -57,7 +58,11 @@ fn run_loop(
 ) -> anyhow::Result<()> {
     let tick = Duration::from_millis(runtime.config().runtime.tick_interval_ms);
     let render = Duration::from_millis(runtime.config().runtime.render_interval_ms);
-    let mut app = App::new();
+    // L4 / UX_CONTRACT.md §15 — once-per-session symbol-set decision,
+    // pinned on `App` so render sites pick the right glyphs even on
+    // SSH bastions and `LANG=C` environments. Not re-evaluated on
+    // resize.
+    let mut app = App::with_symbol_set(symbols::detect());
 
     // Prime the state once so the first frame isn't empty.
     if let Err(e) = runtime.tick() {

@@ -64,8 +64,8 @@ pub enum AlertScope {
 }
 
 /// Record of a fired alert. Carries the data the §4 template needs
-/// to render (`{workload}`, `{pid}` substitutions); concrete
-/// templating is L6's job.
+/// to render (`{workload}`, `{pid}`, `{reason}` substitutions);
+/// concrete templating is L6's job.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AlertEntry {
     pub alert_id: AlertId,
@@ -77,6 +77,13 @@ pub struct AlertEntry {
     /// Workload display name. Empty string for `System`-scoped.
     pub workload_name: String,
     pub fired_at: Instant,
+    /// L8 — fire-time reason for `WorkloadExited` (e.g. "segfault",
+    /// "exit code 139", "killed by governor (rate limited)"). Stored
+    /// on the entry because the workload is gone after exit and the
+    /// reason can't be reconstructed from `RuntimeState` at render
+    /// time. `None` for every other alert (their templates have no
+    /// `{reason}` placeholder).
+    pub reason: Option<String>,
 }
 
 /// Caller-side description of the (scope, name) being observed.
@@ -152,17 +159,71 @@ impl AlertState {
     }
 
     /// Acknowledge every currently-Active alert. Returns the count
-    /// of alerts moved to Suppressed. Pending alerts (still in their
-    /// sustain window) are NOT ack'd — they haven't fired yet.
+    /// of alerts ack'd. Pending alerts (still in their sustain
+    /// window) are NOT ack'd — they haven't fired yet.
+    ///
+    /// One-shot exit-driven alerts (`OomDetected`, `WorkloadExited`)
+    /// are *deleted* from the slot map on ack rather than moved to
+    /// `Suppressed`. Their condition is "this PID exited with X
+    /// reason", which can never become false (the exit is in the
+    /// past), so a Suppressed slot would never transition back to
+    /// Idle and the map would leak. Pressure-driven alerts and
+    /// `GovernorArmed` move to `Suppressed` so re-fire on
+    /// recurrence works per UX_CONTRACT.md §4.
     pub fn ack_all(&mut self) -> usize {
-        let mut count = 0;
-        for state in self.slots.values_mut() {
-            if matches!(state, SlotState::Active(_)) {
-                *state = SlotState::Suppressed;
-                count += 1;
+        let active_keys: Vec<(AlertScope, AlertId)> = self
+            .slots
+            .iter()
+            .filter(|(_, s)| matches!(s, SlotState::Active(_)))
+            .map(|(k, _)| *k)
+            .collect();
+        let count = active_keys.len();
+        for key in active_keys {
+            if is_one_shot_exit(key.1) {
+                self.slots.remove(&key);
+            } else {
+                self.slots.insert(key, SlotState::Suppressed);
             }
         }
         count
+    }
+
+    /// Fire an exit-driven alert immediately, capturing the reason
+    /// at fire time. Bypasses the sustain gate (these alerts are
+    /// instant-fire by definition) and the per-tick observe path
+    /// (the firing site is the lifecycle exit hook in `runtime.rs`,
+    /// not the metric-pressure scan).
+    ///
+    /// If a slot for the same `(scope, alert_id)` already exists,
+    /// the entry is replaced. Returns `Some(Fired(...))` only on
+    /// the first fire — replacement on an already-Active slot
+    /// returns `None` so callers don't double-log.
+    pub fn observe_exit(
+        &mut self,
+        now: Instant,
+        workload: WorkloadRef<'_>,
+        alert_id: AlertId,
+        reason: Option<String>,
+    ) -> Option<AlertEvent> {
+        let key = (workload.scope, alert_id);
+        let was_active = matches!(self.slots.get(&key), Some(SlotState::Active(_)));
+        let entry = AlertEntry {
+            alert_id,
+            scope: workload.scope,
+            pid: match workload.scope {
+                AlertScope::Workload(pid) => Some(pid),
+                AlertScope::System => None,
+            },
+            workload_name: workload.name.to_string(),
+            fired_at: now,
+            reason,
+        };
+        self.slots.insert(key, SlotState::Active(entry));
+        if was_active {
+            None
+        } else {
+            Some(AlertEvent::Fired(alert_id))
+        }
     }
 
     /// Currently-visible alerts: at most `ALERT_MAX_VISIBLE`, sorted
@@ -200,6 +261,13 @@ fn is_sustain_gated(alert: AlertId) -> bool {
     )
 }
 
+/// Exit-driven alerts: their condition (workload exited with X
+/// reason) is in the past and can never resolve, so ack deletes the
+/// slot rather than moving it to `Suppressed` (which would leak).
+fn is_one_shot_exit(alert: AlertId) -> bool {
+    matches!(alert, AlertId::OomDetected | AlertId::WorkloadExited)
+}
+
 fn priority_tier(alert: AlertId) -> u8 {
     // Lower = higher priority (sorts first).
     match alert {
@@ -218,6 +286,7 @@ fn make_entry(now: Instant, workload: WorkloadRef, alert_id: AlertId) -> AlertEn
         },
         workload_name: workload.name.to_string(),
         fired_at: now,
+        reason: None,
     }
 }
 
@@ -259,6 +328,7 @@ fn transition(
                     // reflects when the alert actually entered the
                     // banner, not when the breach started.
                     fired_at: now,
+                    reason: None,
                 };
                 (
                     Some(SlotState::Active(entry)),
@@ -605,5 +675,115 @@ mod tests {
         let event = state.observe(t0(), pid(42), AlertId::VramPressure, false);
         assert_eq!(event, None);
         assert_eq!(state.visible().len(), 0);
+    }
+
+    // ====================================================================
+    // L8 — observe_exit + one-shot ack semantics
+    // ====================================================================
+
+    #[test]
+    fn observe_exit_fires_immediately_with_reason_captured() {
+        let mut state = AlertState::new();
+        let event = state.observe_exit(
+            t0(),
+            pid(42),
+            AlertId::WorkloadExited,
+            Some("exit code 139".into()),
+        );
+        assert_eq!(event, Some(AlertEvent::Fired(AlertId::WorkloadExited)));
+        let visible = state.visible();
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].reason.as_deref(), Some("exit code 139"));
+    }
+
+    #[test]
+    fn observe_exit_replacement_returns_none_no_double_log() {
+        // A second exit event for the same (PID, alert_id) replaces
+        // the entry but doesn't re-fire — caller doesn't need to
+        // log the alert twice.
+        let mut state = AlertState::new();
+        state.observe_exit(t0(), pid(42), AlertId::OomDetected, None);
+        let event = state.observe_exit(t0(), pid(42), AlertId::OomDetected, None);
+        assert_eq!(event, None);
+        assert_eq!(state.visible().len(), 1);
+    }
+
+    #[test]
+    fn one_shot_exit_alert_deleted_on_ack_not_suppressed() {
+        // L8 — exit alerts are deleted from the slot map on ack
+        // (their condition is in the past and can't recur, so
+        // Suppressed would leak). After ack, the slot is gone — a
+        // future observe(false) on the same key would see None
+        // (Idle), not a Suppressed slot.
+        let mut state = AlertState::new();
+        state.observe_exit(
+            t0(),
+            pid(42),
+            AlertId::WorkloadExited,
+            Some("segfault".into()),
+        );
+        assert_eq!(state.visible().len(), 1);
+        let count = state.ack_all();
+        assert_eq!(count, 1);
+        assert_eq!(state.visible().len(), 0);
+        // The slot is gone (Idle). A subsequent fire creates a new
+        // entry rather than re-using the Suppressed one.
+        let event = state.observe_exit(
+            t0(),
+            pid(42),
+            AlertId::WorkloadExited,
+            Some("exit code 42".into()),
+        );
+        assert_eq!(
+            event,
+            Some(AlertEvent::Fired(AlertId::WorkloadExited)),
+            "slot should be Idle after ack of one-shot, so a new fire emits Fired"
+        );
+    }
+
+    #[test]
+    fn pressure_alert_ack_still_moves_to_suppressed() {
+        // Defensive: the L8 one-shot deletion only touches
+        // OomDetected and WorkloadExited. Pressure alerts continue
+        // to use Suppressed so the recurrence path
+        // (Suppressed → Idle → Pending → Active) works per L5.
+        let mut state = AlertState::new();
+        let start = t0();
+        state.observe(start, pid(42), AlertId::VramPressure, true);
+        state.observe(after(start, 5), pid(42), AlertId::VramPressure, true);
+        state.ack_all();
+        // Continue observing breach — Suppressed must NOT re-fire.
+        let event = state.observe(after(start, 6), pid(42), AlertId::VramPressure, true);
+        assert_eq!(
+            event, None,
+            "pressure-driven ack still moves to Suppressed, not deleted"
+        );
+    }
+
+    #[test]
+    fn exit_alert_persists_after_workload_removed_from_registry() {
+        // L8 lifetime decision (option (b)): the alert sticks until
+        // ack regardless of whether the underlying workload still
+        // appears in any registry. Once observe_exit fires, no
+        // subsequent observe(false) can clear it (the per-tick path
+        // doesn't iterate one-shot alert ids), and only ack_all
+        // removes the slot.
+        let mut state = AlertState::new();
+        state.observe_exit(
+            t0(),
+            pid(42),
+            AlertId::OomDetected,
+            None,
+        );
+        // Simulate many ticks passing with the PID gone — the
+        // per-tick observe path never touches OomDetected slots, so
+        // the alert is unaffected by elapsed time.
+        for _ in 0..100 {
+            // No call: the per-tick observation path skips one-shot
+            // alert ids entirely (App::observe_alerts iterates
+            // VramPressure / RamPressure / KvPressure / GovernorArmed
+            // only).
+        }
+        assert_eq!(state.visible().len(), 1);
     }
 }

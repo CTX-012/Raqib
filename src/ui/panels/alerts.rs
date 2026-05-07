@@ -115,11 +115,22 @@ pub fn live_values_for(entry: &AlertEntry, state: &RuntimeState) -> LiveValues {
             };
             LiveValues { pct, reason: None }
         }
-        AlertId::GovernorArmed | AlertId::OomDetected | AlertId::WorkloadExited => {
-            // Critical-tier alerts have no `{pct}` token in their
-            // templates. `{reason}` only matters for WorkloadExited;
-            // L8 supplies the real value.
+        AlertId::GovernorArmed | AlertId::OomDetected => {
+            // Critical-tier alerts without a `{reason}` token. The
+            // `Kill armed on …` and `OOM kill detected — …` templates
+            // need only `{workload}`/`{pid}`, and those come from the
+            // entry, not live values.
             LiveValues::default()
+        }
+        AlertId::WorkloadExited => {
+            // L8 — `{reason}` is captured at fire time on the entry
+            // (the workload is gone after exit; no live source
+            // exists). Use the stored reason verbatim. `{pct}` is
+            // not in the WorkloadExited template.
+            LiveValues {
+                pct: None,
+                reason: entry.reason.clone(),
+            }
         }
     }
 }
@@ -269,6 +280,7 @@ mod tests {
             pid: Some(4523),
             workload_name: "Llama-70B".into(),
             fired_at: Instant::now(),
+            reason: None,
         };
         let live = LiveValues {
             pct: Some(91.4),
@@ -293,6 +305,7 @@ mod tests {
             pid: Some(4523),
             workload_name: "x".into(),
             fired_at: Instant::now(),
+            reason: None,
         };
         let live = LiveValues::default();
         let out = substitute(ux_contract::alerts::VRAM_PRESSURE, &entry, &live);
@@ -311,6 +324,7 @@ mod tests {
             pid: Some(1),
             workload_name: "phi3".into(),
             fired_at: Instant::now(),
+            reason: None,
         };
         let live = LiveValues {
             pct: Some(92.0),
@@ -426,6 +440,55 @@ mod tests {
         // and therefore build_lines — must drop it.
         app.alerts_mut().ack_all();
         assert_eq!(build_lines(&app, &empty_state()).len(), 0);
+    }
+
+    #[test]
+    fn workload_exited_substitutes_workload_and_reason_from_entry() {
+        // L8 — `{reason}` for WorkloadExited comes from the entry
+        // (captured at fire time), not from a live source. Pin
+        // against the contract template directly so a future
+        // local-literal regression breaks here. Note: v0.3.2's
+        // WORKLOAD_EXITED template is "{workload} exited with
+        // {reason} — press Enter for post-mortem" — it has NO
+        // `{pid}` token (unlike OOM_DETECTED which does), so this
+        // test asserts only on workload + reason ordering.
+        let mut app = empty_app();
+        app.alerts_mut().observe_exit(
+            Instant::now(),
+            WorkloadRef::workload(4523, "Llama-70B"),
+            AlertId::WorkloadExited,
+            Some("exit code 139".into()),
+        );
+        let text = lines_to_string(&build_lines(&app, &empty_state()));
+        assert!(
+            text.contains("Llama-70B exited with exit code 139"),
+            "template assembly wrong: {text}"
+        );
+        assert!(
+            text.contains("press Enter for post-mortem"),
+            "trailing literal missing: {text}"
+        );
+    }
+
+    #[test]
+    fn oom_detected_substitutes_workload_pid_no_reason_token() {
+        // L8 — OomDetected's template has no `{reason}` placeholder
+        // (it's just "OOM kill detected — {workload} (PID {pid})
+        // terminated by kernel"). Confirm the entry's reason field
+        // (if any) is ignored and the substitution still produces
+        // the expected text.
+        let mut app = empty_app();
+        app.alerts_mut().observe_exit(
+            Instant::now(),
+            WorkloadRef::workload(206, "phi3"),
+            AlertId::OomDetected,
+            None,
+        );
+        let text = lines_to_string(&build_lines(&app, &empty_state()));
+        assert!(
+            text.contains("OOM kill detected — phi3 (PID 206) terminated by kernel"),
+            "{text}"
+        );
     }
 
     #[test]

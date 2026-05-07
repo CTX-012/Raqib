@@ -123,6 +123,20 @@ impl App {
         &mut self.alerts
     }
 
+    /// L8 — fire the alert(s) queued by the runtime's lifecycle
+    /// exit hook. Called once per tick by the UI loop after
+    /// `Runtime::drain_exit_alerts`. Each event resolves to a
+    /// single `AlertState::observe_exit` call — no sustain gate,
+    /// reason captured at fire time.
+    pub fn observe_exit(&mut self, now: Instant, event: &crate::runtime::ExitAlertEvent) {
+        self.alerts.observe_exit(
+            now,
+            WorkloadRef::workload(event.pid, &event.workload_name),
+            event.alert_id,
+            event.reason.clone(),
+        );
+    }
+
     /// L7 — handle the `a` key by ack'ing every active alert and
     /// surfacing a transient status footer ("Acknowledged N alerts")
     /// per `ux_contract::status::ALERTS_ACKNOWLEDGED`. Silent when

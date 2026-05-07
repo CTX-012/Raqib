@@ -98,9 +98,15 @@ fn run_loop(
             // L6 / §4 — observe alert breach conditions for this
             // tick. AlertState lives on `App`; the metric inputs
             // come from `runtime.state()` plus `app.armed_kill_pid`.
-            // OOM / WorkloadExited alerts wire in L8 (exit-driven).
-            app.observe_alerts(Instant::now(), runtime.state());
-            last_tick = Instant::now();
+            let now = Instant::now();
+            app.observe_alerts(now, runtime.state());
+            // L8 / §4 — drain exit-driven alerts queued by the
+            // lifecycle exit hook this tick (OomDetected,
+            // WorkloadExited).
+            for event in runtime.drain_exit_alerts() {
+                app.observe_exit(now, &event);
+            }
+            last_tick = now;
         }
 
         if last_render.elapsed() >= render {

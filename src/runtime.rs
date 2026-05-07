@@ -74,9 +74,75 @@ pub struct RuntimeState {
     /// only present for AI processes the dispatcher has sampled at least
     /// once. Empty when telemetry is disabled.
     pub live_telemetry: HashMap<u32, LiveTelemetry>,
+    /// L8 / UX_CONTRACT.md §4 — exit-driven alert events queued by
+    /// the lifecycle exit hook. Drained by the UI loop after each
+    /// tick (`Runtime::drain_exit_alerts`) and dispatched to
+    /// `App::observe_exit`. Cleared between drains so unbounded
+    /// growth is impossible if the UI loop keeps up.
+    pub pending_exit_alerts: Vec<ExitAlertEvent>,
     pub dry_run: bool,
     pub tick_count: u64,
     pub last_tick: Option<Instant>,
+}
+
+/// L8 — one queued exit-driven alert. Emitted by the lifecycle exit
+/// hook in `Runtime::tick` when `classify_for_alert` returns
+/// `Some((alert_id, reason))` for the workload's classified
+/// `ExitReason`. The UI side translates this into an
+/// `AlertState::observe_exit` call.
+#[derive(Debug, Clone)]
+pub struct ExitAlertEvent {
+    pub pid: u32,
+    pub workload_name: String,
+    pub alert_id: ux_contract::AlertId,
+    /// Reason string for `{reason}` substitution in the
+    /// `WorkloadExited` template. `None` for `OomDetected` (its
+    /// template has no `{reason}` placeholder).
+    pub reason: Option<String>,
+}
+
+/// Map a classified [`ExitReason`] to the §4 alert it should fire,
+/// if any. Returns `None` for `CleanExit` (per §4 "never on clean
+/// (code 0) exits"). `OutOfMemory` resolves to `OomDetected`;
+/// everything else non-clean resolves to `WorkloadExited` with a
+/// human-readable reason for `{reason}` substitution.
+///
+/// `OomDetected` and `WorkloadExited` are disjoint — a single
+/// `ExitReason` produces exactly one alert (or none for clean
+/// exits), so the L8 "OomDetected supersedes WorkloadExited for OOM
+/// class" rule is satisfied by construction rather than by an
+/// explicit precedence check.
+pub fn classify_for_alert(
+    exit_reason: &crate::storage::run_store::ExitReason,
+) -> Option<(ux_contract::AlertId, Option<String>)> {
+    use crate::storage::run_store::ExitReason;
+    use ux_contract::AlertId;
+    match exit_reason {
+        ExitReason::CleanExit => None,
+        ExitReason::OutOfMemory { .. } => Some((AlertId::OomDetected, None)),
+        ExitReason::CudaError { last_msg } => Some((
+            AlertId::WorkloadExited,
+            Some(
+                last_msg
+                    .clone()
+                    .unwrap_or_else(|| "CUDA error".to_string()),
+            ),
+        )),
+        ExitReason::Segfault => Some((AlertId::WorkloadExited, Some("segfault".into()))),
+        ExitReason::GovernorKill { reason } => Some((
+            AlertId::WorkloadExited,
+            Some(format!("killed by governor ({reason})")),
+        )),
+        ExitReason::Crash { exit_code } => Some((
+            AlertId::WorkloadExited,
+            Some(format!("exit code {exit_code}")),
+        )),
+        ExitReason::UserSignal { signal } => Some((
+            AlertId::WorkloadExited,
+            Some(format!("signal {signal}")),
+        )),
+        ExitReason::Unknown => Some((AlertId::WorkloadExited, Some("unknown".into()))),
+    }
 }
 
 /// Tier 3.3 — what the UI knows *right now* about a single PID's
@@ -240,6 +306,15 @@ impl Runtime {
 
     pub fn dry_run(&self) -> bool {
         self.state.dry_run
+    }
+
+    /// L8 — drain queued exit-driven alert events accumulated by
+    /// the lifecycle exit hook since the last call. The UI loop
+    /// dispatches each event to `App::observe_exit` and discards
+    /// them after; queue is cleared by the drain so it never grows
+    /// across ticks.
+    pub fn drain_exit_alerts(&mut self) -> Vec<ExitAlertEvent> {
+        std::mem::take(&mut self.state.pending_exit_alerts)
     }
 
     /// Most-recent run records for `model` from the typed run store, or
@@ -461,6 +536,20 @@ impl Runtime {
                     governor_reason,
                 };
                 record.exit_reason = classify_exit(summary, &ctx);
+                // L8 / UX_CONTRACT.md §4 — queue an exit-driven
+                // alert if the classified reason warrants one.
+                // Clean exits are silent per §4 ("never on clean
+                // (code 0) exits"); OOM cases fire OomDetected;
+                // everything else non-clean fires WorkloadExited
+                // with a `{reason}` string captured at fire time.
+                if let Some((alert_id, alert_reason)) = classify_for_alert(&record.exit_reason) {
+                    self.state.pending_exit_alerts.push(ExitAlertEvent {
+                        pid: summary.pid,
+                        workload_name: summary.name.clone(),
+                        alert_id,
+                        reason: alert_reason,
+                    });
+                }
                 let model = record.model_or_name().to_string();
                 let record_clone = record.clone();
                 if let Err(e) = rs.append(record) {
@@ -1385,6 +1474,99 @@ mod tests {
             compute_workload_status(&inputs),
             ux_contract::WorkloadStatus::Loading
         );
+    }
+
+    // ========================================================================
+    // L8 / UX_CONTRACT.md §4 — `classify_for_alert` mapping tests.
+    // ========================================================================
+
+    use crate::storage::run_store::ExitReason;
+
+    #[test]
+    fn classify_for_alert_clean_exit_fires_no_alert() {
+        // §4 — "never on clean (code 0) exits".
+        assert_eq!(classify_for_alert(&ExitReason::CleanExit), None);
+    }
+
+    #[test]
+    fn classify_for_alert_oom_kill_fires_oom_detected() {
+        // RAM-side kernel OOM: kernel_oom=true, vram=false. The
+        // OomDetected template has no {reason} placeholder, so the
+        // mapping returns None for the reason.
+        let r = ExitReason::OutOfMemory {
+            ram: true,
+            vram: false,
+        };
+        assert_eq!(
+            classify_for_alert(&r),
+            Some((ux_contract::AlertId::OomDetected, None))
+        );
+    }
+
+    #[test]
+    fn classify_for_alert_cuda_oom_fires_oom_detected() {
+        // CUDA OOM: kernel_oom=false, vram=true. Same mapping —
+        // OomDetected covers both flavours.
+        let r = ExitReason::OutOfMemory {
+            ram: false,
+            vram: true,
+        };
+        assert_eq!(
+            classify_for_alert(&r),
+            Some((ux_contract::AlertId::OomDetected, None))
+        );
+    }
+
+    #[test]
+    fn classify_for_alert_segfault_fires_workload_exited_with_reason() {
+        let r = ExitReason::Segfault;
+        assert_eq!(
+            classify_for_alert(&r),
+            Some((ux_contract::AlertId::WorkloadExited, Some("segfault".into())))
+        );
+    }
+
+    #[test]
+    fn classify_for_alert_governor_kill_fires_workload_exited_with_reason() {
+        let r = ExitReason::GovernorKill {
+            reason: "rate limited".into(),
+        };
+        let (alert_id, reason) = classify_for_alert(&r).expect("should fire");
+        assert_eq!(alert_id, ux_contract::AlertId::WorkloadExited);
+        let reason = reason.expect("reason captured at fire time");
+        assert!(reason.contains("rate limited"), "reason = {reason}");
+        assert!(reason.contains("governor"), "reason = {reason}");
+    }
+
+    #[test]
+    fn classify_for_alert_exit_nonzero_fires_workload_exited_with_reason() {
+        // ExitReason::Crash carries the non-zero exit code.
+        let r = ExitReason::Crash { exit_code: 42 };
+        let (alert_id, reason) = classify_for_alert(&r).expect("should fire");
+        assert_eq!(alert_id, ux_contract::AlertId::WorkloadExited);
+        assert_eq!(reason, Some("exit code 42".into()));
+    }
+
+    #[test]
+    fn classify_for_alert_unknown_fires_workload_exited_with_reason() {
+        let (alert_id, reason) = classify_for_alert(&ExitReason::Unknown).expect("should fire");
+        assert_eq!(alert_id, ux_contract::AlertId::WorkloadExited);
+        assert_eq!(reason, Some("unknown".into()));
+    }
+
+    #[test]
+    fn classify_for_alert_oom_supersedes_workload_exited_for_oom_class() {
+        // OomDetected and WorkloadExited are disjoint by
+        // construction — a single ExitReason produces exactly one
+        // alert id, never both. This test pins the precedence so a
+        // future "fire both" refactor breaks here.
+        let r = ExitReason::OutOfMemory {
+            ram: true,
+            vram: false,
+        };
+        let (alert_id, _) = classify_for_alert(&r).expect("should fire");
+        assert_eq!(alert_id, ux_contract::AlertId::OomDetected);
+        assert_ne!(alert_id, ux_contract::AlertId::WorkloadExited);
     }
 
     #[test]

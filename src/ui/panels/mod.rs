@@ -2,6 +2,7 @@
 //! is shared state — callers shouldn't be able to render a panel into the
 //! wrong region.
 
+pub mod alerts;
 pub mod armed_banner;
 mod audit;
 mod completed;
@@ -28,14 +29,26 @@ pub fn render(f: &mut Frame, state: &RuntimeState, app: &App) {
     // a kill is armed. Allocating an empty row otherwise would leave
     // a stale red strip on screen between arms.
     let banner_height = if app.armed_kill().is_some() { 1 } else { 0 };
+    // L6 / §1 region 1 — alert region sits between the armed-kill
+    // banner and the System panel. Height shrinks to 0 when no
+    // alerts are active so the workload area takes the full body.
+    let alerts_height = alerts::region_height(app);
     let split = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(banner_height), Constraint::Min(0)])
+        .constraints([
+            Constraint::Length(banner_height),
+            Constraint::Length(alerts_height),
+            Constraint::Min(0),
+        ])
         .split(full);
-    let (banner_area, body_area) = (split[0], split[1]);
+    let (banner_area, alerts_area, body_area) = (split[0], split[1], split[2]);
 
     if let Some(armed) = app.armed_kill() {
         armed_banner::render(f, banner_area, armed, state.dry_run);
+    }
+
+    if alerts_height > 0 {
+        alerts::render(f, alerts_area, app, state);
     }
 
     // L2b removed the legacy "detail mode" toggle (`v` key + the

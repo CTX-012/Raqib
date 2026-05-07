@@ -2,6 +2,7 @@ use std::time::{Duration, Instant};
 
 use crate::runtime::RuntimeState;
 use crate::storage::RunRecord;
+use crate::ui::alerts::{AlertState, WorkloadRef};
 use crate::ui::panels::armed_banner::ArmedKill;
 use crate::ui::panels::postmortem::PostMortemCard;
 use crate::ui::symbols::SymbolSet;
@@ -72,6 +73,14 @@ pub struct App {
     /// `WorkloadStatus::symbol()` directly. Once-per-session — never
     /// re-evaluated after a resize or reconnect.
     symbol_set: SymbolSet,
+    /// L5/L6 / UX_CONTRACT.md §4 — alert state machine. Lives on
+    /// `App` (not `RuntimeState`) because acks are session-scoped UI
+    /// state and one of the breach inputs (`armed_kill_pid`) lives
+    /// on `App` already; keeping the state on the same shelf
+    /// avoids an awkward cross-boundary dispatch every tick. The L
+    /// plan row originally spec'd `RuntimeState`; deviation is
+    /// documented in the L6 commit.
+    alerts: AlertState,
 }
 
 impl Default for App {
@@ -98,6 +107,97 @@ impl App {
             history: None,
             status: None,
             symbol_set,
+            alerts: AlertState::new(),
+        }
+    }
+
+    /// Read-only access to the alert state machine. The render
+    /// layer (`panels::alerts`) calls `app.alerts().visible()` and
+    /// `app.alerts().active_count()`.
+    pub fn alerts(&self) -> &AlertState {
+        &self.alerts
+    }
+
+    /// Mutable access for tests and the per-tick observation path.
+    pub fn alerts_mut(&mut self) -> &mut AlertState {
+        &mut self.alerts
+    }
+
+    /// Per-tick alert observation. Reads the metrics that already
+    /// flow through `RuntimeState` (system RAM, total VRAM,
+    /// per-process VRAM, KV cache occupancy) plus `App`'s own
+    /// `armed_kill_pid` and dispatches `(workload, alert_id,
+    /// breaching)` flags into the alert state machine.
+    ///
+    /// Out of scope for L6 (lands in L8): `OomDetected` and
+    /// `WorkloadExited`. Both are exit-driven instant-fire alerts
+    /// whose natural firing site is the lifecycle exit hook, not a
+    /// per-tick metric scan.
+    pub fn observe_alerts(&mut self, now: Instant, state: &RuntimeState) {
+        use ux_contract::AlertId;
+        use ux_contract::thresholds::{KV_ATTENTION_PCT, RAM_ATTENTION_PCT, VRAM_ATTENTION_PCT};
+
+        // RAM pressure — system-scope, only one slot for the whole
+        // host.
+        let ram_pct = state
+            .last_snapshot
+            .as_ref()
+            .map(|s| s.system.memory_usage_percent());
+        let ram_breaching = ram_pct.is_some_and(|p| p >= RAM_ATTENTION_PCT);
+        self.alerts.observe(
+            now,
+            WorkloadRef::system(),
+            AlertId::RamPressure,
+            ram_breaching,
+        );
+
+        // Per-AI-PID alerts. Snapshot the PIDs and names up front so
+        // the borrow on `state.ai_processes()` is released before
+        // we mutate `self.alerts` in the loop.
+        let total_vram = state
+            .last_snapshot
+            .as_ref()
+            .map(|s| s.gpu.total_vram_all_devices())
+            .filter(|&v| v > 0);
+        let armed_pid = self.armed_kill_pid();
+        let workloads: Vec<(u32, String, Option<u64>, Option<f32>)> = state
+            .ai_processes()
+            .map(|p| {
+                let kv = state
+                    .live_telemetry
+                    .get(&p.pid)
+                    .and_then(|lt| lt.kv_cache_peak_pct);
+                (p.pid, p.name.clone(), p.vram_bytes, kv)
+            })
+            .collect();
+
+        for (pid, name, vram_bytes, kv_pct) in &workloads {
+            let workload = WorkloadRef::workload(*pid, name);
+
+            // VRAM: device-relative percentage. `{pct}` is rendered
+            // from the same numerator/denominator at render time
+            // (see panels::alerts::live_values_for) — the threshold
+            // check here only needs the boolean.
+            let vram_pct = match (total_vram, *vram_bytes) {
+                (Some(total), Some(used)) => Some((used as f64 / total as f64) * 100.0),
+                _ => None,
+            };
+            let vram_breaching = vram_pct.is_some_and(|p| p >= VRAM_ATTENTION_PCT);
+            self.alerts
+                .observe(now, workload, AlertId::VramPressure, vram_breaching);
+
+            // KV cache: LLM-only signal; non-LLM workloads have no
+            // KV reading and therefore can't breach.
+            let kv = kv_pct.map(|v| v as f64);
+            let kv_breaching = kv.is_some_and(|p| p >= KV_ATTENTION_PCT);
+            self.alerts
+                .observe(now, workload, AlertId::KvPressure, kv_breaching);
+
+            // GovernorArmed: this PID is the one currently armed.
+            // Instant fire; clears as soon as the arm is released.
+            let armed = armed_pid == Some(*pid);
+            self.alerts
+                .observe(now, workload, AlertId::GovernorArmed, armed);
         }
     }
 

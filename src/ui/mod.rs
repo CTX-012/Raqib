@@ -95,6 +95,11 @@ fn run_loop(
                 tracing::error!("tick failed: {}", e);
             }
             runtime.record_governor_audit();
+            // L6 / §4 — observe alert breach conditions for this
+            // tick. AlertState lives on `App`; the metric inputs
+            // come from `runtime.state()` plus `app.armed_kill_pid`.
+            // OOM / WorkloadExited alerts wire in L8 (exit-driven).
+            app.observe_alerts(Instant::now(), runtime.state());
             last_tick = Instant::now();
         }
 

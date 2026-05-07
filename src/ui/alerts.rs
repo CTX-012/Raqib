@@ -122,7 +122,7 @@ enum SlotState {
 /// Per-(scope, alert_id) slot map. `Idle` is the implicit absent
 /// state — slots are removed when they become Idle so the map stays
 /// bounded by the number of currently-firing or pending alerts.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct AlertState {
     slots: HashMap<(AlertScope, AlertId), SlotState>,
 }

@@ -56,6 +56,56 @@ labels — saves a `format!` at every render. Adopted by L11c via
 `WorkloadCategory` enum itself stays in this tree per the
 orchestrator's "KEEP CONST-ONLY for v1.0" decision.
 
+## Pending Contract Amendment Requests
+
+### CAR-9: per-category degraded-line templates
+
+**Surfaced by:** L12 degraded-row expansion. UX_CONTRACT.md §2
+locks a per-category schema for the second indented line shown
+under Attention/Critical workloads:
+
+| Category | Schema |
+|---|---|
+| LLM | `KV {pct}% · queue {n} · p99 {ms}ms · baseline {tok/s} · {±delta}%` |
+| Vision | `VRAM {pct}% · {phase} · baseline {fps} · {±delta}%` |
+| Embeddings | `batch {n} · p99 {ms}ms · baseline {emb/s} · {±delta}%` |
+| ROS2 | `topics {n} · queue {n} · baseline {Hz} · {±delta}%` (v1.1+) |
+| Loading | `loaded {gb} / {total} GB · {n} disk reads remaining` |
+| Unknown | `(unrecognized AI workload — no metrics)` |
+
+These need to ship as `ux_contract::degraded_line::*` const so
+both Linux and Windows render the same strings. v1.0's data layer
+populates only a subset of the placeholders (VRAM%, KV%, RAM% —
+not queue depth, p99, live baseline, or {±delta}%); the contract
+strings would still be authoritative once those telemetry
+features land.
+
+L12 ships a content-light placeholder rendering — for an
+Attention/Critical row, list the breaching metrics inline
+(`"VRAM 87% · KV 84%"`) using local format strings. No baseline
+or delta tracking yet. Once CAR-9 lands and the contract const
+exist, a follow-up adoption row swaps the locals for the const
+references; once live telemetry tracks queue/p99/baseline, the
+fuller §2 schema can fill in.
+
+Suggested addition to `ux_contract`:
+```rust
+pub mod degraded_line {
+    /// `KV {pct}% · queue {n} · p99 {ms}ms · baseline {tok/s} · {±delta}%`
+    pub const LLM: &str = "KV {kv_pct}% · queue {queue} · p99 {p99_ms}ms · baseline {baseline_tps} · {delta_pct}%";
+    /// `VRAM {pct}% · {phase} · baseline {fps} · {±delta}%`
+    pub const VISION: &str = "VRAM {vram_pct}% · {phase} · baseline {baseline_fps} · {delta_pct}%";
+    /// `batch {n} · p99 {ms}ms · baseline {emb/s} · {±delta}%`
+    pub const EMBEDDINGS: &str = "batch {batch} · p99 {p99_ms}ms · baseline {baseline_eps} · {delta_pct}%";
+    /// `topics {n} · queue {n} · baseline {Hz} · {±delta}%` (v1.1+)
+    pub const ROS2: &str = "topics {topics} · queue {queue} · baseline {baseline_hz} · {delta_pct}%";
+    /// Cold-start phase progress.
+    pub const LOADING: &str = "loaded {loaded_gb} / {total_gb} GB · {disk_reads} disk reads remaining";
+    /// AI process without category-specific telemetry.
+    pub const UNKNOWN: &str = "(unrecognized AI workload — no metrics)";
+}
+```
+
 ## v1.1 (post-v1.0)
 
 ### enum migration: move `WorkloadCategory` into `ux_contract`

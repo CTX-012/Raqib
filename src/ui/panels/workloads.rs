@@ -139,6 +139,19 @@ pub(crate) struct Row {
     pub rss_mb: u64,
     pub vram_bytes: Option<u64>,
     pub kv_cache_pct: Option<f32>,
+    /// L12 — VRAM percent of device total, captured at status-
+    /// compute time so the degraded-row expansion renders the
+    /// same number that drove the status dot.
+    pub vram_pct: Option<f64>,
+    /// L12 — host RAM utilisation. System-wide, so identical for
+    /// every row in a tick; cached on each row for the same
+    /// "expansion text matches status compute" invariant.
+    pub ram_pct: Option<f64>,
+    /// L12 — true when the manual-kill arm targets this PID. The
+    /// degraded-line surfaces it as a discrete trigger so the
+    /// operator can see why a Critical dot fired even when no
+    /// numeric metric is breaching.
+    pub governor_armed: bool,
 }
 
 /// Build the in-render-order row list. Crate-public for tests + the
@@ -165,6 +178,9 @@ pub(crate) fn ordered_rows(state: &RuntimeState, app: &App) -> Vec<Row> {
                 rss_mb: p.rss_mb,
                 vram_bytes: p.vram_bytes,
                 kv_cache_pct,
+                vram_pct: inputs.vram_pct,
+                ram_pct: inputs.ram_pct,
+                governor_armed: inputs.governor_armed,
             }
         })
         .collect();
@@ -186,6 +202,60 @@ pub fn ordered_pids(state: &RuntimeState, app: &App) -> Vec<u32> {
         .into_iter()
         .map(|r| r.pid)
         .collect()
+}
+
+/// L12 — expansion-line text for a degraded row.
+///
+/// Returns `Some(text)` only when the row's status is `Attention`
+/// or `Critical`; `Healthy` and `Loading` return `None` (no
+/// expansion). Text is a `·`-separated list of every breach
+/// condition currently triggering — VRAM%, RAM%, KV%, plus the
+/// instant-fire flags (`governor armed`, `OOM detected`).
+///
+/// Content-light placeholder vs UX_CONTRACT.md §2's locked
+/// per-category schema (see CAR-9 in BACKLOG.md): the §2 schema
+/// includes queue depth, p99 latency, live throughput, and live
+/// baseline (with `±delta%`) — none of which the v1.0 data layer
+/// tracks for live workloads yet. Once Contract ships
+/// `degraded_line::*` const and the relevant telemetry features
+/// land, a follow-up row swaps this helper for the contract
+/// templates with the new fields populated.
+pub(crate) fn degraded_line(row: &Row) -> Option<String> {
+    use ux_contract::thresholds::{KV_ATTENTION_PCT, RAM_ATTENTION_PCT, VRAM_ATTENTION_PCT};
+
+    if matches!(row.status, WorkloadStatus::Healthy | WorkloadStatus::Loading) {
+        return None;
+    }
+
+    let mut triggers: Vec<String> = Vec::new();
+    if row.governor_armed {
+        triggers.push("governor armed".to_string());
+    }
+    if let Some(p) = row.vram_pct
+        && p >= VRAM_ATTENTION_PCT
+    {
+        triggers.push(format!("VRAM {p:.0}%"));
+    }
+    if let Some(p) = row.ram_pct
+        && p >= RAM_ATTENTION_PCT
+    {
+        triggers.push(format!("RAM {p:.0}%"));
+    }
+    if let Some(p) = row.kv_cache_pct
+        && (p as f64) >= KV_ATTENTION_PCT
+    {
+        triggers.push(format!("KV {p:.0}%"));
+    }
+
+    if triggers.is_empty() {
+        // Defensive: a row in Attention/Critical state without any
+        // numeric trigger means a non-numeric signal escalated it
+        // (post-L12: only `governor_armed` does this; future rows
+        // may add others). Surface it honestly rather than render
+        // an empty expansion line that looks like a bug.
+        return Some("status elevated — no specific metric trigger".to_string());
+    }
+    Some(triggers.join(" · "))
 }
 
 /// Format the primary metric for a row. Returns `"cold-loading"`
@@ -266,7 +336,7 @@ pub fn render(f: &mut Frame, area: Rect, state: &RuntimeState, app: &App) {
                 Some(b) if b > 0 => format!("{:>4}M", b / (1024 * 1024)),
                 _ => "    ".into(),
             };
-            let line = format!(
+            let primary = format!(
                 "{} {:<24} {:<14} cpu {:>5.1}% rss {:>5}M {}",
                 dot,
                 truncate(&row.name, 24),
@@ -275,7 +345,19 @@ pub fn render(f: &mut Frame, area: Rect, state: &RuntimeState, app: &App) {
                 row.rss_mb,
                 vram_label,
             );
-            items.push(ListItem::new(Line::from(Span::raw(line))));
+            // L12 — combine primary + expansion into a single
+            // ListItem so the highlight (selection bg) covers both
+            // when this row is selected. The expansion's `Option`
+            // shape keeps Healthy / Loading rows at their
+            // pre-L12 single-line layout exactly.
+            let mut lines = vec![Line::from(Span::raw(primary))];
+            if let Some(expansion) = degraded_line(row) {
+                lines.push(Line::from(Span::styled(
+                    format!("    {expansion}"),
+                    Style::default().fg(Color::DarkGray),
+                )));
+            }
+            items.push(ListItem::new(lines));
         }
     }
 
@@ -334,6 +416,22 @@ mod tests {
             // panel's `Instant::now()` minus this lands at
             // `first_observed_age`.
             first_observed_at: Instant::now() - first_observed_age,
+        }
+    }
+
+    fn make_row(category: WorkloadCategory, status: WorkloadStatus) -> Row {
+        Row {
+            pid: 1,
+            name: "phi3".into(),
+            category,
+            status,
+            cpu_pct: 0.0,
+            rss_mb: 0,
+            vram_bytes: None,
+            kv_cache_pct: None,
+            vram_pct: None,
+            ram_pct: None,
+            governor_armed: false,
         }
     }
 
@@ -416,16 +514,8 @@ mod tests {
     fn loading_state_renders_cold_loading_metric_instead_of_type_specific() {
         // The Loading status overrides the category-specific
         // primary metric across all categories.
-        let row = Row {
-            pid: 1,
-            name: "phi3".into(),
-            category: WorkloadCategory::LLM,
-            status: WorkloadStatus::Loading,
-            cpu_pct: 0.0,
-            rss_mb: 0,
-            vram_bytes: None,
-            kv_cache_pct: Some(45.0),
-        };
+        let mut row = make_row(WorkloadCategory::LLM, WorkloadStatus::Loading);
+        row.kv_cache_pct = Some(45.0);
         assert_eq!(primary_metric(&row), COLD_LOADING);
         let vision = Row {
             category: WorkloadCategory::Vision,
@@ -515,17 +605,113 @@ mod tests {
         // come from `ux_contract::status::COLD_LOADING`, not a
         // local literal. Pin against the const directly so a
         // future "let's just hardcode it back" regression breaks.
-        let row = Row {
-            pid: 1,
-            name: "phi3".into(),
-            category: WorkloadCategory::LLM,
-            status: WorkloadStatus::Loading,
-            cpu_pct: 0.0,
-            rss_mb: 0,
-            vram_bytes: None,
-            kv_cache_pct: None,
-        };
+        let row = make_row(WorkloadCategory::LLM, WorkloadStatus::Loading);
         assert_eq!(primary_metric(&row), COLD_LOADING);
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // L12 — degraded-row expansion.
+    // ════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn workloads_healthy_row_no_expansion_line() {
+        let row = make_row(WorkloadCategory::LLM, WorkloadStatus::Healthy);
+        assert_eq!(degraded_line(&row), None);
+    }
+
+    #[test]
+    fn workloads_loading_row_no_expansion_line() {
+        // Loading is grey/cold-start; the panel's primary line
+        // already shows "cold-loading" — a second line would be
+        // redundant and dishonest (no breach is happening).
+        let row = make_row(WorkloadCategory::LLM, WorkloadStatus::Loading);
+        assert_eq!(degraded_line(&row), None);
+    }
+
+    #[test]
+    fn workloads_attention_row_shows_expansion_line() {
+        let mut row = make_row(WorkloadCategory::LLM, WorkloadStatus::Attention);
+        row.vram_pct = Some(87.0);
+        let expansion = degraded_line(&row).expect("Attention must produce expansion");
+        assert!(expansion.contains("VRAM 87%"), "expansion: {expansion}");
+    }
+
+    #[test]
+    fn workloads_critical_row_shows_expansion_line() {
+        let mut row = make_row(WorkloadCategory::LLM, WorkloadStatus::Critical);
+        row.governor_armed = true;
+        let expansion = degraded_line(&row).expect("Critical must produce expansion");
+        assert!(expansion.contains("governor armed"), "expansion: {expansion}");
+    }
+
+    #[test]
+    fn vram_pressure_expansion_includes_percentage() {
+        // Lock the v1.0 placeholder shape (CAR-9 will replace
+        // with the §2 schema once the contract const ships).
+        let mut row = make_row(WorkloadCategory::LLM, WorkloadStatus::Attention);
+        row.vram_pct = Some(91.4);
+        // Display rounds to integer; 91.4 → "VRAM 91%".
+        assert_eq!(degraded_line(&row).as_deref(), Some("VRAM 91%"));
+    }
+
+    #[test]
+    fn expansion_joins_multiple_triggers_with_middle_dot() {
+        // Workload simultaneously over both VRAM and KV thresholds:
+        // both surface in the expansion, separated by " · " per
+        // §2's locked separator. Trigger order is governor →
+        // VRAM → RAM → KV (most-actionable first).
+        let mut row = make_row(WorkloadCategory::LLM, WorkloadStatus::Critical);
+        row.vram_pct = Some(96.0);
+        row.kv_cache_pct = Some(93.0);
+        let expansion = degraded_line(&row).expect("triggers present");
+        assert_eq!(expansion, "VRAM 96% · KV 93%");
+    }
+
+    #[test]
+    fn expansion_governor_armed_takes_first_position() {
+        // Governor-armed is the user-actionable trigger — render
+        // it first so it's visible even when the row is wrapped
+        // or truncated.
+        let mut row = make_row(WorkloadCategory::LLM, WorkloadStatus::Critical);
+        row.governor_armed = true;
+        row.vram_pct = Some(96.0);
+        let expansion = degraded_line(&row).expect("triggers present");
+        assert!(
+            expansion.starts_with("governor armed"),
+            "governor must lead: {expansion}"
+        );
+    }
+
+    #[test]
+    fn expansion_below_attention_thresholds_falls_through_to_defensive_message() {
+        // Defensive: a row in Attention/Critical with no metric
+        // breaching the v0.3 thresholds would otherwise produce an
+        // empty expansion. The helper surfaces an honest "no
+        // specific metric trigger" so the operator sees something.
+        let row = make_row(WorkloadCategory::LLM, WorkloadStatus::Attention);
+        // No VRAM/RAM/KV pct set; no governor. Should never happen
+        // in production (the dot wouldn't escalate without one of
+        // these), but pin the fallback.
+        let expansion = degraded_line(&row).expect("Attention always expands");
+        assert!(expansion.contains("no specific metric trigger"));
+    }
+
+    #[test]
+    fn empty_category_still_renders_no_header() {
+        // Defensive: L11b's behavior unchanged after L12. Empty
+        // categories produce no rows, and `ordered_rows` doesn't
+        // emit headers — the render layer's emptiness check fires.
+        let app = App::new();
+        let s = state_with(vec![make_proc(
+            10,
+            "phi3",
+            WorkloadCategory::LLM,
+            warm(),
+        )]);
+        let cats: Vec<WorkloadCategory> =
+            ordered_rows(&s, &app).iter().map(|r| r.category).collect();
+        assert_eq!(cats, vec![WorkloadCategory::LLM]);
+        // ROS2/Embeddings/Unknown categories absent.
     }
 
     #[test]

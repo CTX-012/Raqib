@@ -435,6 +435,7 @@ mod tests {
             pid,
             name: name.into(),
             category: cat,
+            workload_category: crate::model::WorkloadCategory::Unknown,
             evidence: String::new(),
             model_name: None,
             cpu_pct: 0.0,

@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use crate::model::{AICategory, ClassificationResult, ProcessSample};
+use crate::model::{
+    AICategory, ClassificationResult, ProcessSample, workload_category_from_model_path,
+};
 
 /// Extensions that are unambiguously model weight files.
 /// Seeing one of these in a cmdline arg → high-confidence Inference.
@@ -50,8 +52,13 @@ pub(crate) fn classify(sample: &ProcessSample) -> Option<ClassificationResult> {
     if let Some(path) = find_model_in_cmdline(&sample.cmdline) {
         let evidence = format!("model file referenced in cmdline: {}", path.display());
         tracing::debug!(pid = sample.pid, %evidence, "model path detected in cmdline");
+        // L11a — derive the workload-type axis from the model file
+        // itself: .gguf/.ggml → LLM, "yolo"/"diffusion" basenames →
+        // Vision, "bge"/"minilm" → Embeddings, else Unknown.
+        let workload_category = workload_category_from_model_path(&path);
         return Some(ClassificationResult::ai_with_model(
             AICategory::Inference,
+            workload_category,
             evidence,
             path,
         ));
@@ -64,17 +71,41 @@ pub(crate) fn classify(sample: &ProcessSample) -> Option<ClassificationResult> {
         // GGUF_MODEL) but OLLAMA_MODELS points at a directory of models. Treat
         // anything ending in a strong extension as a path; otherwise skip the
         // model-name derivation but still classify as Inference.
+        // L11a — derive workload-type from the var name as a hint:
+        // LLAMA_MODEL_PATH / GGUF_MODEL / OLLAMA_MODELS all imply LLM;
+        // generic MODEL_PATH falls through to path-based derivation.
         if has_strong_extension(&value) {
+            let path = PathBuf::from(value);
+            let workload_category = workload_category_from_var_name(&var)
+                .unwrap_or_else(|| workload_category_from_model_path(&path));
             return Some(ClassificationResult::ai_with_model(
                 AICategory::Inference,
+                workload_category,
                 evidence,
-                PathBuf::from(value),
+                path,
             ));
         }
-        return Some(ClassificationResult::ai(AICategory::Inference, evidence));
+        let workload_category =
+            workload_category_from_var_name(&var).unwrap_or(crate::model::WorkloadCategory::Unknown);
+        return Some(ClassificationResult::ai(
+            AICategory::Inference,
+            workload_category,
+            evidence,
+        ));
     }
 
     None
+}
+
+/// L11a — derive a workload type from a strong model env var name.
+/// Returns `None` for the generic `MODEL_PATH` which is ambiguous.
+fn workload_category_from_var_name(var: &str) -> Option<crate::model::WorkloadCategory> {
+    match var {
+        "LLAMA_MODEL_PATH" | "GGUF_MODEL" | "OLLAMA_MODELS" => {
+            Some(crate::model::WorkloadCategory::LLM)
+        }
+        _ => None,
+    }
 }
 
 /// Scans cmdline tokens for a strong-extension model file path, handling both

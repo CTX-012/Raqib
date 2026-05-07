@@ -1,4 +1,4 @@
-use crate::model::{AICategory, ClassificationResult};
+use crate::model::{AICategory, ClassificationResult, WorkloadCategory};
 
 /// Keywords whose length is at or below this value require a word boundary on
 /// both sides. Without this, "ai" would match "mail", "ros" would match
@@ -8,60 +8,81 @@ use crate::model::{AICategory, ClassificationResult};
 /// safe as substrings because they don't appear embedded in common words.
 const BOUNDARY_MAX_LEN: usize = 3;
 
+/// L11a — `(keyword, AICategory, WorkloadCategory)` triple.
+/// `AICategory` is the workflow-phase axis; `WorkloadCategory` is
+/// the contract's workload-type axis. See `model::WorkloadCategory`
+/// for the rationale on keeping both side-by-side.
+type KeywordEntry = (&'static str, AICategory, WorkloadCategory);
+
 /// Checked against the bare process name (basename of argv[0]).
-static NAME_KEYWORDS: &[(&str, AICategory)] = &[
-    // Inference servers and runtimes
-    ("llama-server", AICategory::Inference),
-    ("llama-cpp", AICategory::Inference),
-    ("llamacpp", AICategory::Inference),
-    ("ollama", AICategory::Inference),
-    ("vllm", AICategory::Inference),
-    ("tritonserver", AICategory::Inference),
-    ("torchserve", AICategory::Inference),
-    ("trtllm", AICategory::Inference),
-    ("whisper-server", AICategory::Inference),
-    ("comfyui", AICategory::Inference),
-    ("invoke-ai", AICategory::Inference),
-    // Training launchers
-    ("deepspeed", AICategory::Training),
-    ("torchrun", AICategory::Training),
-    ("accelerate", AICategory::Training),
-    // Model management
-    ("huggingface-cli", AICategory::ModelDownload),
+static NAME_KEYWORDS: &[KeywordEntry] = &[
+    // Inference servers and runtimes — LLM unless noted otherwise.
+    ("llama-server", AICategory::Inference, WorkloadCategory::LLM),
+    ("llama-cpp", AICategory::Inference, WorkloadCategory::LLM),
+    ("llamacpp", AICategory::Inference, WorkloadCategory::LLM),
+    ("ollama", AICategory::Inference, WorkloadCategory::LLM),
+    ("vllm", AICategory::Inference, WorkloadCategory::LLM),
+    ("trtllm", AICategory::Inference, WorkloadCategory::LLM),
+    // Triton/TorchServe are general-purpose model servers — could host
+    // LLM or Vision; default Unknown until model-path or stdout signals
+    // disambiguate.
+    ("tritonserver", AICategory::Inference, WorkloadCategory::Unknown),
+    ("torchserve", AICategory::Inference, WorkloadCategory::Unknown),
+    // Audio (whisper) and image-gen (comfyui, invoke-ai) → Vision.
+    // Whisper produces text from audio; closer to Vision-class
+    // perceptual model than to LLM in v0.3's taxonomy.
+    ("whisper-server", AICategory::Inference, WorkloadCategory::Vision),
+    ("comfyui", AICategory::Inference, WorkloadCategory::Vision),
+    ("invoke-ai", AICategory::Inference, WorkloadCategory::Vision),
+    // Training launchers — workflow-phase distinction; the workload-
+    // type axis collapses these to Unknown per L11a's design comment.
+    ("deepspeed", AICategory::Training, WorkloadCategory::Unknown),
+    ("torchrun", AICategory::Training, WorkloadCategory::Unknown),
+    ("accelerate", AICategory::Training, WorkloadCategory::Unknown),
+    // Model management — same: collapses to Unknown.
+    ("huggingface-cli", AICategory::ModelDownload, WorkloadCategory::Unknown),
 ];
 
 /// Checked against all cmdline tokens joined with spaces. Keyword order matters:
 /// more specific patterns should appear before generic ones.
-static CMDLINE_KEYWORDS: &[(&str, AICategory)] = &[
-    // Inference servers
-    ("llama-server", AICategory::Inference),
-    ("llama-cpp", AICategory::Inference),
-    ("llamacpp", AICategory::Inference),
-    ("ollama", AICategory::Inference),
-    ("vllm", AICategory::Inference),
-    ("tritonserver", AICategory::Inference),
-    ("torchserve", AICategory::Inference),
-    ("trtllm", AICategory::Inference),
-    ("whisper", AICategory::Inference),
-    ("stable-diffusion", AICategory::Inference),
-    ("comfyui", AICategory::Inference),
+static CMDLINE_KEYWORDS: &[KeywordEntry] = &[
+    // Inference servers — LLM
+    ("llama-server", AICategory::Inference, WorkloadCategory::LLM),
+    ("llama-cpp", AICategory::Inference, WorkloadCategory::LLM),
+    ("llamacpp", AICategory::Inference, WorkloadCategory::LLM),
+    ("ollama", AICategory::Inference, WorkloadCategory::LLM),
+    ("vllm", AICategory::Inference, WorkloadCategory::LLM),
+    ("trtllm", AICategory::Inference, WorkloadCategory::LLM),
+    // General-purpose servers — Unknown until model-path narrows it.
+    ("tritonserver", AICategory::Inference, WorkloadCategory::Unknown),
+    ("torchserve", AICategory::Inference, WorkloadCategory::Unknown),
+    // Vision / image-gen / audio
+    ("whisper", AICategory::Inference, WorkloadCategory::Vision),
+    ("stable-diffusion", AICategory::Inference, WorkloadCategory::Vision),
+    ("comfyui", AICategory::Inference, WorkloadCategory::Vision),
+    ("ultralytics", AICategory::Inference, WorkloadCategory::Vision),
+    ("yolo", AICategory::Inference, WorkloadCategory::Vision),
+    // Embeddings — sentence-transformers and BAAI/bge models.
+    ("sentence-transformers", AICategory::Inference, WorkloadCategory::Embeddings),
+    ("sentence_transformers", AICategory::Inference, WorkloadCategory::Embeddings),
+    ("bge-", AICategory::Inference, WorkloadCategory::Embeddings),
     // Training
-    ("deepspeed", AICategory::Training),
-    ("torchrun", AICategory::Training),
-    ("accelerate", AICategory::Training),
+    ("deepspeed", AICategory::Training, WorkloadCategory::Unknown),
+    ("torchrun", AICategory::Training, WorkloadCategory::Unknown),
+    ("accelerate", AICategory::Training, WorkloadCategory::Unknown),
     // Model management
-    ("huggingface-cli", AICategory::ModelDownload),
+    ("huggingface-cli", AICategory::ModelDownload, WorkloadCategory::Unknown),
     // Frameworks and libraries (generic; lower priority than the above)
-    ("transformers", AICategory::Framework),
-    ("diffusers", AICategory::Framework),
-    ("pytorch", AICategory::Framework),
-    ("tensorflow", AICategory::Framework),
-    ("langchain", AICategory::Framework),
-    ("onnxruntime", AICategory::Framework),
+    ("transformers", AICategory::Framework, WorkloadCategory::Unknown),
+    ("diffusers", AICategory::Framework, WorkloadCategory::Vision),
+    ("pytorch", AICategory::Framework, WorkloadCategory::Unknown),
+    ("tensorflow", AICategory::Framework, WorkloadCategory::Unknown),
+    ("langchain", AICategory::Framework, WorkloadCategory::LLM),
+    ("onnxruntime", AICategory::Framework, WorkloadCategory::Unknown),
     // Short keywords — word-boundary matched
-    ("llm", AICategory::Inference),
-    ("tgi", AICategory::Inference),
-    ("gpt", AICategory::Inference),
+    ("llm", AICategory::Inference, WorkloadCategory::LLM),
+    ("tgi", AICategory::Inference, WorkloadCategory::LLM),
+    ("gpt", AICategory::Inference, WorkloadCategory::LLM),
 ];
 
 /// Case-insensitive keyword search with optional word-boundary enforcement.
@@ -102,11 +123,17 @@ fn is_word_char(b: u8) -> bool {
 }
 
 pub(crate) fn classify_by_name(name: &str) -> Option<ClassificationResult> {
-    NAME_KEYWORDS.iter().find_map(|&(kw, category)| {
-        smart_keyword_match(name, kw).then(|| {
-            ClassificationResult::ai(category, format!("process name matches keyword {:?}", kw))
+    NAME_KEYWORDS
+        .iter()
+        .find_map(|&(kw, category, workload_category)| {
+            smart_keyword_match(name, kw).then(|| {
+                ClassificationResult::ai(
+                    category,
+                    workload_category,
+                    format!("process name matches keyword {:?}", kw),
+                )
+            })
         })
-    })
 }
 
 /// Joins all cmdline tokens with spaces before matching so that word-boundary
@@ -116,11 +143,17 @@ pub(crate) fn classify_by_cmdline(cmdline: &[String]) -> Option<ClassificationRe
         return None;
     }
     let joined = cmdline.join(" ");
-    CMDLINE_KEYWORDS.iter().find_map(|&(kw, category)| {
-        smart_keyword_match(&joined, kw).then(|| {
-            ClassificationResult::ai(category, format!("cmdline matches keyword {:?}", kw))
+    CMDLINE_KEYWORDS
+        .iter()
+        .find_map(|&(kw, category, workload_category)| {
+            smart_keyword_match(&joined, kw).then(|| {
+                ClassificationResult::ai(
+                    category,
+                    workload_category,
+                    format!("cmdline matches keyword {:?}", kw),
+                )
+            })
         })
-    })
 }
 
 #[cfg(test)]

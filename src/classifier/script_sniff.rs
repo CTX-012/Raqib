@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use crate::model::{AICategory, ClassificationResult, ProcessSample};
+use crate::model::{AICategory, ClassificationResult, ProcessSample, WorkloadCategory};
 
 /// Limits how much of a script is read so a 500 MB generated file doesn't stall
 /// the classifier tick. Real AI import blocks appear in the first few KB anyway.
@@ -23,57 +23,66 @@ static MODEL_LITERAL_CALLS: &[&str] = &[
     "from_pretrained(",
 ];
 
-/// (pattern, category): matched line-by-line (trimmed) against script source.
-/// More specific patterns first so the returned evidence is maximally descriptive.
-static AI_PATTERNS: &[(&str, AICategory)] = &[
-    // HuggingFace model loading — very high confidence Inference
-    ("AutoModelForCausalLM", AICategory::Inference),
-    ("AutoModelForSeq2SeqLM", AICategory::Inference),
-    ("AutoModel.from_pretrained", AICategory::Inference),
-    ("pipeline(", AICategory::Inference),
+/// L11a — `(pattern, AICategory, WorkloadCategory)` triple. See
+/// `keyword_match.rs` and `model::WorkloadCategory` for the
+/// rationale on the dual-axis taxonomy. Matched line-by-line
+/// (trimmed) against script source. More specific patterns first
+/// so the returned evidence is maximally descriptive.
+static AI_PATTERNS: &[(&str, AICategory, WorkloadCategory)] = &[
+    // HuggingFace LLM model loading — high confidence
+    ("AutoModelForCausalLM", AICategory::Inference, WorkloadCategory::LLM),
+    ("AutoModelForSeq2SeqLM", AICategory::Inference, WorkloadCategory::LLM),
+    // Generic AutoModel could be LLM, embeddings, or vision — Unknown.
+    ("AutoModel.from_pretrained", AICategory::Inference, WorkloadCategory::Unknown),
+    ("pipeline(", AICategory::Inference, WorkloadCategory::Unknown),
     // vLLM
-    ("from vllm", AICategory::Inference),
-    ("import vllm", AICategory::Inference),
+    ("from vllm", AICategory::Inference, WorkloadCategory::LLM),
+    ("import vllm", AICategory::Inference, WorkloadCategory::LLM),
     // LlamaCPP
-    ("from llama_cpp", AICategory::Inference),
-    ("import llama_cpp", AICategory::Inference),
+    ("from llama_cpp", AICategory::Inference, WorkloadCategory::LLM),
+    ("import llama_cpp", AICategory::Inference, WorkloadCategory::LLM),
     // Ultralytics / YOLO
-    ("from ultralytics", AICategory::Inference),
-    ("import ultralytics", AICategory::Inference),
-    ("YOLO(", AICategory::Inference),
-    // ONNX Runtime
-    ("onnxruntime.InferenceSession", AICategory::Inference),
-    ("import onnxruntime", AICategory::Inference),
-    // TensorRT
-    ("import tensorrt", AICategory::Inference),
-    // Whisper
-    ("whisper.load_model", AICategory::Inference),
-    ("import whisper", AICategory::Inference),
-    // Diffusion models
-    ("from diffusers", AICategory::Inference),
-    ("import diffusers", AICategory::Inference),
-    // Generic torch model loading
-    ("torch.load(", AICategory::Inference),
-    ("tf.saved_model", AICategory::Inference),
+    ("from ultralytics", AICategory::Inference, WorkloadCategory::Vision),
+    ("import ultralytics", AICategory::Inference, WorkloadCategory::Vision),
+    ("YOLO(", AICategory::Inference, WorkloadCategory::Vision),
+    // Sentence-transformers / embedding models
+    ("from sentence_transformers", AICategory::Inference, WorkloadCategory::Embeddings),
+    ("import sentence_transformers", AICategory::Inference, WorkloadCategory::Embeddings),
+    ("SentenceTransformer(", AICategory::Inference, WorkloadCategory::Embeddings),
+    // ONNX Runtime — agnostic; could be LLM, Vision, or Embeddings.
+    ("onnxruntime.InferenceSession", AICategory::Inference, WorkloadCategory::Unknown),
+    ("import onnxruntime", AICategory::Inference, WorkloadCategory::Unknown),
+    // TensorRT — same; agnostic.
+    ("import tensorrt", AICategory::Inference, WorkloadCategory::Unknown),
+    // Whisper (speech-to-text) — Vision tier per the perceptual-model bucket.
+    ("whisper.load_model", AICategory::Inference, WorkloadCategory::Vision),
+    ("import whisper", AICategory::Inference, WorkloadCategory::Vision),
+    // Diffusion models → Vision
+    ("from diffusers", AICategory::Inference, WorkloadCategory::Vision),
+    ("import diffusers", AICategory::Inference, WorkloadCategory::Vision),
+    // Generic torch model loading — agnostic.
+    ("torch.load(", AICategory::Inference, WorkloadCategory::Unknown),
+    ("tf.saved_model", AICategory::Inference, WorkloadCategory::Unknown),
     // HuggingFace (generic — lower precedence than specific calls above)
-    ("from transformers", AICategory::Framework),
-    ("import transformers", AICategory::Framework),
-    // Training-specific patterns
-    ("from deepspeed", AICategory::Training),
-    ("import deepspeed", AICategory::Training),
-    ("torch.distributed", AICategory::Training),
-    ("trainer.train()", AICategory::Training),
-    ("model.fit(", AICategory::Training),
-    // Torch / TF framework presence
-    ("import torch", AICategory::Framework),
-    ("from torch", AICategory::Framework),
-    ("import tensorflow", AICategory::Framework),
-    ("from tensorflow", AICategory::Framework),
-    ("import jax", AICategory::Framework),
-    ("from jax", AICategory::Framework),
-    // LangChain
-    ("from langchain", AICategory::Framework),
-    ("import langchain", AICategory::Framework),
+    ("from transformers", AICategory::Framework, WorkloadCategory::Unknown),
+    ("import transformers", AICategory::Framework, WorkloadCategory::Unknown),
+    // Training-specific patterns — collapse to Unknown on the
+    // workload-type axis (training is a phase, not a type).
+    ("from deepspeed", AICategory::Training, WorkloadCategory::Unknown),
+    ("import deepspeed", AICategory::Training, WorkloadCategory::Unknown),
+    ("torch.distributed", AICategory::Training, WorkloadCategory::Unknown),
+    ("trainer.train()", AICategory::Training, WorkloadCategory::Unknown),
+    ("model.fit(", AICategory::Training, WorkloadCategory::Unknown),
+    // Torch / TF framework presence — Unknown.
+    ("import torch", AICategory::Framework, WorkloadCategory::Unknown),
+    ("from torch", AICategory::Framework, WorkloadCategory::Unknown),
+    ("import tensorflow", AICategory::Framework, WorkloadCategory::Unknown),
+    ("from tensorflow", AICategory::Framework, WorkloadCategory::Unknown),
+    ("import jax", AICategory::Framework, WorkloadCategory::Unknown),
+    ("from jax", AICategory::Framework, WorkloadCategory::Unknown),
+    // LangChain → LLM (its primary use case is LLM orchestration).
+    ("from langchain", AICategory::Framework, WorkloadCategory::LLM),
+    ("import langchain", AICategory::Framework, WorkloadCategory::LLM),
 ];
 
 /// Scans `content` for AI usage patterns.
@@ -82,19 +91,29 @@ static AI_PATTERNS: &[(&str, AICategory)] = &[
 /// `import torch` (Framework) on line 1 and a high-priority `pipeline(` (Inference)
 /// on line 10, the result is Inference. AI_PATTERNS is ordered from most to least
 /// specific, so iterating patterns first and lines second gives the right semantics.
-pub(crate) fn analyze_script_content(content: &str) -> Option<(AICategory, String)> {
+pub(crate) fn analyze_script_content(
+    content: &str,
+) -> Option<(AICategory, WorkloadCategory, String)> {
     let lines: Vec<&str> = content
         .lines()
         .map(str::trim)
         .filter(|l| !l.is_empty() && !l.starts_with('#'))
         .collect();
 
-    AI_PATTERNS.iter().find_map(|&(pattern, category)| {
-        lines
-            .iter()
-            .any(|line| line.contains(pattern))
-            .then(|| (category, format!("script contains {:?}", pattern)))
-    })
+    AI_PATTERNS
+        .iter()
+        .find_map(|&(pattern, category, workload_category)| {
+            lines
+                .iter()
+                .any(|line| line.contains(pattern))
+                .then(|| {
+                    (
+                        category,
+                        workload_category,
+                        format!("script contains {:?}", pattern),
+                    )
+                })
+        })
 }
 
 /// Returns the script path for Python interpreter processes.
@@ -142,7 +161,7 @@ pub(crate) fn classify(sample: &ProcessSample) -> Option<ClassificationResult> {
         })
         .ok()?;
 
-    let (category, evidence) = analyze_script_content(&content)?;
+    let (category, workload_category, evidence) = analyze_script_content(&content)?;
     tracing::debug!(
         pid = sample.pid,
         script = %script_path.display(),
@@ -152,16 +171,35 @@ pub(crate) fn classify(sample: &ProcessSample) -> Option<ClassificationResult> {
 
     // If the same script embeds a literal model path / identifier we prefer
     // the richer classification so the UI shows e.g. "yolov8n" rather than a
-    // bare "Inference" category.
+    // bare "Inference" category. The model-literal path may also refine the
+    // workload type (e.g. a "yolov8n.pt" literal in an `AutoModel` script
+    // upgrades the Unknown classification to Vision); keep whichever is
+    // more specific.
     if let Some(model_literal) = extract_model_literal(&content) {
         let path = resolve_model_path(&model_literal, sample.cwd.as_deref(), script_path);
         let evidence = format!("{} + model literal `{}`", evidence, model_literal);
+        let workload_from_path = crate::model::workload_category_from_model_path(&path);
+        // Prefer the per-pattern workload_category when it's
+        // already specific (LLM/Vision/Embeddings); fall back to
+        // the path-derived one if the pattern was Unknown.
+        let resolved_workload = if matches!(workload_category, WorkloadCategory::Unknown) {
+            workload_from_path
+        } else {
+            workload_category
+        };
         return Some(ClassificationResult::ai_with_model(
-            category, evidence, path,
+            category,
+            resolved_workload,
+            evidence,
+            path,
         ));
     }
 
-    Some(ClassificationResult::ai(category, evidence))
+    Some(ClassificationResult::ai(
+        category,
+        workload_category,
+        evidence,
+    ))
 }
 
 /// Scans `content` for the first literal-string argument passed to a known
@@ -244,14 +282,14 @@ mod tests {
     #[test]
     fn detects_torch_import() {
         let src = "import os\nimport torch\nmodel = torch.nn.Linear(10, 1)\n";
-        let (cat, _) = analyze_script_content(src).expect("should detect");
+        let (cat, _, _) = analyze_script_content(src).expect("should detect");
         assert_eq!(cat, AICategory::Framework);
     }
 
     #[test]
     fn detects_pipeline_call() {
         let src = "from transformers import AutoTokenizer\npipe = pipeline(\"text-generation\", model=\"gpt2\")\n";
-        let (cat, _) = analyze_script_content(src).expect("should detect");
+        let (cat, _, _) = analyze_script_content(src).expect("should detect");
         assert_eq!(cat, AICategory::Inference);
     }
 
@@ -259,21 +297,21 @@ mod tests {
     fn detects_from_transformers_import() {
         let src = "from transformers import AutoTokenizer, AutoModelForCausalLM\n";
         // AutoModelForCausalLM appears in the import → Inference beats Framework
-        let (cat, _) = analyze_script_content(src).expect("should detect");
+        let (cat, _, _) = analyze_script_content(src).expect("should detect");
         assert_eq!(cat, AICategory::Inference);
     }
 
     #[test]
     fn detects_llama_cpp() {
         let src = "from llama_cpp import Llama\nllm = Llama(model_path=\"model.gguf\")\n";
-        let (cat, _) = analyze_script_content(src).expect("should detect");
+        let (cat, _, _) = analyze_script_content(src).expect("should detect");
         assert_eq!(cat, AICategory::Inference);
     }
 
     #[test]
     fn detects_deepspeed_training() {
         let src = "import deepspeed\nengine, _, _, _ = deepspeed.initialize(model=model)\n";
-        let (cat, _) = analyze_script_content(src).expect("should detect");
+        let (cat, _, _) = analyze_script_content(src).expect("should detect");
         assert_eq!(cat, AICategory::Training);
     }
 

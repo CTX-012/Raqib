@@ -14,7 +14,7 @@ use crate::governor::manual::{AuditLogEntry, KillSource, ManualKillAction};
 use crate::governor::{AuditWriter, GovernorExecutor, KillAction, ManualKiller};
 use crate::lifecycle::tracker::LifecycleTracker;
 use crate::lifecycle::{LifecycleSnapshot, LifecycleSummary};
-use crate::model::{AICategory, ClassificationResult};
+use crate::model::{AICategory, ClassificationResult, WorkloadCategory};
 use crate::platform::{self, GpuSnapshot, PlatformError, PlatformSnapshot};
 use crate::storage::{LogStore, RunRecord, RunStore};
 use crate::telemetry::samplers::{
@@ -41,6 +41,13 @@ pub struct AnnotatedProcess {
     pub pid: u32,
     pub name: String,
     pub category: AICategory,
+    /// L11a / UX_CONTRACT.md §1 region 4 — contract-aligned workload
+    /// type for grouping in the workloads panel and per-row metric
+    /// formatting (§2). Sits alongside `category` (which classifies
+    /// workflow phase); the two enums measure different axes and are
+    /// kept side-by-side. See `model::WorkloadCategory` for the
+    /// rationale.
+    pub workload_category: WorkloadCategory,
     pub evidence: String,
     /// Short model name (e.g. "qwen2.5-0.5b-instruct-q8_0") when the
     /// classifier extracted a concrete weight file; None otherwise.
@@ -389,6 +396,7 @@ impl Runtime {
             .map(|p| {
                 let ClassificationResult {
                     category,
+                    workload_category,
                     evidence,
                     model_name,
                     model_path,
@@ -404,6 +412,7 @@ impl Runtime {
                     pid: p.pid,
                     name: p.name.clone(),
                     category,
+                    workload_category,
                     evidence,
                     model_name,
                     cpu_pct,

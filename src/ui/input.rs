@@ -43,6 +43,10 @@ pub fn translate(key: KeyEvent, app: &App) -> Option<Action> {
         KeyCode::Char('?') => Some(Action::ToggleHelp),
         KeyCode::Char('k') => Some(Action::KillOrConfirm),
         KeyCode::Char('h') => Some(Action::ToggleHistory),
+        // §6 — `a` acknowledges all visible alerts. Silent (no
+        // status footer) when no alerts are active; the dispatch
+        // handler in `apply_action` decides.
+        KeyCode::Char('a') => Some(Action::AcknowledgeAlerts),
         // §6 — `g` opens Grafana for the focused workload.
         KeyCode::Char('g') => Some(Action::OpenGrafana),
         KeyCode::Char('j') | KeyCode::Down => Some(Action::SelectDown),
@@ -93,6 +97,19 @@ mod tests {
         assert_eq!(
             translate(key(KeyCode::Char('k')), &app),
             Some(Action::KillOrConfirm)
+        );
+    }
+
+    /// L7 — `a` acknowledges visible alerts. The dispatch handler
+    /// (`apply_action`) decides whether to actually call ack_all
+    /// based on whether any alerts are active; the input layer
+    /// just routes the press.
+    #[test]
+    fn a_key_emits_acknowledge_alerts_action() {
+        let app = App::new();
+        assert_eq!(
+            translate(key(KeyCode::Char('a')), &app),
+            Some(Action::AcknowledgeAlerts)
         );
     }
 

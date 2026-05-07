@@ -206,11 +206,12 @@ fn apply_action(action: Action, runtime: &mut Runtime, app: &mut App) {
             // flows through this cascade.
             app.handle_escape();
         }
-        // §4 — `a` acknowledges all visible alerts. The alert state
-        // machine lands in L7; this arm is intentionally a no-op until
-        // then so the binding is reserved (and clippy doesn't gripe
-        // about an incomplete match).
-        Action::AcknowledgeAlerts => {}
+        // §4 — `a` acknowledges all visible alerts. Silent when
+        // no alerts are active; otherwise sets a transient status
+        // footer via `App::acknowledge_alerts`.
+        Action::AcknowledgeAlerts => {
+            app.acknowledge_alerts();
+        }
         // §1 region 5 — `t` cycles Top processes sort. Wired in L14
         // alongside the new panel.
         Action::CycleTopSort => {}

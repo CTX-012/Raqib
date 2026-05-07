@@ -123,6 +123,22 @@ impl App {
         &mut self.alerts
     }
 
+    /// L7 — handle the `a` key by ack'ing every active alert and
+    /// surfacing a transient status footer ("Acknowledged N alerts")
+    /// per `ux_contract::status::ALERTS_ACKNOWLEDGED`. Silent when
+    /// no alerts are active — pressing `a` on an empty alert region
+    /// shouldn't pop a "Acknowledged 0 alerts" message at the user.
+    /// Returns the count for the dispatch site / tests.
+    pub fn acknowledge_alerts(&mut self) -> usize {
+        let count = self.alerts.ack_all();
+        if count > 0 {
+            let msg = ux_contract::status::ALERTS_ACKNOWLEDGED
+                .replace("{n}", &count.to_string());
+            self.set_status(msg);
+        }
+        count
+    }
+
     /// Per-tick alert observation. Reads the metrics that already
     /// flow through `RuntimeState` (system RAM, total VRAM,
     /// per-process VRAM, KV cache occupancy) plus `App`'s own
@@ -626,5 +642,69 @@ mod tests {
                 .workload_status(ux_contract::WorkloadStatus::Critical),
             "X"
         );
+    }
+
+    // ====================================================================
+    // L7 / UX_CONTRACT.md §6 — `acknowledge_alerts` dispatch helper.
+    // ====================================================================
+
+    /// Pressing `a` with nothing in the alert region must not pop
+    /// "Acknowledged 0 alerts" at the user — that would teach an
+    /// operator that the keymap noise is normal. Silent no-op.
+    #[test]
+    fn acknowledge_alerts_is_silent_when_none_active() {
+        let mut app = App::new();
+        let count = app.acknowledge_alerts();
+        assert_eq!(count, 0);
+        assert_eq!(app.status(), None);
+    }
+
+    #[test]
+    fn acknowledge_alerts_returns_count_and_sets_status_when_active() {
+        use crate::ui::alerts::WorkloadRef;
+        let mut app = App::new();
+        let now = std::time::Instant::now();
+        // Two instant-fire alerts → two Active slots.
+        app.alerts_mut().observe(
+            now,
+            WorkloadRef::workload(206, "phi3"),
+            ux_contract::AlertId::GovernorArmed,
+            true,
+        );
+        app.alerts_mut().observe(
+            now,
+            WorkloadRef::workload(207, "vllm"),
+            ux_contract::AlertId::OomDetected,
+            true,
+        );
+        assert_eq!(app.alerts().visible().len(), 2);
+
+        let count = app.acknowledge_alerts();
+        assert_eq!(count, 2);
+        // Both moved to Suppressed → out of visible.
+        assert_eq!(app.alerts().visible().len(), 0);
+        // Status footer shows the contract template with {n} = 2.
+        assert_eq!(app.status(), Some("Acknowledged 2 alerts"));
+    }
+
+    #[test]
+    fn acknowledge_alerts_uses_contract_template_with_substitution() {
+        // L7 design lock — the status string is sourced from
+        // `ux_contract::status::ALERTS_ACKNOWLEDGED`, not a local
+        // literal. Pin against the contract const so a future
+        // local-literal regression breaks here, not silently.
+        use crate::ui::alerts::WorkloadRef;
+        let mut app = App::new();
+        let now = std::time::Instant::now();
+        app.alerts_mut().observe(
+            now,
+            WorkloadRef::workload(206, "phi3"),
+            ux_contract::AlertId::GovernorArmed,
+            true,
+        );
+        app.acknowledge_alerts();
+        let status = app.status().unwrap_or("");
+        let expected = ux_contract::status::ALERTS_ACKNOWLEDGED.replace("{n}", "1");
+        assert_eq!(status, expected);
     }
 }

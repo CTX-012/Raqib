@@ -2,10 +2,9 @@
 //! is shared state — callers shouldn't be able to render a panel into the
 //! wrong region.
 
+mod activity;
 pub mod alerts;
 pub mod armed_banner;
-mod audit;
-mod completed;
 mod help;
 mod history_overlay;
 pub mod postmortem;
@@ -91,7 +90,7 @@ fn render_default(f: &mut Frame, area: Rect, state: &RuntimeState, app: &App) {
     render_status_bar(f, layout[0], state, app);
     vitals::render(f, layout[1], state);
     workloads::render(f, layout[2], state, app);
-    completed::render(f, layout[3], state);
+    activity::render(f, layout[3], state);
     render_footer(f, layout[4], app);
 }
 

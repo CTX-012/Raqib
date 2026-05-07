@@ -36,8 +36,6 @@ const RENDER_CALL_PATTERNS: &[&str] = &[
 const DEFERRED_FILES: &[&str] = &[
     "src/ui/panels/mod.rs",          // L25 (header) + L25 (footer keymap)
     "src/ui/panels/armed_banner.rs", // L7 ack + L24 Esc cascade (CAR-4 resolved in v0.3.2 batch)
-    "src/ui/panels/audit.rs",        // L15 (merged into Activity)
-    "src/ui/panels/completed.rs",    // L15 (merged into Activity)
     "src/ui/panels/help.rs",         // CAR-1 resolved in v0.3.2 (help::* module)
     "src/ui/panels/history_overlay.rs", // CAR-6: overlay header + column labels not in v0.3
     "src/ui/panels/postmortem.rs",   // L16 split + CAR-2 resolved in v0.3.2 (postmortem_labels::*)

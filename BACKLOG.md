@@ -108,6 +108,25 @@ pub mod degraded_line {
 
 ## v1.1 (post-v1.0)
 
+### Activity panel: surface AlertState raise / ack events
+
+**Surfaced by:** L15. UX_CONTRACT.md §1 region 6 illustrates the
+Activity panel with `"08:51:09  alert raised   VRAM 91%"` rows;
+§4 says "Each raise + ack writes to Activity panel." The L5/L6
+`AlertState::observe()` already returns `AlertEvent::Fired` /
+`AlertEvent::Cleared` on transitions, but those events aren't
+accumulated into RuntimeState — they're consumed and dropped at
+the call site.
+
+L15 ships the existing-data merge (run summaries + governor
+audit + regressions). v1.1 adds an event buffer (likely a
+`VecDeque<AlertActivityEvent>` on App or RuntimeState, bounded
+by the same audit-history config) and a `build_events` source
+in `panels::activity` that consumes it.
+
+Out of L15's "existing-data merge" scope per the orchestrator's
+brief; non-blocking for v1.0.
+
 ### enum migration: move `WorkloadCategory` into `ux_contract`
 
 **Surfaced by:** L11c. Contract refined CAR-8 to const-only group

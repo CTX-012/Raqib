@@ -1,5 +1,6 @@
 mod keyword_match;
 mod model_extract;
+mod ros2;
 mod script_sniff;
 
 use crate::model::{ClassificationResult, ProcessSample};
@@ -7,12 +8,20 @@ use crate::model::{ClassificationResult, ProcessSample};
 /// Classifies a process sample into an AI workload category.
 ///
 /// Priority order (first match wins):
+/// 0. **ROS2 signals** (env vars / cmdline / linked libraries) →
+///    `WorkloadCategory::ROS2`. Runs first so a perception node that
+///    also imports `torch` for inference still classifies as ROS2 —
+///    grouping it under LLM would hide it from the operator's ROS2
+///    section per UX_CONTRACT.md §1 region 4.
 /// 1. Model file in cmdline or strong model env var → Inference (most specific signal)
 /// 2. Known AI process name → category from NAME_KEYWORDS table
 /// 3. AI keyword in any cmdline token → category from CMDLINE_KEYWORDS table
 /// 4. Python script source contains AI import/call → category from AI_PATTERNS
 /// 5. NotAi
 pub fn classify_process(sample: &ProcessSample) -> ClassificationResult {
+    if let Some(result) = ros2::classify(sample) {
+        return result;
+    }
     if let Some(result) = model_extract::classify(sample) {
         return result;
     }
@@ -313,28 +322,89 @@ mod tests {
         assert_eq!(result.workload_category, WorkloadCategory::Unknown);
     }
 
+    // L9 — ROS2 detection lives in `classifier/ros2.rs` and runs
+    // first in dispatch. The L11a "no leakage" defensive guard is
+    // retired; the tests below cover the real signals.
+
     #[test]
-    fn ros2_processes_are_not_yet_detected() {
-        // Defensive — L9 wires ROS2 detection. Until then no
-        // classifier path returns ROS2; an rclpy-flavored process
-        // either falls through to NotAi or, if a generic Python
-        // import keyword fires, lands in Unknown. This test pins
-        // "no ROS2 leakage from existing signals" so a future
-        // accidental match doesn't slip in before L9.
+    fn ros2_process_with_ros_domain_id_env_classified_as_ros2() {
+        let s = sample_with_env(
+            "python3",
+            &["python3", "perception_node.py"],
+            &[("ROS_DOMAIN_ID", "0")],
+        );
+        assert_eq!(
+            classify_process(&s).workload_category,
+            WorkloadCategory::ROS2
+        );
+    }
+
+    #[test]
+    fn ros2_process_with_rmw_implementation_env_classified_as_ros2() {
+        let s = sample_with_env(
+            "rclcpp_component_container",
+            &["rclcpp_component_container"],
+            &[("RMW_IMPLEMENTATION", "rmw_cyclonedds_cpp")],
+        );
+        assert_eq!(
+            classify_process(&s).workload_category,
+            WorkloadCategory::ROS2
+        );
+    }
+
+    #[test]
+    fn ros2_cli_command_classified_as_ros2() {
+        let s = sample("ros2", &["ros2", "run", "demo_nodes_cpp", "talker"]);
+        assert_eq!(
+            classify_process(&s).workload_category,
+            WorkloadCategory::ROS2
+        );
+    }
+
+    #[test]
+    fn ros2_priority_over_torch_imports() {
+        // A perception node that ALSO has torch loaded in the
+        // process — without ROS2 priority, the script-sniff
+        // classifier would pick up a generic torch signal and
+        // mis-classify as Unknown. With ROS2 detection running
+        // first in dispatch, the ROS_DOMAIN_ID env signal wins
+        // and the row groups under ROS2 in the workloads panel.
         let s = sample_with_env(
             "python3",
             &["python3", "perception_node.py"],
             &[
-                ("RMW_IMPLEMENTATION", "rmw_cyclonedds_cpp"),
                 ("ROS_DOMAIN_ID", "0"),
+                ("PYTHONPATH", "/opt/ros/humble/lib/python3.10/site-packages"),
             ],
         );
-        let result = classify_process(&s);
-        assert_ne!(
-            result.workload_category,
-            WorkloadCategory::ROS2,
-            "ROS2 must not fire from any classifier path until L9 wires detection"
+        assert_eq!(
+            classify_process(&s).workload_category,
+            WorkloadCategory::ROS2
         );
+    }
+
+    #[test]
+    fn non_ros2_process_with_python_not_classified_as_ros2() {
+        // A regular Python ML process must fall through to its
+        // existing classifier (Inference / Framework / etc.) —
+        // ROS2 detection mustn't false-positive on bare Python.
+        let s = sample("python3", &["python3", "train.py"]);
+        assert_ne!(
+            classify_process(&s).workload_category,
+            WorkloadCategory::ROS2
+        );
+    }
+
+    #[test]
+    fn missing_ros2_signals_falls_through_to_other_classifier() {
+        // An LLM process (Ollama) without any ROS2 signals must
+        // continue to land in `WorkloadCategory::LLM`. Confirms
+        // the dispatch fall-through path the L9 reordering
+        // preserves.
+        let s = sample("ollama", &["ollama", "serve"]);
+        let result = classify_process(&s);
+        assert_eq!(result.category, AICategory::Inference);
+        assert_eq!(result.workload_category, WorkloadCategory::LLM);
     }
 
     #[test]

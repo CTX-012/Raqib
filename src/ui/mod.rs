@@ -8,6 +8,7 @@
 //! `run` owns the terminal lifecycle. It returns ownership of the `Runtime`
 //! so callers can shut it down cleanly after the TUI exits.
 
+pub mod alerts;
 pub mod app;
 pub mod input;
 pub mod panels;

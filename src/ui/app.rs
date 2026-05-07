@@ -405,15 +405,19 @@ impl App {
         self.visible(state).get(self.selected).copied()
     }
 
-    /// PIDs visible in the AI Workloads panel.
-    /// Stable PID-sorted so user selection doesn't jump between ticks.
-    /// L2b removed the focus-panel switch (Registry/Rogues/Culprits) —
-    /// only the AI Workloads list remains in the v1.0 layout. L2c
-    /// removed the substring filter (deferred to v1.1).
+    /// PIDs visible in the AI Workloads panel, in render order
+    /// (grouped by `WorkloadCategory` per UX_CONTRACT.md §1 region 4,
+    /// then sorted within group by status priority then PID).
+    /// Selection navigation reads this so `j`/`K` move through the
+    /// rows in the same order the user sees them on screen — group
+    /// headers are not selectable; this method returns workload PIDs
+    /// only.
+    ///
+    /// L2b removed the focus-panel switch; L2c removed the substring
+    /// filter (deferred to v1.1); L11b moved sort-order ownership
+    /// from this method to `panels::workloads::ordered_pids`.
     pub fn visible(&self, state: &RuntimeState) -> Vec<u32> {
-        let mut pids: Vec<u32> = state.ai_processes().map(|p| p.pid).collect();
-        pids.sort();
-        pids
+        crate::ui::panels::workloads::ordered_pids(state, self)
     }
 }
 
@@ -441,6 +445,9 @@ mod tests {
             cpu_pct: 0.0,
             rss_mb: 0,
             vram_bytes: None,
+            // App-state tests don't exercise the Loading warmup gate;
+            // any non-zero `Instant` works.
+            first_observed_at: std::time::Instant::now(),
         }
     }
 

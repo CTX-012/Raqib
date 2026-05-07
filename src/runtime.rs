@@ -61,6 +61,15 @@ pub struct AnnotatedProcess {
     /// Per-process VRAM in bytes, aggregated across GPU devices. None when
     /// NVML didn't report this process or no GPU is present.
     pub vram_bytes: Option<u64>,
+    /// L11b — first tick at which this PID was observed by the
+    /// runtime. Drives `WorkloadStatus::Loading` per UX_CONTRACT.md
+    /// §3: workloads with `(now - first_observed_at) <
+    /// BASELINE_WARMUP_SECS` render as Loading regardless of current
+    /// metric values. Distinct from OS-level spawn time
+    /// (`LifecycleSummary::spawn_time`); a process that was already
+    /// running before edge_monitor started has a young
+    /// `first_observed_at` even though it has a long process age.
+    pub first_observed_at: Instant,
 }
 
 /// Aggregated state from the most recent tick. Cheap to clone for the UI
@@ -232,6 +241,13 @@ pub struct Runtime {
     /// timestamp that reading was taken at. Used to compute cpu_pct as
     /// delta_ticks / CLK_TCK / elapsed_secs × 100.
     prev_cpu: HashMap<u32, (u64, Instant)>,
+    /// L11b — first tick at which each PID was observed by this
+    /// runtime instance. Populated lazily via `or_insert_with(Instant::now)`
+    /// in the per-tick annotation pass; entries are removed when a
+    /// PID exits (covered by the existing `pid_to_model_path` /
+    /// telemetry cleanup hooks). Drives the Loading-state warmup
+    /// gate in `compute_workload_status`.
+    pid_first_seen_at: HashMap<u32, Instant>,
     /// Cached USER_HZ. Resolved once at startup via sysconf(_SC_CLK_TCK);
     /// falls back to the standard Linux default of 100 if the call fails.
     clk_tck: u64,
@@ -297,6 +313,7 @@ impl Runtime {
             cold_load_seconds_by_model: HashMap::new(),
             fingerprinter,
             pid_to_model_path: HashMap::new(),
+            pid_first_seen_at: HashMap::new(),
             governor_killed_pids: HashMap::new(),
             prev_cpu: HashMap::new(),
             clk_tck: read_clk_tck(),
@@ -408,6 +425,8 @@ impl Runtime {
                 }
                 let cpu_pct = self.compute_cpu_pct(p.pid, p.cpu_time_ticks, now);
                 next_cpu.insert(p.pid, (p.cpu_time_ticks, now));
+                let first_observed_at =
+                    *self.pid_first_seen_at.entry(p.pid).or_insert(now);
                 AnnotatedProcess {
                     pid: p.pid,
                     name: p.name.clone(),
@@ -418,6 +437,7 @@ impl Runtime {
                     cpu_pct,
                     rss_mb: p.rss_bytes / (1024 * 1024),
                     vram_bytes: vram_by_pid.get(&p.pid).copied(),
+                    first_observed_at,
                 }
             })
             .collect();
@@ -593,6 +613,10 @@ impl Runtime {
                 d.forget(summary.pid);
             }
             self.pid_to_model_path.remove(&summary.pid);
+            // L11b — drop the warmup-gate timestamp so a recycled PID
+            // starts fresh in the Loading state instead of inheriting
+            // the prior process's age.
+            self.pid_first_seen_at.remove(&summary.pid);
         }
 
         let decisions = self.governor.evaluate(&lifecycle);

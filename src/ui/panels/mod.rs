@@ -9,8 +9,8 @@ mod completed;
 mod help;
 mod history_overlay;
 pub mod postmortem;
-mod registry;
 mod vitals;
+pub mod workloads;
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -90,7 +90,7 @@ fn render_default(f: &mut Frame, area: Rect, state: &RuntimeState, app: &App) {
 
     render_status_bar(f, layout[0], state, app);
     vitals::render(f, layout[1], state);
-    registry::render(f, layout[2], state, app);
+    workloads::render(f, layout[2], state, app);
     completed::render(f, layout[3], state);
     render_footer(f, layout[4], app);
 }

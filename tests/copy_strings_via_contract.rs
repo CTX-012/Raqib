@@ -41,7 +41,7 @@ const DEFERRED_FILES: &[&str] = &[
     "src/ui/panels/help.rs",         // CAR-1 resolved in v0.3.2 (help::* module)
     "src/ui/panels/history_overlay.rs", // CAR-6: overlay header + column labels not in v0.3
     "src/ui/panels/postmortem.rs",   // L16 split + CAR-2 resolved in v0.3.2 (postmortem_labels::*)
-    "src/ui/panels/registry.rs",     // L11 (rename to workloads.rs); filter empty-state goes away in L2c
+    "src/ui/panels/workloads.rs",    // L11b created this file; "cold-loading" + group labels pending CAR-7/CAR-8
     "src/ui/panels/vitals.rs",       // L11 (rename to System)
 ];
 

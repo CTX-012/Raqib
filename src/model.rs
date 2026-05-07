@@ -171,6 +171,49 @@ fn model_name_from_path(path: &std::path::Path) -> Option<String> {
         .map(|s| s.to_string())
 }
 
+impl WorkloadCategory {
+    /// Group-header label for the workloads panel. UX_CONTRACT.md §1
+    /// region 4 names the categories ("LLM" / "Vision" / "ROS2" /
+    /// "Embeddings" / "Unknown") but v0.3.2 doesn't expose them as
+    /// `ux_contract::*` constants — see CAR-8 in `BACKLOG.md`. Once
+    /// the contract amendment lands, L25 (or earlier) swaps these
+    /// for the const references.
+    pub fn label(self) -> &'static str {
+        match self {
+            WorkloadCategory::LLM => "LLM",
+            WorkloadCategory::Vision => "Vision",
+            WorkloadCategory::ROS2 => "ROS2",
+            WorkloadCategory::Embeddings => "Embeddings",
+            WorkloadCategory::Unknown => "Unknown",
+        }
+    }
+
+    /// Display order per UX_CONTRACT.md §1 region 4
+    /// ("LLM → Vision → ROS2 → Embeddings → Unknown"). Lower = first.
+    pub fn display_order(self) -> u8 {
+        match self {
+            WorkloadCategory::LLM => 0,
+            WorkloadCategory::Vision => 1,
+            WorkloadCategory::ROS2 => 2,
+            WorkloadCategory::Embeddings => 3,
+            WorkloadCategory::Unknown => 4,
+        }
+    }
+
+    /// Every variant in display order — used by the panel to walk
+    /// categories deterministically (empty groups are filtered out
+    /// at render time per §1 region 4).
+    pub fn all_in_order() -> [WorkloadCategory; 5] {
+        [
+            WorkloadCategory::LLM,
+            WorkloadCategory::Vision,
+            WorkloadCategory::ROS2,
+            WorkloadCategory::Embeddings,
+            WorkloadCategory::Unknown,
+        ]
+    }
+}
+
 /// L11a — derive a [`WorkloadCategory`] from a model file path.
 ///
 /// Used by the model-extract classifier path (it sees a model file

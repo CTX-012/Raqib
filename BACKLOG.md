@@ -37,41 +37,35 @@ suite). Not a regression — pre-existed across L1-L8.
 Proposal: tighten the test bounds or use a synthetic clock to
 avoid wall-clock dependency. Low priority; not blocking ship.
 
-## Pending Contract Amendment Requests
+## Resolved Contract Amendment Requests
 
-### CAR-7: `ux_contract::status::COLD_LOADING`
+### CAR-7 — RESOLVED in v0.3.4
 
-**Surfaced by:** L11b orchestrator brief referenced
-`ux_contract::status::COLD_LOADING` for the Loading-state primary
-metric. v0.3.2 doesn't have it. L11b uses a local `"cold-loading"`
-literal pending the contract amendment. L25 (footer / status
-rewrite) is the natural row to consume the contract const once it
-exists.
+`ux_contract::status::COLD_LOADING = "cold-loading"`. Adopted by
+L11c in `src/ui/panels/workloads.rs::primary_metric`; the local
+`COLD_LOADING` literal was retired.
 
-Suggested addition to `ux_contract::status::*`:
-```rust
-/// Workload-row primary-metric replacement when the workload is in
-/// `WorkloadStatus::Loading`. UX_CONTRACT.md §2.
-pub const COLD_LOADING: &str = "cold-loading";
-```
+### CAR-8 — RESOLVED in v0.3.4
 
-### CAR-8: `ux_contract::categories::*` group labels
+`ux_contract::workload_category::GROUP_HEADER_*` (LLM / VISION /
+ROS2 / EMBEDDINGS / UNKNOWN). Contract refined the proposal to
+ship the full rule-line strings (`"── LLM ──"` etc.), not just
+labels — saves a `format!` at every render. Adopted by L11c via
+`panels::workloads::category_header`. The local
+`WorkloadCategory::label()` helper was retired; the
+`WorkloadCategory` enum itself stays in this tree per the
+orchestrator's "KEEP CONST-ONLY for v1.0" decision.
 
-**Surfaced by:** L11b group-header rendering. The contract §1 region 4
-shows "LLM" / "Vision" / "ROS2" / "Embeddings" / "Unknown" as
-group-section labels but no const exists. L11b uses a local
-`WorkloadCategory::label()` method.
+## v1.1 (post-v1.0)
 
-Suggested addition (new module):
-```rust
-pub mod categories {
-    pub const LLM: &str = "LLM";
-    pub const VISION: &str = "Vision";
-    pub const ROS2: &str = "ROS2";
-    pub const EMBEDDINGS: &str = "Embeddings";
-    pub const UNKNOWN: &str = "Unknown";
-}
-```
+### enum migration: move `WorkloadCategory` into `ux_contract`
 
-L25 / contract polish will swap the local labels for the const
-references once they exist.
+**Surfaced by:** L11c. Contract refined CAR-8 to const-only group
+headers rather than making the enum contract-owned. For v1.0 the
+enum lives in `crate::model::WorkloadCategory` and the panel maps
+it locally to the contract const. v1.1+ may want to move the enum
+itself to `ux_contract::WorkloadCategory` so both the Linux and
+Windows binaries share the type. Mid-v1.0 refactor is out of
+scope.
+
+### telemetry: query Triton `/v2/models` to refine WorkloadCategory for hosted models

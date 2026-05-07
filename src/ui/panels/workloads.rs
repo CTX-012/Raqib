@@ -12,17 +12,16 @@
 //! §2; the `Loading` `WorkloadStatus` overrides the type-specific
 //! metric with `"cold-loading"`.
 //!
-//! ## Local strings pending CARs
+//! ## Contract const adoption
 //!
-//! - Group-header labels (`"LLM"`, `"Vision"`, …) come from
-//!   `WorkloadCategory::label()`. `BACKLOG.md` flags CAR-8 to move
-//!   these into `ux_contract::categories::*`.
-//! - The `"cold-loading"` literal is the §2 Loading metric. CAR-7
-//!   tracks the `ux_contract::status::COLD_LOADING` const.
-//!
-//! Until those CARs land, this panel is in `DEFERRED_FILES` of the
-//! L1 copy-strings guard test. L25 will swap the locals for the
-//! contract const references.
+//! L11c (this row) consumes ux_contract v0.3.4 where Contract
+//! shipped CAR-7 (`status::COLD_LOADING`) and CAR-8
+//! (`workload_category::GROUP_HEADER_*`). The Loading-state primary
+//! metric and the per-category group headers now route through the
+//! contract const, not local literals. `WorkloadCategory` itself
+//! stays a local enum — Contract refined CAR-8 to const-only and
+//! the migration of the enum into the contract is filed as v1.1+
+//! per BACKLOG.md.
 
 use std::time::Instant;
 
@@ -33,6 +32,11 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{List, ListItem, ListState, Paragraph, Wrap};
 
 use ux_contract::WorkloadStatus;
+use ux_contract::status::COLD_LOADING;
+use ux_contract::workload_category::{
+    GROUP_HEADER_EMBEDDINGS, GROUP_HEADER_LLM, GROUP_HEADER_ROS2, GROUP_HEADER_UNKNOWN,
+    GROUP_HEADER_VISION,
+};
 
 use crate::model::WorkloadCategory;
 use crate::runtime::{
@@ -42,13 +46,27 @@ use crate::runtime::{
 use super::super::app::App;
 use super::panel_block;
 
-/// Local placeholder for `ux_contract::status::COLD_LOADING` (CAR-7).
-const COLD_LOADING: &str = "cold-loading";
-
 /// Local placeholder for the no-data primary metric — non-LLM
 /// workloads without their type-specific metric stream show this.
-/// Matches the contract's "(no metrics)" fallback in §2.
+/// Matches the contract's "(no metrics)" fallback in §2 but no
+/// Contract const exists for it yet (filed in BACKLOG as a future
+/// CAR; low priority since only one render site uses it).
 const NO_METRICS: &str = "(no metrics)";
+
+/// L11c — map the local `WorkloadCategory` enum to the v0.3.4
+/// contract group-header const. Contract refined CAR-8 to
+/// const-only headers; the enum stays local per the orchestrator's
+/// "KEEP CONST-ONLY for v1.0" decision (the
+/// WorkloadCategory-to-contract migration is v1.1+ per BACKLOG.md).
+fn category_header(category: WorkloadCategory) -> &'static str {
+    match category {
+        WorkloadCategory::LLM => GROUP_HEADER_LLM,
+        WorkloadCategory::Vision => GROUP_HEADER_VISION,
+        WorkloadCategory::ROS2 => GROUP_HEADER_ROS2,
+        WorkloadCategory::Embeddings => GROUP_HEADER_EMBEDDINGS,
+        WorkloadCategory::Unknown => GROUP_HEADER_UNKNOWN,
+    }
+}
 
 /// L11b — assemble alert/status inputs for one workload from the
 /// runtime snapshot. Pure: takes everything it needs by reference.
@@ -233,10 +251,10 @@ pub fn render(f: &mut Frame, area: Rect, state: &RuntimeState, app: &App) {
             continue;
         }
         items.push(ListItem::new(Line::from(Span::styled(
-            // L25 polish target: full Unicode rule line with theme
-            // colour. For L11b the ASCII-friendly delineator keeps
-            // the §15 ASCII fallback path simple.
-            format!("── {} ──", category.label()),
+            // L11c — contract const from `ux_contract::
+            // workload_category::GROUP_HEADER_*` (v0.3.4). Theme
+            // colour mapping still pending L21.
+            category_header(category),
             Style::default().fg(Color::DarkGray),
         ))));
 
@@ -468,17 +486,73 @@ mod tests {
     }
 
     #[test]
-    fn workload_category_label_matches_display_order() {
-        let labels: Vec<&str> = WorkloadCategory::all_in_order()
+    fn workload_category_display_order_matches_contract_headers() {
+        // L11c — the contract pins both the order and the strings
+        // for group headers. `all_in_order()` and `category_header`
+        // together must reproduce the contract sequence verbatim.
+        let headers: Vec<&str> = WorkloadCategory::all_in_order()
             .iter()
-            .map(|c| c.label())
+            .map(|c| category_header(*c))
             .collect();
         assert_eq!(
-            labels,
-            vec!["LLM", "Vision", "ROS2", "Embeddings", "Unknown"]
+            headers,
+            vec![
+                GROUP_HEADER_LLM,
+                GROUP_HEADER_VISION,
+                GROUP_HEADER_ROS2,
+                GROUP_HEADER_EMBEDDINGS,
+                GROUP_HEADER_UNKNOWN,
+            ]
         );
         for (i, c) in WorkloadCategory::all_in_order().iter().enumerate() {
             assert_eq!(c.display_order() as usize, i);
         }
+    }
+
+    #[test]
+    fn workloads_panel_cold_loading_uses_contract_const() {
+        // L11c lock — the Loading-state primary-metric value MUST
+        // come from `ux_contract::status::COLD_LOADING`, not a
+        // local literal. Pin against the const directly so a
+        // future "let's just hardcode it back" regression breaks.
+        let row = Row {
+            pid: 1,
+            name: "phi3".into(),
+            category: WorkloadCategory::LLM,
+            status: WorkloadStatus::Loading,
+            cpu_pct: 0.0,
+            rss_mb: 0,
+            vram_bytes: None,
+            kv_cache_pct: None,
+        };
+        assert_eq!(primary_metric(&row), COLD_LOADING);
+    }
+
+    #[test]
+    fn workloads_panel_group_headers_use_contract_constants() {
+        // L11c lock — every category's group header must equal the
+        // matching v0.3.4 contract const. Pinned per-variant so a
+        // single drift (e.g. someone re-introducing the
+        // `format!("── {} ──", ...)` style) breaks here.
+        assert_eq!(
+            category_header(WorkloadCategory::LLM),
+            GROUP_HEADER_LLM
+        );
+        assert_eq!(
+            category_header(WorkloadCategory::Vision),
+            GROUP_HEADER_VISION
+        );
+        assert_eq!(
+            category_header(WorkloadCategory::ROS2),
+            GROUP_HEADER_ROS2
+        );
+        assert_eq!(
+            category_header(WorkloadCategory::Embeddings),
+            GROUP_HEADER_EMBEDDINGS
+        );
+        assert_eq!(
+            category_header(WorkloadCategory::Unknown),
+            GROUP_HEADER_UNKNOWN
+        );
     }
 }

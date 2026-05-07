@@ -465,6 +465,45 @@ Where color appears, regardless of theme:
 
 **Detection:** at startup, write a test pattern to a hidden region and check terminal capability. If Unicode block characters fail, fall back to ASCII for the entire session. Real concern: older Windows ConHost, minimal SSH sessions, `tmux` with broken `LANG`.
 
+## §16 — Power (added in `ux_contract` v0.3.3)
+
+`ux_contract::power` (UX-CAR-002) provides the constants the
+post-mortem `Energy:` row consumes per §5. Currently exposes:
+
+- `power::DEFAULT_KWH_RATE_USD` — fallback electricity rate when no
+  user override is configured. Used by the post-mortem energy
+  rollup to convert joules to estimated cost.
+
+The Linux post-mortem split (L16) wires the consumer; until then
+this section is a stub recording the contract surface so reviewers
+know the const exists.
+
+## §17 — Workload categories (added in `ux_contract` v0.3.4)
+
+`ux_contract::workload_category` (UX-CAR-008) ships **const-only**
+group-header strings for §1 region 4:
+
+```rust
+pub mod workload_category {
+    pub const GROUP_HEADER_LLM: &str        = "── LLM ──";
+    pub const GROUP_HEADER_VISION: &str     = "── Vision ──";
+    pub const GROUP_HEADER_ROS2: &str       = "── ROS2 ──";
+    pub const GROUP_HEADER_EMBEDDINGS: &str = "── Embeddings ──";
+    pub const GROUP_HEADER_UNKNOWN: &str    = "── Unknown ──";
+}
+```
+
+Plus `ux_contract::status::COLD_LOADING = "cold-loading"`
+(UX-CAR-007) for the §2 Loading-state primary metric.
+
+**Enum location for v1.0:** the `WorkloadCategory` enum itself
+lives in each binary's tree (`crate::model::WorkloadCategory` on
+Linux). Contract intentionally ships only the strings, not the
+type. The Linux panel maps the enum to the contract const via a
+local `category_header` helper. v1.1+ may migrate the enum into
+the contract so both binaries share the type — filed in
+`BACKLOG.md`.
+
 ---
 
 # What this contract changes from current state

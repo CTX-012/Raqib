@@ -172,24 +172,13 @@ fn model_name_from_path(path: &std::path::Path) -> Option<String> {
 }
 
 impl WorkloadCategory {
-    /// Group-header label for the workloads panel. UX_CONTRACT.md §1
-    /// region 4 names the categories ("LLM" / "Vision" / "ROS2" /
-    /// "Embeddings" / "Unknown") but v0.3.2 doesn't expose them as
-    /// `ux_contract::*` constants — see CAR-8 in `BACKLOG.md`. Once
-    /// the contract amendment lands, L25 (or earlier) swaps these
-    /// for the const references.
-    pub fn label(self) -> &'static str {
-        match self {
-            WorkloadCategory::LLM => "LLM",
-            WorkloadCategory::Vision => "Vision",
-            WorkloadCategory::ROS2 => "ROS2",
-            WorkloadCategory::Embeddings => "Embeddings",
-            WorkloadCategory::Unknown => "Unknown",
-        }
-    }
-
     /// Display order per UX_CONTRACT.md §1 region 4
     /// ("LLM → Vision → ROS2 → Embeddings → Unknown"). Lower = first.
+    ///
+    /// L11c retired the local `label()` helper in favour of
+    /// `panels::workloads::category_header` mapping the enum to
+    /// v0.3.4's `ux_contract::workload_category::GROUP_HEADER_*`
+    /// constants.
     pub fn display_order(self) -> u8 {
         match self {
             WorkloadCategory::LLM => 0,

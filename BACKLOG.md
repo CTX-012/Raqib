@@ -58,6 +58,37 @@ orchestrator's "KEEP CONST-ONLY for v1.0" decision.
 
 ## Pending Contract Amendment Requests
 
+### CAR-11: top-processes panel title + sort indicators
+
+**Surfaced by:** L13 Top processes panel + L14 t-key sort cycle.
+UX_CONTRACT.md §1 region 5 illustrates the panel header as
+"Top processes (by RAM)" with a parenthesised sort indicator.
+v0.3.4 has no `ux_contract::top_processes::*` const for either
+the panel title or the per-sort indicator labels.
+
+L13 uses a local literal `"Top processes (by RAM)"`; L14 will
+need additional locals for "(by CPU)" and "(by VRAM)" when the
+sort cycle ships.
+
+Suggested addition to `ux_contract`:
+```rust
+pub mod top_processes {
+    /// Block title for the §1 region 5 panel.
+    pub const PANEL_TITLE_PREFIX: &str = "Top processes";
+    /// Sort indicator suffix; concatenated as
+    /// `"{PANEL_TITLE_PREFIX} (by {SORT_LABEL})"`.
+    pub const SORT_BY_RAM: &str = "RAM";
+    pub const SORT_BY_CPU: &str = "CPU";
+    pub const SORT_BY_VRAM: &str = "VRAM";
+}
+```
+
+Also consider routing the §1 region 5 prose-vs-example
+contradiction (prose says "Filters … processes already in
+Workloads"; example shows AI process `ollama` in Top
+processes). L13 implements per the example + the orchestrator's
+brief (un-filtered); the prose should be updated to match.
+
 ### CAR-9: per-category degraded-line templates
 
 **Surfaced by:** L12 degraded-row expansion. UX_CONTRACT.md §2

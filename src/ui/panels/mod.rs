@@ -8,6 +8,7 @@ pub mod armed_banner;
 mod help;
 mod history_overlay;
 pub mod postmortem;
+mod top_processes;
 mod vitals;
 pub mod workloads;
 
@@ -72,17 +73,21 @@ pub fn render(f: &mut Frame, state: &RuntimeState, app: &App) {
     }
 }
 
-/// The default (and only) v1.0 layout. Status bar + vitals + AI
-/// Workloads + recent runs + footer. L11/L13/L15/L25 reshape the
-/// individual panels, but the top-level structure is locked here.
+/// The default (and only) v1.0 layout. Per UX_CONTRACT.md §1
+/// region map: status bar + System (vitals) + AI Workloads + Top
+/// processes + Activity + footer. L25 reshapes individual panels;
+/// the top-level structure is locked here. §22 (sizing breakpoints)
+/// will hide Top processes in narrow mode per §12 — that's L22's
+/// row, not this one.
 fn render_default(f: &mut Frame, area: Rect, state: &RuntimeState, app: &App) {
     let layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1), // status bar
-            Constraint::Length(7), // vitals
-            Constraint::Min(8),    // AI Workloads (full width)
-            Constraint::Length(8), // recent runs
+            Constraint::Length(7), // vitals (System)
+            Constraint::Min(8),    // AI Workloads (flexes)
+            Constraint::Length(7), // Top processes (L13)
+            Constraint::Length(7), // Activity (L15, was 8 — yielded 1 row to Top processes)
             Constraint::Length(1), // hint footer
         ])
         .split(area);
@@ -90,8 +95,9 @@ fn render_default(f: &mut Frame, area: Rect, state: &RuntimeState, app: &App) {
     render_status_bar(f, layout[0], state, app);
     vitals::render(f, layout[1], state);
     workloads::render(f, layout[2], state, app);
-    activity::render(f, layout[3], state);
-    render_footer(f, layout[4], app);
+    top_processes::render(f, layout[3], state);
+    activity::render(f, layout[4], state);
+    render_footer(f, layout[5], app);
 }
 
 fn render_status_bar(f: &mut Frame, area: Rect, state: &RuntimeState, _app: &App) {

@@ -218,9 +218,11 @@ fn apply_action(action: Action, runtime: &mut Runtime, app: &mut App) {
         Action::AcknowledgeAlerts => {
             app.acknowledge_alerts();
         }
-        // §1 region 5 — `t` cycles Top processes sort. Wired in L14
-        // alongside the new panel.
-        Action::CycleTopSort => {}
+        // §1 region 5 / L14 — `t` cycles Top processes sort
+        // (Ram → Cpu → Vram → Ram). Cycle semantics + the
+        // contract-templated status footer live on the App
+        // method; this dispatch site is just the routing.
+        Action::CycleTopSort => app.cycle_top_sort(),
     }
 }
 

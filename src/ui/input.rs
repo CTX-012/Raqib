@@ -49,6 +49,11 @@ pub fn translate(key: KeyEvent, app: &App) -> Option<Action> {
         KeyCode::Char('a') => Some(Action::AcknowledgeAlerts),
         // §6 — `g` opens Grafana for the focused workload.
         KeyCode::Char('g') => Some(Action::OpenGrafana),
+        // §6 / §1 region 5 — `t` cycles the Top processes panel
+        // sort (RAM → CPU → VRAM). Dispatch handler is
+        // `App::cycle_top_sort`; help-overlay text is
+        // `ux_contract::help::KEY_TOP_SORT`.
+        KeyCode::Char('t') => Some(Action::CycleTopSort),
         KeyCode::Char('j') | KeyCode::Down => Some(Action::SelectDown),
         // Note: §6 keymap defines lowercase `k` = KillOrConfirm.
         // Uppercase `K` (and Up arrow) bind to SelectUp as an
@@ -141,6 +146,18 @@ mod tests {
         assert_eq!(
             translate(key(KeyCode::Char('g')), &app),
             Some(Action::OpenGrafana),
+        );
+    }
+
+    /// L14 — `t` cycles the Top processes panel sort. The input
+    /// layer only routes the press; cycle semantics live on
+    /// `App::cycle_top_sort` and are covered there.
+    #[test]
+    fn t_key_emits_cycle_top_sort_action() {
+        let app = App::new();
+        assert_eq!(
+            translate(key(KeyCode::Char('t')), &app),
+            Some(Action::CycleTopSort),
         );
     }
 

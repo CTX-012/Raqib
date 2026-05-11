@@ -12,6 +12,12 @@ mod top_processes;
 mod vitals;
 pub mod workloads;
 
+// L14 — re-exported so `ui::app::App` can hold the current sort
+// without panels.rs leaking its private module structure. The
+// sort fns + per-sort title live in `top_processes`; the enum is
+// the only public surface.
+pub use top_processes::TopProcessesSort;
+
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -95,7 +101,7 @@ fn render_default(f: &mut Frame, area: Rect, state: &RuntimeState, app: &App) {
     render_status_bar(f, layout[0], state, app);
     vitals::render(f, layout[1], state);
     workloads::render(f, layout[2], state, app);
-    top_processes::render(f, layout[3], state);
+    top_processes::render(f, layout[3], state, app.top_processes_sort());
     activity::render(f, layout[4], state);
     render_footer(f, layout[5], app);
 }

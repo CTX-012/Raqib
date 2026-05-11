@@ -3,6 +3,7 @@ use std::time::{Duration, Instant};
 use crate::runtime::RuntimeState;
 use crate::storage::RunRecord;
 use crate::ui::alerts::{AlertState, WorkloadRef};
+use crate::ui::panels::TopProcessesSort;
 use crate::ui::panels::armed_banner::ArmedKill;
 use crate::ui::panels::postmortem::PostMortemCard;
 use crate::ui::symbols::SymbolSet;
@@ -81,6 +82,14 @@ pub struct App {
     /// plan row originally spec'd `RuntimeState`; deviation is
     /// documented in the L6 commit.
     alerts: AlertState,
+    /// L14 / UX_CONTRACT.md §1 region 5 — current sort for the
+    /// Top processes panel, cycled by `t` (`Action::CycleTopSort`).
+    /// Session-scoped UI state, defaults to `Ram` per the §13
+    /// default. Field placement mirrors `alerts` above — both
+    /// belong on `App` rather than `RuntimeState` because they're
+    /// UI-only state with no relevance to the platform/governor
+    /// pipeline.
+    top_processes_sort: TopProcessesSort,
 }
 
 impl Default for App {
@@ -108,6 +117,7 @@ impl App {
             status: None,
             symbol_set,
             alerts: AlertState::new(),
+            top_processes_sort: TopProcessesSort::default(),
         }
     }
 
@@ -151,6 +161,27 @@ impl App {
             self.set_status(msg);
         }
         count
+    }
+
+    /// Current Top processes panel sort. Read by `panels::render`
+    /// to pick the sort fn + panel title.
+    pub fn top_processes_sort(&self) -> TopProcessesSort {
+        self.top_processes_sort
+    }
+
+    /// L14 — handle the `t` key by advancing the Top processes
+    /// sort cyclically (Ram → Cpu → Vram → Ram) and surfacing a
+    /// transient status footer ("Top processes sorted by {dim}")
+    /// per `ux_contract::status::TOP_SORT_CHANGED`. The status
+    /// echo mirrors the §6 pattern for every other action key
+    /// (KILL_ARMED, ALERTS_ACKNOWLEDGED) — the contract template
+    /// exists specifically for this action, and leaving it unused
+    /// would be the anomaly.
+    pub fn cycle_top_sort(&mut self) {
+        self.top_processes_sort = self.top_processes_sort.next();
+        let msg = ux_contract::status::TOP_SORT_CHANGED
+            .replace("{dimension}", self.top_processes_sort.dimension_label());
+        self.set_status(msg);
     }
 
     /// Per-tick alert observation. Reads the metrics that already
@@ -727,6 +758,67 @@ mod tests {
         app.acknowledge_alerts();
         let status = app.status().unwrap_or("");
         let expected = ux_contract::status::ALERTS_ACKNOWLEDGED.replace("{n}", "1");
+        assert_eq!(status, expected);
+    }
+
+    // ── L14 — Top processes sort cycle ────────────────────────────
+
+    #[test]
+    fn cycle_top_sort_advances_through_ram_cpu_vram() {
+        // Default starts at Ram (§13). One press → Cpu, two → Vram.
+        let mut app = App::new();
+        assert_eq!(app.top_processes_sort(), TopProcessesSort::Ram);
+        app.cycle_top_sort();
+        assert_eq!(app.top_processes_sort(), TopProcessesSort::Cpu);
+        app.cycle_top_sort();
+        assert_eq!(app.top_processes_sort(), TopProcessesSort::Vram);
+    }
+
+    #[test]
+    fn cycle_top_sort_wraps_back_to_ram_after_vram() {
+        // Three presses round-trip to Ram. Locks the cyclic
+        // contract — a fourth state would silently break this.
+        let mut app = App::new();
+        for _ in 0..3 {
+            app.cycle_top_sort();
+        }
+        assert_eq!(app.top_processes_sort(), TopProcessesSort::Ram);
+    }
+
+    #[test]
+    fn top_processes_panel_sort_persists_across_ticks() {
+        // The sort is session-scoped UI state — `tick_overlays`
+        // (the per-frame decay path) and unrelated key actions
+        // must not reset it. Cycle once, exercise tick + selection
+        // + help-toggle, then verify sort is still on Cpu.
+        let mut app = App::new();
+        app.cycle_top_sort();
+        assert_eq!(app.top_processes_sort(), TopProcessesSort::Cpu);
+
+        let state = RuntimeState::default();
+        for _ in 0..5 {
+            app.tick_overlays();
+            app.select_next(&state);
+            app.toggle_help();
+        }
+        assert_eq!(
+            app.top_processes_sort(),
+            TopProcessesSort::Cpu,
+            "sort must survive ticks + unrelated state changes",
+        );
+    }
+
+    #[test]
+    fn cycle_top_sort_uses_contract_template_with_substitution() {
+        // L14 design lock — status footer string comes from
+        // `ux_contract::status::TOP_SORT_CHANGED`, not a local
+        // literal. Mirrors the L7 contract-template lock for
+        // ALERTS_ACKNOWLEDGED above.
+        let mut app = App::new();
+        app.cycle_top_sort(); // Ram → Cpu
+        let status = app.status().unwrap_or("");
+        let expected = ux_contract::status::TOP_SORT_CHANGED
+            .replace("{dimension}", "CPU");
         assert_eq!(status, expected);
     }
 }

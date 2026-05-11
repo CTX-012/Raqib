@@ -25,12 +25,16 @@
 //! follows the example + the orchestrator's brief; flagged for
 //! contract-clarification routing in the L13 report.
 //!
-//! ## L14 (next row)
+//! ## L14
 //!
 //! L14 wires the `t` key (`Action::CycleTopSort`) to cycle this
-//! panel's sort: RAM → CPU → VRAM. The L13 panel renders the
-//! current sort label inline ("(by RAM)") so L14 only has to
-//! mutate state and watch the header update.
+//! panel's sort: RAM → CPU → VRAM. State (`TopProcessesSort`)
+//! lives on `App`; the render call selects the matching named
+//! sort fn (`top_n_by_rss` / `top_n_by_cpu` / `top_n_by_vram`)
+//! and the matching panel title. Three named fns over one
+//! parameterized helper: trivial perf cost, much easier to debug
+//! a specific sort if it goes wrong, and the v1.1 GPU-watts sort
+//! lands as a fourth fn without bloating one branch.
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -47,9 +51,59 @@ use super::panel_block;
 /// truncation lives in L22's row.
 pub const MAX_VISIBLE_ROWS: usize = 5;
 
-/// Local placeholder for `ux_contract::top_processes::PANEL_TITLE`
-/// (CAR-11 pending). Matches the §1 region 5 example header.
-const PANEL_TITLE: &str = "Top processes (by RAM)";
+/// L14 — which dimension the Top processes panel is currently
+/// sorted on. Cycled by the `t` key via `Action::CycleTopSort`.
+/// Lives in this module (not `ui::app`) because the sort fns and
+/// the per-sort panel titles all live here; the field on `App`
+/// just holds the current choice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TopProcessesSort {
+    /// Sort by resident set size (RSS) descending. §13 default.
+    #[default]
+    Ram,
+    /// Sort by per-tick CPU percent of one core, descending.
+    Cpu,
+    /// Sort by per-process VRAM bytes, descending, with
+    /// `vram_bytes: None` placed last so present-GPU rows lead
+    /// the list on hybrid / no-GPU systems.
+    Vram,
+}
+
+impl TopProcessesSort {
+    /// Cycle: Ram → Cpu → Vram → Ram. Pure; called by
+    /// `App::cycle_top_sort` on each `t` press.
+    pub fn next(self) -> Self {
+        match self {
+            Self::Ram => Self::Cpu,
+            Self::Cpu => Self::Vram,
+            Self::Vram => Self::Ram,
+        }
+    }
+
+    /// Human label used in the contract status template
+    /// (`status::TOP_SORT_CHANGED` — "Top processes sorted by
+    /// {dimension}"). Matches the panel-title suffix so the
+    /// footer feedback and the header agree.
+    pub fn dimension_label(self) -> &'static str {
+        match self {
+            Self::Ram => "RAM",
+            Self::Cpu => "CPU",
+            Self::Vram => "VRAM",
+        }
+    }
+}
+
+/// Per-sort panel title. Local literals; no
+/// `ux_contract::top_processes::PANEL_TITLE_BY_*` constants in
+/// v0.3.4 (CAR-11 pending). Title shape matches the §1 region 5
+/// example ("Top processes (by RAM)").
+pub(crate) fn panel_title(sort: TopProcessesSort) -> &'static str {
+    match sort {
+        TopProcessesSort::Ram => "Top processes (by RAM)",
+        TopProcessesSort::Cpu => "Top processes (by CPU)",
+        TopProcessesSort::Vram => "Top processes (by VRAM)",
+    }
+}
 
 /// Returns the top-N processes for the panel. Pure: takes the
 /// runtime state slice it needs and a self-PID for the
@@ -71,6 +125,65 @@ pub(crate) fn top_n_by_rss(
     procs
 }
 
+/// L14 — top-N processes by per-tick CPU percent, descending.
+/// PID-ascending tiebreak so renderings stay stable across ticks
+/// when several processes hit the same CPU bucket.
+pub(crate) fn top_n_by_cpu(
+    state: &RuntimeState,
+    self_pid: u32,
+    n: usize,
+) -> Vec<&AnnotatedProcess> {
+    let mut procs: Vec<&AnnotatedProcess> = state
+        .annotated
+        .iter()
+        .filter(|p| p.pid != self_pid)
+        .collect();
+    // f32 has no total Ord; partial_cmp can return None for NaN.
+    // /proc-sourced cpu_pct never produces NaN in practice, but
+    // fall back to Equal defensively so a poisoned sample can't
+    // panic the panel.
+    procs.sort_by(|a, b| {
+        b.cpu_pct
+            .partial_cmp(&a.cpu_pct)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.pid.cmp(&b.pid))
+    });
+    procs.truncate(n);
+    procs
+}
+
+/// L14 — top-N processes by per-process VRAM bytes, descending,
+/// with `vram_bytes: None` placed LAST. The default `Option<T>`
+/// Ord puts `None < Some(_)`, which would surface no-VRAM rows
+/// first on hybrid / no-GPU systems — the opposite of what the
+/// operator wants from a "top processes by VRAM" view. PID-asc
+/// tiebreak (including across the None block) for stability.
+pub(crate) fn top_n_by_vram(
+    state: &RuntimeState,
+    self_pid: u32,
+    n: usize,
+) -> Vec<&AnnotatedProcess> {
+    let mut procs: Vec<&AnnotatedProcess> = state
+        .annotated
+        .iter()
+        .filter(|p| p.pid != self_pid)
+        .collect();
+    procs.sort_by(|a, b| {
+        match (a.vram_bytes, b.vram_bytes) {
+            // Both report VRAM: descending by value, PID-asc tiebreak.
+            (Some(av), Some(bv)) => bv.cmp(&av).then(a.pid.cmp(&b.pid)),
+            // Only `a` reports VRAM → `a` ranks higher (comes first).
+            (Some(_), None) => std::cmp::Ordering::Less,
+            // Only `b` reports VRAM → `b` ranks higher.
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            // Neither reports — PID-asc for deterministic order.
+            (None, None) => a.pid.cmp(&b.pid),
+        }
+    });
+    procs.truncate(n);
+    procs
+}
+
 fn format_rss(rss_mb: u64) -> String {
     if rss_mb >= 1024 {
         let gb = rss_mb as f64 / 1024.0;
@@ -80,10 +193,17 @@ fn format_rss(rss_mb: u64) -> String {
     }
 }
 
-pub fn render(f: &mut Frame, area: Rect, state: &RuntimeState) {
-    let block = panel_block(PANEL_TITLE, false);
+pub fn render(f: &mut Frame, area: Rect, state: &RuntimeState, sort: TopProcessesSort) {
+    let block = panel_block(panel_title(sort), false);
     let self_pid = std::process::id();
-    let procs = top_n_by_rss(state, self_pid, MAX_VISIBLE_ROWS);
+    // Branch on sort dimension. Three named fns over one
+    // parameterized helper: easier to debug per-sort regressions
+    // and v1.1 additions stay isolated.
+    let procs = match sort {
+        TopProcessesSort::Ram => top_n_by_rss(state, self_pid, MAX_VISIBLE_ROWS),
+        TopProcessesSort::Cpu => top_n_by_cpu(state, self_pid, MAX_VISIBLE_ROWS),
+        TopProcessesSort::Vram => top_n_by_vram(state, self_pid, MAX_VISIBLE_ROWS),
+    };
 
     if procs.is_empty() {
         // Defensive: in production `state.annotated` is empty only
@@ -260,13 +380,14 @@ mod tests {
 
     #[test]
     fn top_processes_panel_has_no_selectable_rows() {
-        // L13 design lock: Top processes is read-only. The panel
-        // takes no `App` reference, exposes no selection state,
-        // and the render call signature is `(f, area, state)` —
-        // no selection plumbing is even reachable.
-        // Static assertion via the function signature (just
-        // referencing it ensures the type didn't change).
-        let _: fn(&mut Frame, Rect, &RuntimeState) = render;
+        // L13 design lock (intent preserved through L14): Top
+        // processes is read-only. The panel takes no `App`
+        // reference and exposes no selection state. L14 added a
+        // `TopProcessesSort` parameter — that's panel-local
+        // display state, not selection plumbing — so the lock
+        // still holds: no `&App` here, no selected_index, no
+        // selectable rows.
+        let _: fn(&mut Frame, Rect, &RuntimeState, TopProcessesSort) = render;
     }
 
     // ── format_rss formatting ─────────────────────────────────────
@@ -283,5 +404,83 @@ mod tests {
         assert_eq!(format_rss(1024).trim(), "1.0 GB");
         assert_eq!(format_rss(4500).trim(), "4.4 GB");
         assert_eq!(format_rss(8000).trim(), "7.8 GB");
+    }
+
+    // ── L14 — CPU / VRAM sort + panel title ───────────────────────
+
+    fn proc_full(
+        pid: u32,
+        name: &str,
+        rss_mb: u64,
+        cpu_pct: f32,
+        vram_bytes: Option<u64>,
+    ) -> AnnotatedProcess {
+        AnnotatedProcess {
+            pid,
+            name: name.into(),
+            category: AICategory::NotAi,
+            workload_category: WorkloadCategory::Unknown,
+            evidence: String::new(),
+            model_name: None,
+            cpu_pct,
+            rss_mb,
+            vram_bytes,
+            first_observed_at: Instant::now(),
+        }
+    }
+
+    #[test]
+    fn top_n_by_cpu_sorts_descending() {
+        // Pin descending order on cpu_pct. PID-asc tiebreak isn't
+        // exercised here — there's a separate test for stability.
+        let state = state_with(vec![
+            proc_full(1, "idle", 8_000, 2.0, None),
+            proc_full(2, "busy", 100, 92.5, None),
+            proc_full(3, "warm", 1_000, 45.0, None),
+        ]);
+        let top = top_n_by_cpu(&state, /* self_pid */ 9999, 10);
+        let pids: Vec<u32> = top.iter().map(|p| p.pid).collect();
+        assert_eq!(pids, vec![2, 3, 1], "CPU descending");
+    }
+
+    #[test]
+    fn top_n_by_vram_sorts_descending_with_none_last() {
+        // NVML returns None for vram_bytes on no-GPU systems. The
+        // panel sort must place None LAST so present-GPU rows
+        // lead — default `Option<T>` Ord would surface them first.
+        let state = state_with(vec![
+            proc_full(1, "cpu_only", 8_000, 0.0, None),
+            proc_full(2, "gpu_big", 1_000, 0.0, Some(4_000_000_000)),
+            proc_full(3, "gpu_small", 500, 0.0, Some(800_000_000)),
+            proc_full(4, "also_cpu_only", 4_000, 0.0, None),
+        ]);
+        let top = top_n_by_vram(&state, /* self_pid */ 9999, 10);
+        let pids: Vec<u32> = top.iter().map(|p| p.pid).collect();
+        // Some(4e9) → Some(8e8) → then the two Nones in PID-asc.
+        assert_eq!(pids, vec![2, 3, 1, 4]);
+    }
+
+    #[test]
+    fn top_processes_panel_vram_sort_puts_none_last() {
+        // §7 lock: a single Some(_) row and a single None row.
+        // Some MUST come first regardless of rss/pid. This guards
+        // against an accidental "just sort by Option<u64>" change
+        // (default Ord puts None < Some).
+        let state = state_with(vec![
+            // Make None-row "look better" by other axes (lower PID,
+            // higher RSS) so a naive sort would surface it first.
+            proc_full(10, "no_gpu_first_pid", 16_000, 99.0, None),
+            proc_full(99, "gpu_high_pid", 100, 0.0, Some(1)),
+        ]);
+        let top = top_n_by_vram(&state, 9999, 10);
+        let pids: Vec<u32> = top.iter().map(|p| p.pid).collect();
+        assert_eq!(pids, vec![99, 10], "Some(1) outranks None even at PID 99");
+    }
+
+    #[test]
+    fn panel_title_reflects_current_sort_order() {
+        assert_eq!(panel_title(TopProcessesSort::Ram), "Top processes (by RAM)");
+        assert_eq!(panel_title(TopProcessesSort::Cpu), "Top processes (by CPU)");
+        assert_eq!(panel_title(TopProcessesSort::Vram), "Top processes (by VRAM)");
     }
 }

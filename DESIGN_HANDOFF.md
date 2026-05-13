@@ -85,7 +85,7 @@ edge_monitor exists to keep a developer ahead of the moment when an AI workload 
 2. Header (1 line) — product, workload count, degraded count
 3. System panel — CPU, Memory always; GPU and VRAM omitted entirely if no GPU
 4. Workloads panel — grouped by category (LLM, Vision, ROS2, Embeddings, Unknown). Empty subsections hidden. Single-category screens hide the subsection header.
-5. Top processes panel — N rows by configurable sort (RAM default). Filters edge_monitor itself and processes already in Workloads.
+5. Top processes panel — N rows by configurable sort (RAM default). Excludes edge_monitor itself; AI workloads already shown in Workloads above appear here too (full top-N, no de-duplication — see the `ollama` row in the example).
 6. Activity panel — last 5 events
 7. Footer — keymap
 
@@ -503,6 +503,54 @@ type. The Linux panel maps the enum to the contract const via a
 local `category_header` helper. v1.1+ may migrate the enum into
 the contract so both binaries share the type — filed in
 `BACKLOG.md`.
+
+## §18 — Degraded-line templates (added in `ux_contract` v0.3.5)
+
+`ux_contract::degraded_line` ships the five per-category templates
+the Workloads panel renders below a degraded row's primary line
+per §2. Each constant is a `{placeholder}`-bearing format string
+the renderer substitutes at draw time:
+
+- `degraded_line::LLM` — KV / queue / tail-latency / baseline / signed delta
+- `degraded_line::VISION` — VRAM / pipeline phase / baseline fps / signed delta
+- `degraded_line::EMBEDDINGS` — batch / tail-latency / baseline emb-s / signed delta
+- `degraded_line::ROS2` — **intentionally empty** for v1.0. §2 lists a
+  schema (`topics {n} · queue {n} · baseline {Hz} · {±delta}%`) but
+  marks it `(v1.1+)`; consumers skip the expansion line entirely when
+  the template is empty rather than emitting a blank row.
+- `degraded_line::UNKNOWN` — single fixed message for unrecognised
+  AI processes (no per-category metrics exist).
+
+L12 (degraded-row expansion) renders these locally pending the
+contract-adoption row that pulls v0.3.5 into edge_monitor; until
+then this section is a stub recording the contract surface so
+reviewers know the templates exist.
+
+## §19 — Top processes panel surface (added in `ux_contract` v0.3.5)
+
+`ux_contract::top_processes` (CAR-11) names the §1 region 5 panel
+title prefix and the three sort-dimension labels:
+
+```rust
+pub mod top_processes {
+    pub const PANEL_TITLE_PREFIX: &str = "Top processes";
+    pub const SORT_BY_RAM: &str        = "RAM";
+    pub const SORT_BY_CPU: &str        = "CPU";
+    pub const SORT_BY_VRAM: &str       = "VRAM";
+}
+```
+
+The final panel title composes as `"{PANEL_TITLE_PREFIX} (by
+{SORT_BY_*})"`. The same `SORT_BY_*` constant substitutes into
+`status::TOP_SORT_CHANGED`'s `{dimension}` placeholder so the
+panel header and the post-cycle footer message stay in lock-step
+when `t` cycles the sort.
+
+L13 (panel scaffold) and L14 (`t`-key cycle) render the title +
+status footer with local literals pending the contract-adoption
+row that pulls v0.3.5 into edge_monitor; until then this section
+is a stub recording the contract surface so reviewers know the
+prefix + labels exist.
 
 ---
 

@@ -260,6 +260,17 @@ fn handle_open_dashboard(runtime: &Runtime, app: &mut App) {
         .find(|p| p.pid == pid)
         .and_then(|p| p.model_name.clone());
     let url = compute_dashboard_url(&template, model.as_deref(), pid);
+    // WP5 — TCP preflight gates the spawn. `xdg-open` against a dead
+    // Grafana surfaces a generic "couldn't open this page" via the
+    // browser, indistinguishable from "the keybinding is broken". The
+    // probe converts that into the contract-templated unreachable
+    // message instead. No `--no-preflight` escape hatch in v1.0; if the
+    // probe is wrong the operator can run `xdg-open <url>` themselves.
+    if let Err(e) = crate::dashboard_preflight::probe(&url) {
+        tracing::warn!(%url, error = %e, "Grafana preflight failed — skipping xdg-open");
+        app.set_status(format_grafana_unreachable(&url));
+        return;
+    }
     match std::process::Command::new("xdg-open")
         .arg(&url)
         .stdout(std::process::Stdio::null())
@@ -344,4 +355,14 @@ pub fn compute_dashboard_url(template: &str, model: Option<&str>, pid: u32) -> S
     template
         .replace("{model}", model.unwrap_or(""))
         .replace("{pid}", &pid.to_string())
+}
+
+/// Substitutes `{url}` into the
+/// `ux_contract::status::GRAFANA_UNREACHABLE` template (WP5). Kept as a
+/// pure function so the substitution rule can be pinned by tests without
+/// running the preflight probe or the spawn. The template is owned by
+/// the contract crate — display strings stay byte-for-byte identical to
+/// the Windows side because both consume the same const.
+pub fn format_grafana_unreachable(url: &str) -> String {
+    ux_contract::status::GRAFANA_UNREACHABLE.replace("{url}", url)
 }

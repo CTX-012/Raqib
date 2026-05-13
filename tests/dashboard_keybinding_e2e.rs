@@ -128,3 +128,54 @@ fn g_keybinding_emits_open_grafana_from_contract_enum() {
     let key = KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE);
     assert_eq!(translate(key, &app), Some(Action::OpenGrafana));
 }
+
+/// WP5 — preflight gate end-to-end:
+///   1. closed port → `probe` returns `Err`
+///   2. `format_grafana_unreachable` produces the contract-templated
+///      footer string the handler would set
+///   3. binding a live listener on the same address makes the next
+///      probe succeed
+///
+/// Doesn't drive `handle_open_dashboard` (the xdg-open spawn is the
+/// only piece left, which we don't want firing in CI), but locks the
+/// two pieces the handler stitches together: the probe outcome and the
+/// status-footer substitution. Display string parity with Windows is
+/// guaranteed because both sides consume
+/// `ux_contract::status::GRAFANA_UNREACHABLE`.
+#[test]
+fn wp5_preflight_gate_round_trip() {
+    use edge_monitor::dashboard_preflight::probe_with_timeout;
+    use edge_monitor::ui::format_grafana_unreachable;
+    use std::net::TcpListener;
+    use std::time::Duration;
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
+    let addr = listener.local_addr().expect("local_addr");
+
+    // Live socket: the probe succeeds.
+    let live_url = format!("http://{}:{}/d/edge_monitor", addr.ip(), addr.port());
+    probe_with_timeout(&live_url, Duration::from_millis(500))
+        .expect("probe must succeed against listening port");
+
+    drop(listener);
+
+    // Closed socket: the probe fails and the operator sees the
+    // contract-templated unreachable message.
+    let dead_url = format!("http://{}:{}/d/edge_monitor", addr.ip(), addr.port());
+    let probe_result = probe_with_timeout(&dead_url, Duration::from_millis(500));
+    assert!(probe_result.is_err(), "probe must fail against closed port");
+
+    let footer = format_grafana_unreachable(&dead_url);
+    assert!(
+        footer.contains(&dead_url),
+        "footer must include the URL: {footer}"
+    );
+    assert!(
+        footer.contains("Grafana not reachable at"),
+        "footer must use the contract template, got: {footer}"
+    );
+    assert!(
+        footer.contains("Press s for setup help"),
+        "footer must include the contract's setup-help nudge, got: {footer}"
+    );
+}

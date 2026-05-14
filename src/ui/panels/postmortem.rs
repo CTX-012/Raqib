@@ -38,12 +38,13 @@ use std::time::{Duration, Instant};
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
 
 use crate::storage::RunRecord;
 use crate::storage::run_store::ExitReason;
+use crate::ui::theme::UiTheme;
 
 /// Transient struct constructed by the runtime at exit time and
 /// handed to the renderer. **Not persisted** — `stderr_tail` is
@@ -197,8 +198,13 @@ const STDERR_LINES_VISIBLE: usize = 3;
 /// Render the centered post-mortem card. Called last in the panels
 /// render path so the card sits above every other panel (history /
 /// help / armed banner).
-pub fn render(frame: &mut Frame, full: Rect, card: &PostMortemCard) {
-    let lines = build_lines(card);
+///
+/// L21 / §14 — title bar uses `theme.accent`; baseline headline
+/// resolves through the semantic palette
+/// (`critical`/`attention`/`healthy`/`muted`); the dismiss-hint
+/// footer is muted.
+pub fn render(frame: &mut Frame, full: Rect, card: &PostMortemCard, theme: &UiTheme) {
+    let lines = build_lines_themed(card, theme);
     let height = lines
         .len()
         .saturating_add(2) // border top + bottom
@@ -211,7 +217,7 @@ pub fn render(frame: &mut Frame, full: Rect, card: &PostMortemCard) {
         .title(Span::styled(
             title,
             Style::default()
-                .fg(Color::Cyan)
+                .fg(theme.accent)
                 .add_modifier(Modifier::BOLD),
         ))
         .borders(Borders::ALL)
@@ -229,9 +235,23 @@ pub fn render(frame: &mut Frame, full: Rect, card: &PostMortemCard) {
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), padded);
 }
 
-/// Build the inner-rect line list. Public for unit-testing the field
-/// labels + ordering without spinning a real frame.
+/// Pre-L21 build path: returns plain (un-themed) lines for callers
+/// that don't have a UiTheme handy. Kept for the existing unit tests
+/// that pin label ordering and conditional row omission. The themed
+/// version `build_lines_themed` is what `render` uses in the live
+/// path; the two share their structural logic.
 pub fn build_lines(card: &PostMortemCard) -> Vec<Line<'static>> {
+    build_lines_with(card, None)
+}
+
+/// Themed build path — same content shape as `build_lines` but with
+/// baseline-headline / dismiss-hint colors sourced from the active
+/// theme.
+pub fn build_lines_themed(card: &PostMortemCard, theme: &UiTheme) -> Vec<Line<'static>> {
+    build_lines_with(card, Some(theme))
+}
+
+fn build_lines_with(card: &PostMortemCard, theme: Option<&UiTheme>) -> Vec<Line<'static>> {
     let pm = &card.post_mortem;
     let mut lines: Vec<Line<'static>> = Vec::new();
 
@@ -258,8 +278,15 @@ pub fn build_lines(card: &PostMortemCard) -> Vec<Line<'static>> {
     // 7. blank
     lines.push(Line::from(""));
 
-    // 8. color-coded baseline headline (if any)
-    if let Some((text, style)) = baseline_headline(&pm.baseline_status) {
+    // 8. color-coded baseline headline (if any). Themed path uses
+    // the active palette; legacy un-themed callers fall back to the
+    // pre-L21 ratatui named-color mapping for backward compatibility
+    // with `tests/postmortem.rs::baseline_headlines_match_contract`.
+    let headline = match theme {
+        Some(t) => baseline_headline_themed(&pm.baseline_status, t),
+        None => baseline_headline(&pm.baseline_status),
+    };
+    if let Some((text, style)) = headline {
         lines.push(Line::from(Span::styled(text, style)));
     }
 
@@ -285,12 +312,16 @@ pub fn build_lines(card: &PostMortemCard) -> Vec<Line<'static>> {
 
     // 12-13. blank + footer
     lines.push(Line::from(""));
+    let footer_fg = match theme {
+        Some(t) => t.muted,
+        None => ratatui::style::Color::DarkGray,
+    };
     lines.push(Line::from(Span::styled(
         format!(
             "[Esc] dismiss · [Enter] dismiss · auto-closes in {n}s",
             n = card.seconds_remaining()
         ),
-        Style::default().fg(Color::DarkGray),
+        Style::default().fg(footer_fg),
     )));
 
     lines
@@ -309,10 +340,13 @@ fn labeled(label: &str, value: &str) -> Line<'static> {
     ])
 }
 
-/// Color-coded baseline headline. Returns `None` when the status is
-/// `NotAvailable` (no headline rendered for first runs). Public so
-/// integration tests can pin the verbatim contract strings.
+/// Color-coded baseline headline using ratatui's named-color
+/// palette. Pre-L21 default; preserved so the contract-text
+/// assertions in this file's own tests stay decoupled from the
+/// theme system. New render sites should call
+/// `baseline_headline_themed` to pick up the active palette.
 pub fn baseline_headline(status: &BaselineStatus) -> Option<(String, Style)> {
+    use ratatui::style::Color;
     match status {
         BaselineStatus::NotAvailable => None,
         BaselineStatus::Critical { delta_pct } => Some((
@@ -336,6 +370,42 @@ pub fn baseline_headline(status: &BaselineStatus) -> Option<(String, Style)> {
         BaselineStatus::Matching => Some((
             "matches baseline".to_string(),
             Style::default().fg(Color::DarkGray),
+        )),
+    }
+}
+
+/// L21 / §14 — themed baseline headline. Critical/Attention/Healthy
+/// route through the semantic palette
+/// (`critical`/`attention`/`healthy`); Matching reads as muted so it
+/// stays a low-contrast acknowledgement rather than a celebratory
+/// banner.
+pub fn baseline_headline_themed(
+    status: &BaselineStatus,
+    theme: &UiTheme,
+) -> Option<(String, Style)> {
+    match status {
+        BaselineStatus::NotAvailable => None,
+        BaselineStatus::Critical { delta_pct } => Some((
+            format!("{:.0}% slower than baseline", delta_pct),
+            Style::default()
+                .fg(theme.critical)
+                .add_modifier(Modifier::BOLD),
+        )),
+        BaselineStatus::Attention { delta_pct } => Some((
+            format!("{:.0}% slower than baseline", delta_pct),
+            Style::default()
+                .fg(theme.attention)
+                .add_modifier(Modifier::BOLD),
+        )),
+        BaselineStatus::Healthy { abs_delta_pct } => Some((
+            format!("{:.0}% faster than baseline", abs_delta_pct),
+            Style::default()
+                .fg(theme.healthy)
+                .add_modifier(Modifier::BOLD),
+        )),
+        BaselineStatus::Matching => Some((
+            "matches baseline".to_string(),
+            Style::default().fg(theme.muted),
         )),
     }
 }

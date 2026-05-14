@@ -3,6 +3,12 @@
 //! Renders a centered floating panel listing the most recent runs of
 //! the focused row's model. Records are snapshotted on `h` keypress
 //! and drawn from `App::history()` so the render path stays pure.
+//!
+//! L21 / §14 — overlay borders + title use `theme.accent`; column
+//! header in `theme.muted`; per-row exit indicator uses the semantic
+//! palette (`theme.healthy` for clean, `theme.attention` for
+//! governor, `theme.critical` for other failures). KV-saturation
+//! badge is always critical regardless of exit kind.
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -11,6 +17,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph};
 
 use crate::history::format_exit_short;
+use crate::ui::theme::UiTheme;
 
 use super::super::app::{App, HistoryOverlay};
 
@@ -23,7 +30,7 @@ const KV_SATURATION_PCT: f32 = 99.5;
 /// Render the overlay (panel + dim background outside it). No-op when
 /// the app reports no overlay open — the caller invokes us
 /// unconditionally at the end of the frame.
-pub fn render(f: &mut Frame, full: Rect, app: &App) {
+pub fn render(f: &mut Frame, full: Rect, app: &App, theme: &UiTheme) {
     let Some(overlay) = app.history() else {
         return;
     };
@@ -33,11 +40,11 @@ pub fn render(f: &mut Frame, full: Rect, app: &App) {
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan))
+        .border_style(Style::default().fg(theme.accent))
         .title(Span::styled(
             format!(" History: {} ", overlay.model),
             Style::default()
-                .fg(Color::Cyan)
+                .fg(theme.accent)
                 .add_modifier(Modifier::BOLD),
         ));
     let inner = block.inner(area);
@@ -52,12 +59,12 @@ pub fn render(f: &mut Frame, full: Rect, app: &App) {
         ])
         .split(inner);
 
-    f.render_widget(header_paragraph(overlay), layout[0]);
-    f.render_widget(body_list(overlay), layout[1]);
-    f.render_widget(footer_paragraph(), layout[2]);
+    f.render_widget(header_paragraph(overlay, theme), layout[0]);
+    f.render_widget(body_list(overlay, theme), layout[1]);
+    f.render_widget(footer_paragraph(theme), layout[2]);
 }
 
-fn header_paragraph(overlay: &HistoryOverlay) -> Paragraph<'_> {
+fn header_paragraph<'a>(overlay: &'a HistoryOverlay, theme: &UiTheme) -> Paragraph<'a> {
     let line = if overlay.records.is_empty() {
         // L1 / UX_CONTRACT.md §7 — empty-state copy is locked in
         // `ux_contract::empty::HISTORY`. The previous, more diagnostic
@@ -68,21 +75,24 @@ fn header_paragraph(overlay: &HistoryOverlay) -> Paragraph<'_> {
         // replacement string here.
         Line::from(Span::styled(
             ux_contract::empty::HISTORY,
-            Style::default().fg(Color::Yellow),
+            Style::default().fg(theme.attention),
         ))
     } else {
         Line::from(vec![
-            Span::raw(format!(" {} runs · columns: ", overlay.records.len())),
+            Span::styled(
+                format!(" {} runs · columns: ", overlay.records.len()),
+                Style::default().fg(theme.foreground),
+            ),
             Span::styled(
                 "# When  Dur  AvgCPU  PeakRSS  PeakVRAM  Exit",
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(theme.muted),
             ),
         ])
     };
     Paragraph::new(line)
 }
 
-fn body_list(overlay: &HistoryOverlay) -> List<'_> {
+fn body_list<'a>(overlay: &'a HistoryOverlay, theme: &UiTheme) -> List<'a> {
     let items: Vec<ListItem<'_>> = overlay
         .records
         .iter()
@@ -90,10 +100,10 @@ fn body_list(overlay: &HistoryOverlay) -> List<'_> {
         .map(|(i, r)| {
             let idx = overlay.records.len() - i;
             let exit = format_exit_short(&r.exit_reason);
-            let color = match exit.as_str() {
-                "clean" => Color::Green,
-                "governor" => Color::Yellow,
-                _ => Color::Red,
+            let color: Color = match exit.as_str() {
+                "clean" => theme.healthy,
+                "governor" => theme.attention,
+                _ => theme.critical,
             };
             let row = format!(
                 " {:>3}  {}  {:>4}s  {:>5.0}%  {:>5}MB  {:>6}MB  {}",
@@ -114,7 +124,9 @@ fn body_list(overlay: &HistoryOverlay) -> List<'_> {
             {
                 spans.push(Span::styled(
                     "  KV!",
-                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(theme.critical)
+                        .add_modifier(Modifier::BOLD),
                 ));
             }
 
@@ -124,10 +136,10 @@ fn body_list(overlay: &HistoryOverlay) -> List<'_> {
     List::new(items).block(Block::default())
 }
 
-fn footer_paragraph() -> Paragraph<'static> {
+fn footer_paragraph(theme: &UiTheme) -> Paragraph<'static> {
     Paragraph::new(Line::from(Span::styled(
         " Esc / q close ",
-        Style::default().fg(Color::DarkGray),
+        Style::default().fg(theme.muted),
     )))
 }
 

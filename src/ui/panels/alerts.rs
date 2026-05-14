@@ -16,9 +16,13 @@
 //!   too. L8 owns the exit-side wiring; until then the placeholder
 //!   stays "—".
 //!
-//! Tier coloring is rendered with placeholder ratatui colors (Red
-//! for Critical, Yellow for Attention). L21 replaces these with
-//! theme-resolved colors from the active `ThemeName`.
+//! L21 / §14 — alert banners render with `theme.attention` /
+//! `theme.critical` backgrounds and `theme.background` foreground so
+//! the contrast pair tracks the active palette ("Background tinted:
+//! amber bg for VRAM/RAM/KV, red bg for OOM/Critical"). Pre-L21 the
+//! banners hardcoded `Color::Black` on `Color::Yellow`/`Red`, which
+//! made `--theme light` and `--theme high-contrast` indistinguishable
+//! from `dark`.
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -31,6 +35,7 @@ use ux_contract::AlertId;
 use crate::runtime::RuntimeState;
 use crate::ui::alerts::{AlertEntry, AlertScope};
 use crate::ui::app::App;
+use crate::ui::theme::UiTheme;
 
 /// Tier label for an `AlertId`. Drives both visibility ordering (in
 /// the data layer) and banner color (here, until L21 wires themes).
@@ -49,14 +54,15 @@ pub fn alert_tier(alert: AlertId) -> AlertTier {
     }
 }
 
-/// Placeholder color resolution. **L21** replaces this with a
-/// theme-driven mapping that consumes `ux_contract::Theme.{attention,
-/// critical}`. Until then ratatui's named Yellow/Red render
-/// recognisably across themes.
-fn tier_color(tier: AlertTier) -> Color {
+/// L21 / §14 — theme-driven banner background color per tier.
+/// Attention banners (VRAM/RAM/KV pressure) use `theme.attention`;
+/// Critical banners (governor armed / OOM / workload exited) use
+/// `theme.critical`. Both contrast against `theme.background` for
+/// the banner foreground.
+fn tier_color(tier: AlertTier, theme: &UiTheme) -> Color {
     match tier {
-        AlertTier::Attention => Color::Yellow,
-        AlertTier::Critical => Color::Red,
+        AlertTier::Attention => theme.attention,
+        AlertTier::Critical => theme.critical,
     }
 }
 
@@ -178,7 +184,7 @@ fn template_for(alert: AlertId) -> &'static str {
 /// Includes a "+N more" line when `active_count > visible.len()`.
 /// Used both by the render path and by tests that assert on the
 /// rendered text without spinning a `TestBackend`.
-pub fn build_lines(app: &App, state: &RuntimeState) -> Vec<Line<'static>> {
+pub fn build_lines(app: &App, state: &RuntimeState, theme: &UiTheme) -> Vec<Line<'static>> {
     let visible = app.alerts().visible();
     let total = app.alerts().active_count();
     let mut lines: Vec<Line<'static>> = Vec::with_capacity(visible.len() + 1);
@@ -187,9 +193,14 @@ pub fn build_lines(app: &App, state: &RuntimeState) -> Vec<Line<'static>> {
         let live = live_values_for(entry, state);
         let text = substitute(template_for(entry.alert_id), entry, &live);
         let tier = alert_tier(entry.alert_id);
+        // L21 / §14 — banner fg on tinted bg for contrast. Pre-L21
+        // used `Color::Black` which broke against dark-palette
+        // backgrounds; `theme.background` flips with the palette so
+        // light-bg banners read as dark text, dark-bg banners as
+        // light text.
         let style = Style::default()
-            .fg(Color::Black)
-            .bg(tier_color(tier))
+            .fg(theme.background)
+            .bg(tier_color(tier, theme))
             .add_modifier(Modifier::BOLD);
         lines.push(Line::from(Span::styled(format!(" {text} "), style)));
     }
@@ -201,7 +212,7 @@ pub fn build_lines(app: &App, state: &RuntimeState) -> Vec<Line<'static>> {
         lines.push(Line::from(Span::styled(
             format!(" +{hidden} more "),
             Style::default()
-                .fg(Color::DarkGray)
+                .fg(theme.muted)
                 .add_modifier(Modifier::ITALIC),
         )));
     }
@@ -209,8 +220,8 @@ pub fn build_lines(app: &App, state: &RuntimeState) -> Vec<Line<'static>> {
     lines
 }
 
-pub fn render(f: &mut Frame, area: Rect, app: &App, state: &RuntimeState) {
-    let lines = build_lines(app, state);
+pub fn render(f: &mut Frame, area: Rect, app: &App, state: &RuntimeState, theme: &UiTheme) {
+    let lines = build_lines(app, state, theme);
     if lines.is_empty() {
         return;
     }
@@ -235,6 +246,7 @@ pub fn region_height(app: &App) -> u16 {
 mod tests {
     use super::*;
     use crate::ui::alerts::WorkloadRef;
+    use crate::ui::theme::current_theme;
     use std::time::{Duration, Instant};
 
     fn after(start: Instant, secs: u64) -> Instant {
@@ -246,6 +258,10 @@ mod tests {
     /// rather than driving the metric pipeline end-to-end.
     fn empty_app() -> App {
         App::new()
+    }
+
+    fn test_theme() -> UiTheme {
+        current_theme("dark")
     }
 
     fn lines_to_string(lines: &[Line<'_>]) -> String {
@@ -361,7 +377,7 @@ mod tests {
             AlertId::GovernorArmed,
             true,
         );
-        let lines = build_lines(&app, &empty_state());
+        let lines = build_lines(&app, &empty_state(), &test_theme());
         let text = lines_to_string(&lines);
         assert!(text.contains("Kill armed on phi3"), "{text}");
         assert!(text.contains("(PID 206)"), "{text}");
@@ -376,11 +392,11 @@ mod tests {
             AlertId::GovernorArmed,
             true,
         );
-        let styles = lines_to_styles(&build_lines(&app, &empty_state()));
+        let styles = lines_to_styles(&build_lines(&app, &empty_state(), &test_theme()));
         assert_eq!(styles.len(), 1);
         assert_eq!(
             styles[0].bg,
-            Some(tier_color(AlertTier::Critical)),
+            Some(tier_color(AlertTier::Critical, &test_theme())),
             "governor-armed banner must render with the critical-tier bg"
         );
     }
@@ -402,8 +418,11 @@ mod tests {
             AlertId::VramPressure,
             true,
         );
-        let styles = lines_to_styles(&build_lines(&app, &empty_state()));
-        assert_eq!(styles[0].bg, Some(tier_color(AlertTier::Attention)));
+        let styles = lines_to_styles(&build_lines(&app, &empty_state(), &test_theme()));
+        assert_eq!(
+            styles[0].bg,
+            Some(tier_color(AlertTier::Attention, &test_theme()))
+        );
     }
 
     #[test]
@@ -419,7 +438,7 @@ mod tests {
                 true,
             );
         }
-        let lines = build_lines(&app, &empty_state());
+        let lines = build_lines(&app, &empty_state(), &test_theme());
         assert_eq!(lines.len(), 4, "3 banners + 1 +N more line");
         let last = lines_to_string(std::slice::from_ref(&lines[3]));
         assert!(last.contains("+2 more"), "last line: {last}");
@@ -435,11 +454,11 @@ mod tests {
             AlertId::GovernorArmed,
             true,
         );
-        assert_eq!(build_lines(&app, &empty_state()).len(), 1);
+        assert_eq!(build_lines(&app, &empty_state(), &test_theme()).len(), 1);
         // Ack moves the slot from Active to Suppressed; visible() —
         // and therefore build_lines — must drop it.
         app.alerts_mut().ack_all();
-        assert_eq!(build_lines(&app, &empty_state()).len(), 0);
+        assert_eq!(build_lines(&app, &empty_state(), &test_theme()).len(), 0);
     }
 
     #[test]
@@ -459,7 +478,7 @@ mod tests {
             AlertId::WorkloadExited,
             Some("exit code 139".into()),
         );
-        let text = lines_to_string(&build_lines(&app, &empty_state()));
+        let text = lines_to_string(&build_lines(&app, &empty_state(), &test_theme()));
         assert!(
             text.contains("Llama-70B exited with exit code 139"),
             "template assembly wrong: {text}"
@@ -484,7 +503,7 @@ mod tests {
             AlertId::OomDetected,
             None,
         );
-        let text = lines_to_string(&build_lines(&app, &empty_state()));
+        let text = lines_to_string(&build_lines(&app, &empty_state(), &test_theme()));
         assert!(
             text.contains("OOM kill detected — phi3 (PID 206) terminated by kernel"),
             "{text}"

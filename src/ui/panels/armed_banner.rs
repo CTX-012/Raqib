@@ -23,8 +23,10 @@ use std::time::{Duration, Instant};
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::widgets::Paragraph;
+
+use crate::ui::theme::UiTheme;
 
 /// Snapshot of the armed-kill state. Owned by `App` and replaced
 /// wholesale on each arm; never mutated in place.
@@ -70,11 +72,16 @@ impl ArmedKill {
 /// the operator a confirm-press will only log, not signal. Without
 /// the insert, dry-run mode silently swallows the kill — which looks
 /// to the operator like the keypress was lost.
-pub fn render(frame: &mut Frame, area: Rect, armed: &ArmedKill, dry_run: bool) {
+pub fn render(frame: &mut Frame, area: Rect, armed: &ArmedKill, dry_run: bool, theme: &UiTheme) {
     let body = format_body(armed, dry_run);
+    // L21 / §14 — alert-banner pattern: critical bg + background fg
+    // for contrast against the tint. Pre-L21 the banner was
+    // `Color::Red` / `Color::White` regardless of theme; under the
+    // light palette the white text vanished. Routing through the
+    // theme keeps the banner legible across all three palettes.
     let style = Style::default()
-        .bg(Color::Red)
-        .fg(Color::White)
+        .bg(theme.critical)
+        .fg(theme.background)
         .add_modifier(Modifier::BOLD);
     frame.render_widget(Paragraph::new(body).style(style), area);
 }

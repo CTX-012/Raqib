@@ -1,48 +1,56 @@
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
+use crate::ui::theme::UiTheme;
+
 /// Modal help overlay. Centered, dimmed background. Toggled with `?`.
-pub fn render(f: &mut Frame, area: Rect) {
+///
+/// L21 / §14 — overlay title bar uses `theme.accent`; warnings inside
+/// the overlay (manual-kill caveat, dry-run reminder) use
+/// `theme.attention` so they read as advisories but track the active
+/// palette. Body text is plain foreground.
+pub fn render(f: &mut Frame, area: Rect, theme: &UiTheme) {
     let popup = centered(60, 60, area);
     f.render_widget(Clear, popup);
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan))
+        .border_style(Style::default().fg(theme.accent))
         .title(Span::styled(
             " Help ",
             Style::default()
-                .fg(Color::Cyan)
+                .fg(theme.accent)
                 .add_modifier(Modifier::BOLD),
         ));
 
+    let body = Style::default().fg(theme.foreground);
     let lines = vec![
-        Line::from("Navigation"),
-        Line::from("  Tab / Shift-Tab     cycle panel focus"),
-        Line::from("  j / Down            move cursor down"),
-        Line::from("  k / Up              move cursor up"),
+        Line::styled("Navigation", body),
+        Line::styled("  Tab / Shift-Tab     cycle panel focus", body),
+        Line::styled("  j / Down            move cursor down", body),
+        Line::styled("  k / Up              move cursor up", body),
         Line::from(""),
-        Line::from("Actions"),
-        Line::from("  /                   start filter (Esc cancel · Enter commit)"),
-        Line::from("  d                   toggle dry-run / enforce mode"),
-        Line::from("  k                   ARM manual kill on selected PID"),
-        Line::from("  k (again)           CONFIRM kill on armed PID"),
-        Line::from("  h                   show run history for selected model"),
-        Line::from("  q / Ctrl-C          quit"),
+        Line::styled("Actions", body),
+        Line::styled("  /                   start filter (Esc cancel · Enter commit)", body),
+        Line::styled("  d                   toggle dry-run / enforce mode", body),
+        Line::styled("  k                   ARM manual kill on selected PID", body),
+        Line::styled("  k (again)           CONFIRM kill on armed PID", body),
+        Line::styled("  h                   show run history for selected model", body),
+        Line::styled("  q / Ctrl-C          quit", body),
         Line::from(""),
         Line::from(Span::styled(
             "Manual kill is a two-step: arm then confirm.",
-            Style::default().fg(Color::Yellow),
+            Style::default().fg(theme.attention),
         )),
         Line::from(Span::styled(
             "In dry-run, kills are logged only. No signals sent.",
-            Style::default().fg(Color::Yellow),
+            Style::default().fg(theme.attention),
         )),
         Line::from(""),
-        Line::from("Press ? to close this help."),
+        Line::styled("Press ? to close this help.", body),
     ];
 
     let para = Paragraph::new(lines).block(block);

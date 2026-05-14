@@ -22,8 +22,8 @@ pub use top_processes::TopProcessesSort;
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::Span;
+use ratatui::style::{Modifier, Style};
+use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
 use crate::runtime::RuntimeState;
@@ -60,11 +60,11 @@ pub fn render(
     let (banner_area, alerts_area, body_area) = (split[0], split[1], split[2]);
 
     if let Some(armed) = app.armed_kill() {
-        armed_banner::render(f, banner_area, armed, state.dry_run);
+        armed_banner::render(f, banner_area, armed, state.dry_run, theme);
     }
 
     if alerts_height > 0 {
-        alerts::render(f, alerts_area, app, state);
+        alerts::render(f, alerts_area, app, state, theme);
     }
 
     // L2b removed the legacy "detail mode" toggle (`v` key + the
@@ -74,13 +74,13 @@ pub fn render(
     render_default(f, body_area, state, app, theme);
 
     if app.show_help() {
-        help::render(f, body_area);
+        help::render(f, body_area, theme);
     }
 
     // History overlay sits above panels but below the post-mortem
     // card (see below) — though the input layer prevents both from
     // being open simultaneously.
-    history_overlay::render(f, body_area, app);
+    history_overlay::render(f, body_area, app, theme);
 
     // L16 / §5 — detail card renders LAST so it floats above every
     // other panel. The two card kinds are mutually exclusive at the
@@ -92,7 +92,7 @@ pub fn render(
     if let Some(card) = live_detail {
         live_detail::render(f, full, card, theme);
     } else if let Some(card) = app.postmortem() {
-        postmortem::render(f, full, card);
+        postmortem::render(f, full, card, theme);
     }
 }
 
@@ -131,49 +131,82 @@ fn render_default(f: &mut Frame, area: Rect, state: &RuntimeState, app: &App, th
         .count();
 
     header::render(f, layout[0], app, theme, n_workloads, n_degraded);
-    vitals::render(f, layout[1], state);
-    workloads::render(f, layout[2], state, app);
-    top_processes::render(f, layout[3], state, app.top_processes_sort());
-    activity::render(f, layout[4], state);
-    render_footer(f, layout[5], app);
+    vitals::render(f, layout[1], state, theme);
+    workloads::render(f, layout[2], state, app, theme);
+    top_processes::render(f, layout[3], state, app.top_processes_sort(), theme);
+    activity::render(f, layout[4], state, theme);
+    render_footer(f, layout[5], app, theme);
 }
 
-fn render_footer(f: &mut Frame, area: Rect, app: &App) {
+fn render_footer(f: &mut Frame, area: Rect, app: &App, theme: &UiTheme) {
     // An ephemeral status message wins over the keybind hints — the
     // operator-feedback path is more valuable than the always-visible
-    // cheat sheet for the few seconds the message is live. Yellow
-    // matches the DRY-RUN label colour in the status bar so the two
-    // dry-run cues read as the same channel.
+    // cheat sheet for the few seconds the message is live.
+    // L21 / §14 — transient status messages render in attention
+    // color (they're surface-level operator feedback that should
+    // catch the eye, but they're not workload-row content so the
+    // "only status dots are colored on workload rows" rule doesn't
+    // apply here).
     if let Some(msg) = app.status() {
         let p = Paragraph::new(format!(" {msg} ")).style(
             Style::default()
-                .fg(Color::Yellow)
+                .fg(theme.attention)
                 .add_modifier(Modifier::BOLD),
         );
         f.render_widget(p, area);
         return;
     }
 
-    // L2b removed `v` and Tab from the keymap; L2c will remove `/`.
-    // The string still mentions stale bindings — the locked v0.3
-    // footer ("Enter detail · k kill · g graph · h history · ? help
-    // · q quit") lands in L25 alongside the contract const
-    // `status::FOOTER_KEYMAP` (CAR-5). Until then this stub keeps the
-    // pre-L2b text minus `v hide/show details` and Tab focus, since
-    // those bindings genuinely no longer work.
-    let hints = " q quit · j/k select · k kill (×2) · h history · ? help ";
-    let p = Paragraph::new(hints).style(Style::default().fg(Color::DarkGray));
+    // L21 / §14 — "Footer key hints: Accent for the key letter,
+    // Muted for description." The hints string is `· `-separated
+    // groups of `{key} {description}`; render each group as two
+    // spans so the key letter picks up `theme.accent` and the rest
+    // picks up `theme.muted`. The separator itself stays muted —
+    // it's structural, not a key letter.
+    //
+    // L2b removed `v` and Tab from the keymap; L2c removed `/`.
+    // The locked v0.3 footer keymap lands when CAR-5
+    // (`status::FOOTER_KEYMAP`) ships — until then this stub matches
+    // the active key set.
+    let groups: [(&str, &str); 5] = [
+        ("q", "quit"),
+        ("j/k", "select"),
+        ("k", "kill (×2)"),
+        ("h", "history"),
+        ("?", "help"),
+    ];
+    let mut spans: Vec<Span<'static>> = Vec::with_capacity(groups.len() * 3 + 1);
+    let muted = Style::default().fg(theme.muted);
+    let accent = Style::default()
+        .fg(theme.accent)
+        .add_modifier(Modifier::BOLD);
+    spans.push(Span::raw(" "));
+    for (i, (key, desc)) in groups.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::styled(" · ".to_string(), muted));
+        }
+        spans.push(Span::styled((*key).to_string(), accent));
+        spans.push(Span::styled(format!(" {desc}"), muted));
+    }
+    spans.push(Span::raw(" "));
+    let p = Paragraph::new(Line::from(spans));
     f.render_widget(p, area);
 }
 
 /// Helper used by panels: bordered block with title.
-pub(super) fn panel_block<'a>(title: &'a str, focused: bool) -> Block<'a> {
+///
+/// L21 / §14 — section headers (System / Workloads / Top / Activity)
+/// render in `theme.muted`; the focused panel switches to
+/// `theme.accent` to keep the v1.0 "selected row tinted with accent"
+/// rule consistent across panels. Borders match the title style so
+/// the panel reads as a single unit.
+pub(super) fn panel_block<'a>(title: &'a str, focused: bool, theme: &UiTheme) -> Block<'a> {
     let style = if focused {
         Style::default()
-            .fg(Color::Cyan)
+            .fg(theme.accent)
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(Color::Gray)
+        Style::default().fg(theme.muted)
     };
     Block::default()
         .borders(Borders::ALL)

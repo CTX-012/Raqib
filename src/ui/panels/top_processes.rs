@@ -38,7 +38,9 @@
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
+
+use crate::ui::theme::UiTheme;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{List, ListItem, Paragraph, Wrap};
 
@@ -193,8 +195,14 @@ fn format_rss(rss_mb: u64) -> String {
     }
 }
 
-pub fn render(f: &mut Frame, area: Rect, state: &RuntimeState, sort: TopProcessesSort) {
-    let block = panel_block(panel_title(sort), false);
+pub fn render(
+    f: &mut Frame,
+    area: Rect,
+    state: &RuntimeState,
+    sort: TopProcessesSort,
+    theme: &UiTheme,
+) {
+    let block = panel_block(panel_title(sort), false, theme);
     let self_pid = std::process::id();
     // Branch on sort dimension. Three named fns over one
     // parameterized helper: easier to debug per-sort regressions
@@ -217,7 +225,7 @@ pub fn render(f: &mut Frame, area: Rect, state: &RuntimeState, sort: TopProcesse
             Line::from(Span::styled(
                 "  —",
                 Style::default()
-                    .fg(Color::DarkGray)
+                    .fg(theme.muted)
                     .add_modifier(Modifier::ITALIC),
             )),
         ];
@@ -226,6 +234,9 @@ pub fn render(f: &mut Frame, area: Rect, state: &RuntimeState, sort: TopProcesse
         return;
     }
 
+    // L21 / §14 — Top processes rows are "All other text" per §14
+    // (no status dots, no bars), so foreground is the single rule
+    // here. Styling the list once is cheaper than per-item style.
     let items: Vec<ListItem<'_>> = procs
         .iter()
         .map(|p| {
@@ -242,7 +253,9 @@ pub fn render(f: &mut Frame, area: Rect, state: &RuntimeState, sort: TopProcesse
         })
         .collect();
 
-    let list = List::new(items).block(block);
+    let list = List::new(items)
+        .block(block)
+        .style(Style::default().fg(theme.foreground));
     f.render_widget(list, area);
 }
 
@@ -387,7 +400,7 @@ mod tests {
         // display state, not selection plumbing — so the lock
         // still holds: no `&App` here, no selected_index, no
         // selectable rows.
-        let _: fn(&mut Frame, Rect, &RuntimeState, TopProcessesSort) = render;
+        let _: fn(&mut Frame, Rect, &RuntimeState, TopProcessesSort, &UiTheme) = render;
     }
 
     // ── format_rss formatting ─────────────────────────────────────

@@ -27,13 +27,14 @@
 use chrono::{DateTime, Utc};
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{List, ListItem, Paragraph, Wrap};
 
 use crate::analysis::Severity;
 use crate::governor::manual::{KillSource, ManualKillAction};
 use crate::runtime::RuntimeState;
+use crate::ui::theme::UiTheme;
 
 use super::panel_block;
 
@@ -42,14 +43,43 @@ use super::panel_block;
 /// L22's row.
 pub const MAX_VISIBLE_EVENTS: usize = 5;
 
-/// One ready-to-render event with its source-specific colour and
-/// the timestamp used for ordering. Tests construct these
-/// directly without spinning up a full RuntimeState.
+/// One ready-to-render event with a semantic tone and the timestamp
+/// used for ordering. Tests construct these directly without
+/// spinning up a full RuntimeState.
+///
+/// L21 / §14 — pre-L21 the activity panel hardcoded `Color::Red /
+/// Yellow / Green`, which froze the rendering to the dark Tokyo
+/// Night palette regardless of `--theme`. The tone enum decouples
+/// the semantic ("this is a critical event") from the literal color;
+/// the render path resolves to `theme.critical / attention / healthy`
+/// at draw time so theme switches land everywhere consistently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EventTone {
+    /// Healthy / successful operation — clean exit, successful kill.
+    Healthy,
+    /// Attention-band — non-failure but worth noting (manual kill
+    /// success, sub-critical regression, dry-run signal).
+    Attention,
+    /// Critical — failed kill, signal-terminated workload, Critical
+    /// regression severity.
+    Critical,
+}
+
+impl EventTone {
+    pub fn color(self, theme: &UiTheme) -> ratatui::style::Color {
+        match self {
+            EventTone::Healthy => theme.healthy,
+            EventTone::Attention => theme.attention,
+            EventTone::Critical => theme.critical,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct ActivityEvent {
     pub timestamp: DateTime<Utc>,
     pub text: String,
-    pub colour: Color,
+    pub tone: EventTone,
 }
 
 /// Build the time-descending event list from RuntimeState. Pure;
@@ -64,16 +94,16 @@ pub(crate) fn build_events(state: &RuntimeState) -> Vec<ActivityEvent> {
             continue;
         }
         let killed_by_signal = s.signal.is_some();
-        let colour = if killed_by_signal {
-            Color::Red
+        let tone = if killed_by_signal {
+            EventTone::Critical
         } else {
-            Color::Green
+            EventTone::Healthy
         };
         let text = format_run_summary(s);
         events.push(ActivityEvent {
             timestamp: s.exit_time,
             text,
-            colour,
+            tone,
         });
     }
 
@@ -90,12 +120,12 @@ pub(crate) fn build_events(state: &RuntimeState) -> Vec<ActivityEvent> {
             KillSource::Automated => "auto",
         };
         let status = if e.success { "OK" } else { "FAIL" };
-        let colour = if !e.success {
-            Color::Red
+        let tone = if !e.success {
+            EventTone::Critical
         } else if e.source == KillSource::Manual {
-            Color::Yellow
+            EventTone::Attention
         } else {
-            Color::Green
+            EventTone::Healthy
         };
         let text = format!(
             "{} {} {} pid={} {} - {}",
@@ -104,16 +134,16 @@ pub(crate) fn build_events(state: &RuntimeState) -> Vec<ActivityEvent> {
         events.push(ActivityEvent {
             timestamp: e.timestamp,
             text,
-            colour,
+            tone,
         });
     }
 
     // Regression events (Tier 1.3).
     for r in &state.regressions {
-        let colour = if r.regression.severity >= Severity::Critical {
-            Color::Red
+        let tone = if r.regression.severity >= Severity::Critical {
+            EventTone::Critical
         } else {
-            Color::Yellow
+            EventTone::Attention
         };
         let text = format!(
             "REGRESSION {:?} {} {} {:+.1}% (n={})",
@@ -126,7 +156,7 @@ pub(crate) fn build_events(state: &RuntimeState) -> Vec<ActivityEvent> {
         events.push(ActivityEvent {
             timestamp: r.timestamp,
             text,
-            colour,
+            tone,
         });
     }
 
@@ -156,8 +186,8 @@ fn format_run_summary(s: &crate::lifecycle::LifecycleSummary) -> String {
     row
 }
 
-pub fn render(f: &mut Frame, area: Rect, state: &RuntimeState) {
-    let block = panel_block("Activity", false);
+pub fn render(f: &mut Frame, area: Rect, state: &RuntimeState, theme: &UiTheme) {
+    let block = panel_block("Activity", false, theme);
     let events = build_events(state);
 
     if events.is_empty() {
@@ -169,7 +199,7 @@ pub fn render(f: &mut Frame, area: Rect, state: &RuntimeState) {
             Line::from(Span::styled(
                 format!("  {}", ux_contract::empty::ACTIVITY),
                 Style::default()
-                    .fg(Color::DarkGray)
+                    .fg(theme.muted)
                     .add_modifier(Modifier::ITALIC),
             )),
         ];
@@ -186,7 +216,7 @@ pub fn render(f: &mut Frame, area: Rect, state: &RuntimeState) {
                 ev.timestamp.format("%H:%M:%S"),
                 ev.text
             ))
-            .style(Style::default().fg(ev.colour))
+            .style(Style::default().fg(ev.tone.color(theme)))
         })
         .collect();
 
@@ -365,7 +395,7 @@ mod tests {
         killed.exit_code = None;
         state.completed.push_back(killed);
         let events = build_events(&state);
-        assert_eq!(events[0].colour, Color::Red);
+        assert_eq!(events[0].tone, EventTone::Critical);
     }
 
     #[test]
@@ -375,7 +405,7 @@ mod tests {
         entry.success = false;
         state.audit.push_back(entry);
         let events = build_events(&state);
-        assert_eq!(events[0].colour, Color::Red);
+        assert_eq!(events[0].tone, EventTone::Critical);
     }
 
     #[test]
@@ -383,7 +413,7 @@ mod tests {
         let mut state = empty_state();
         state.regressions.push_back(regression_event(ts(1_000)));
         let events = build_events(&state);
-        assert_eq!(events[0].colour, Color::Red);
+        assert_eq!(events[0].tone, EventTone::Critical);
     }
 
     #[test]
@@ -396,7 +426,7 @@ mod tests {
         ev.regression.severity = Severity::Warn;
         state.regressions.push_back(ev);
         let events = build_events(&state);
-        assert_eq!(events[0].colour, Color::Yellow);
+        assert_eq!(events[0].tone, EventTone::Attention);
     }
 
     #[test]

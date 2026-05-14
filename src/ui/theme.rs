@@ -12,7 +12,10 @@
 //! switch end-to-end. The full color-usage audit lives in L21.
 
 use ratatui::style::Color;
-use ux_contract::{DARK, HIGH_CONTRAST, LIGHT, Theme, ThemeName};
+use ux_contract::{
+    DARK, HIGH_CONTRAST, LIGHT, Theme, ThemeName, WorkloadStatus,
+    thresholds::{BAR_ATTENTION_PCT, BAR_CRITICAL_PCT},
+};
 
 /// Theme palette in ratatui-native form. Mirrors `ux_contract::Theme`
 /// field-for-field but with `Color::Rgb` values pre-parsed from the
@@ -43,6 +46,38 @@ impl UiTheme {
             healthy: parse_hex(theme.healthy),
             attention: parse_hex(theme.attention),
             critical: parse_hex(theme.critical),
+        }
+    }
+
+    /// L21 / UX_CONTRACT.md §14 — status-dot color mapping. The dot
+    /// is the only colored thing on a workload row, and its color
+    /// must come from the active theme so a session that flipped to
+    /// `light` or `high-contrast` doesn't keep the dark accent
+    /// colors. `Loading` maps to `muted` per §3 — a workload that
+    /// has no telemetry yet shouldn't read as either healthy or
+    /// alarmed.
+    pub fn status_color(&self, status: WorkloadStatus) -> Color {
+        match status {
+            WorkloadStatus::Healthy => self.healthy,
+            WorkloadStatus::Attention => self.attention,
+            WorkloadStatus::Critical => self.critical,
+            WorkloadStatus::Loading => self.muted,
+        }
+    }
+
+    /// L21 / UX_CONTRACT.md §14 — bar-graph threshold color.
+    /// Foreground below 85%, Attention 85-95%, Critical at or above
+    /// 95%. Thresholds come from `ux_contract::thresholds` so a
+    /// future contract amendment that shifts them propagates here
+    /// without a code edit. Input is a percentage on the 0–100 scale
+    /// (matches the rest of the platform metrics layer).
+    pub fn bar_color(&self, pct: f64) -> Color {
+        if pct >= BAR_CRITICAL_PCT {
+            self.critical
+        } else if pct >= BAR_ATTENTION_PCT {
+            self.attention
+        } else {
+            self.foreground
         }
     }
 }
@@ -197,5 +232,62 @@ mod tests {
         // path that constructs `UiTheme` without a name (e.g. tests
         // that don't care about theme).
         assert_eq!(UiTheme::default().name, ThemeName::Dark);
+    }
+
+    #[test]
+    fn status_color_maps_each_variant_to_theme_palette() {
+        let theme = current_theme("dark");
+        assert_eq!(theme.status_color(WorkloadStatus::Healthy), theme.healthy);
+        assert_eq!(theme.status_color(WorkloadStatus::Attention), theme.attention);
+        assert_eq!(theme.status_color(WorkloadStatus::Critical), theme.critical);
+        // Loading is "no telemetry yet" — render muted, not healthy.
+        assert_eq!(theme.status_color(WorkloadStatus::Loading), theme.muted);
+    }
+
+    #[test]
+    fn bar_color_below_attention_threshold_is_foreground() {
+        let theme = current_theme("dark");
+        // §14 — bars stay on foreground color until 85%. Anything
+        // below the threshold (including 0% and exactly 84.99%) must
+        // not pre-empt the attention band.
+        assert_eq!(theme.bar_color(0.0), theme.foreground);
+        assert_eq!(theme.bar_color(50.0), theme.foreground);
+        assert_eq!(theme.bar_color(84.0), theme.foreground);
+        // The threshold is half-open: 84.999... < 85.0.
+        assert_eq!(theme.bar_color(84.99), theme.foreground);
+    }
+
+    #[test]
+    fn bar_color_at_attention_threshold_switches_to_attention() {
+        let theme = current_theme("dark");
+        // §14 — exactly at 85% is already attention. Pins the
+        // boundary semantic so a future refactor doesn't drift to
+        // `>` (which would leave 85.0 silently in the foreground
+        // band).
+        assert_eq!(theme.bar_color(85.0), theme.attention);
+        assert_eq!(theme.bar_color(90.0), theme.attention);
+        assert_eq!(theme.bar_color(94.99), theme.attention);
+    }
+
+    #[test]
+    fn bar_color_at_critical_threshold_switches_to_critical() {
+        let theme = current_theme("dark");
+        // §14 — exactly at 95% is already critical.
+        assert_eq!(theme.bar_color(95.0), theme.critical);
+        assert_eq!(theme.bar_color(99.9), theme.critical);
+        assert_eq!(theme.bar_color(100.0), theme.critical);
+    }
+
+    #[test]
+    fn bar_color_uses_active_theme_palette() {
+        let dark = current_theme("dark");
+        let hc = current_theme("high-contrast");
+        // Same pct, different theme → different rendered color.
+        assert_ne!(dark.bar_color(96.0), hc.bar_color(96.0));
+        // But each remains internally consistent — bar_color is
+        // sourced from the same `critical`/`attention`/`foreground`
+        // the dots use.
+        assert_eq!(dark.bar_color(96.0), dark.critical);
+        assert_eq!(hc.bar_color(96.0), hc.critical);
     }
 }

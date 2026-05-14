@@ -144,7 +144,7 @@ const LABEL_WIDTH: usize = 18;
 /// `panels::render` after every other panel so the card floats above
 /// the rest of the frame — same z-order as the post-mortem card.
 pub fn render(frame: &mut Frame, full: Rect, card: &LiveDetailCard, theme: &UiTheme) {
-    let lines = build_lines(card);
+    let lines = build_lines_themed(card, theme);
     let height = lines
         .len()
         .saturating_add(2) // border top + bottom
@@ -178,9 +178,23 @@ pub fn render(frame: &mut Frame, full: Rect, card: &LiveDetailCard, theme: &UiTh
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), padded);
 }
 
-/// Build the inner-rect line list. Public for unit tests so the
-/// labels + ordering can be pinned without a real `Frame`.
+/// Pre-L21 build path: returns lines styled with ratatui's named
+/// colors. Kept for the existing unit tests that pin label
+/// ordering / conditional row omission without a theme handle.
+/// `build_lines_themed` is what the live render path uses.
 pub fn build_lines(card: &LiveDetailCard) -> Vec<Line<'static>> {
+    build_lines_with(card, None)
+}
+
+/// L21 / §14 — themed build path. Subdued spans (sparkline
+/// placeholder + dismiss-hint footer) render in `theme.muted` so a
+/// `--theme light` or `--theme high-contrast` session reads with the
+/// matching palette.
+pub fn build_lines_themed(card: &LiveDetailCard, theme: &UiTheme) -> Vec<Line<'static>> {
+    build_lines_with(card, Some(theme))
+}
+
+fn build_lines_with(card: &LiveDetailCard, theme: Option<&UiTheme>) -> Vec<Line<'static>> {
     let live = &card.live;
     let mut lines: Vec<Line<'static>> = Vec::new();
 
@@ -196,6 +210,11 @@ pub fn build_lines(card: &LiveDetailCard) -> Vec<Line<'static>> {
 
     lines.push(Line::from(""));
 
+    let muted = match theme {
+        Some(t) => t.muted,
+        None => Color::DarkGray,
+    };
+
     // L17 sparkline placeholder. Renders a faded-text hint so the
     // operator sees that the card is meant to host trends without
     // misreading a blank space as "no data" — the row count keeps
@@ -203,9 +222,7 @@ pub fn build_lines(card: &LiveDetailCard) -> Vec<Line<'static>> {
     // gives L17 a clean target to swap into without re-sizing.
     lines.push(Line::from(Span::styled(
         "Sparklines (CPU / RAM / VRAM / tokens) — pending L17",
-        Style::default()
-            .fg(Color::DarkGray)
-            .add_modifier(Modifier::ITALIC),
+        Style::default().fg(muted).add_modifier(Modifier::ITALIC),
     )));
 
     lines.push(Line::from(""));
@@ -214,7 +231,7 @@ pub fn build_lines(card: &LiveDetailCard) -> Vec<Line<'static>> {
             "[Esc] dismiss · [Enter] dismiss · auto-closes in {n}s",
             n = card.seconds_remaining()
         ),
-        Style::default().fg(Color::DarkGray),
+        Style::default().fg(muted),
     )));
 
     lines

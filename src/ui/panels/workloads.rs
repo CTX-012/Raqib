@@ -27,7 +27,7 @@ use std::time::Instant;
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{List, ListItem, ListState, Paragraph, Wrap};
 
@@ -45,6 +45,7 @@ use crate::runtime::{
 
 use super::super::app::App;
 use super::panel_block;
+use crate::ui::theme::UiTheme;
 
 /// Local placeholder for the no-data primary metric — non-LLM
 /// workloads without their type-specific metric stream show this.
@@ -284,9 +285,9 @@ fn primary_metric(row: &Row) -> String {
 
 /// Render the whole panel: group headers (skipped when empty) + one
 /// row per workload, in `ordered_rows` order.
-pub fn render(f: &mut Frame, area: Rect, state: &RuntimeState, app: &App) {
+pub fn render(f: &mut Frame, area: Rect, state: &RuntimeState, app: &App, theme: &UiTheme) {
     let rows = ordered_rows(state, app);
-    let block = panel_block("AI Workloads", true);
+    let block = panel_block("AI Workloads", true, theme);
 
     if rows.is_empty() {
         // Total empty — render the contract's locked empty-state
@@ -297,7 +298,9 @@ pub fn render(f: &mut Frame, area: Rect, state: &RuntimeState, app: &App) {
             Line::from(""),
             Line::from(Span::styled(
                 format!("  {}", ux_contract::empty::WORKLOADS),
-                Style::default().add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(theme.foreground)
+                    .add_modifier(Modifier::BOLD),
             )),
         ];
         let paragraph = Paragraph::new(lines).block(block).wrap(Wrap { trim: false });
@@ -320,12 +323,10 @@ pub fn render(f: &mut Frame, area: Rect, state: &RuntimeState, app: &App) {
             // §1 region 4 — empty categories render no header.
             continue;
         }
+        // L21 / §14 — section / group headers in muted.
         items.push(ListItem::new(Line::from(Span::styled(
-            // L11c — contract const from `ux_contract::
-            // workload_category::GROUP_HEADER_*` (v0.3.4). Theme
-            // colour mapping still pending L21.
             category_header(category),
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme.muted),
         ))));
 
         for row in group {
@@ -336,35 +337,54 @@ pub fn render(f: &mut Frame, area: Rect, state: &RuntimeState, app: &App) {
                 Some(b) if b > 0 => format!("{:>4}M", b / (1024 * 1024)),
                 _ => "    ".into(),
             };
-            let primary = format!(
-                "{} {:<24} {:<14} cpu {:>5.1}% rss {:>5}M {}",
-                dot,
+            // L21 / §14 — "Status dot (●⚠✕○): ONLY place colors
+            // appear on workload rows." Split the primary line into
+            // a colored dot span + a neutral-foreground rest so the
+            // body picks up `theme.foreground` while the dot picks
+            // up `theme.status_color(status)`. Joining them into a
+            // single string (pre-L21 shape) would force the whole
+            // row into one Color and violate the contract.
+            let rest = format!(
+                " {:<24} {:<14} cpu {:>5.1}% rss {:>5}M {}",
                 truncate(&row.name, 24),
                 primary_metric(row),
                 row.cpu_pct,
                 row.rss_mb,
                 vram_label,
             );
+            let primary_line = Line::from(vec![
+                Span::styled(
+                    dot.to_string(),
+                    Style::default().fg(theme.status_color(row.status)),
+                ),
+                Span::styled(rest, Style::default().fg(theme.foreground)),
+            ]);
             // L12 — combine primary + expansion into a single
             // ListItem so the highlight (selection bg) covers both
             // when this row is selected. The expansion's `Option`
             // shape keeps Healthy / Loading rows at their
             // pre-L12 single-line layout exactly.
-            let mut lines = vec![Line::from(Span::raw(primary))];
+            let mut lines = vec![primary_line];
             if let Some(expansion) = degraded_line(row) {
+                // §14 — expansion line is supplementary context;
+                // muted keeps it visually subordinate to the
+                // primary row while still readable.
                 lines.push(Line::from(Span::styled(
                     format!("    {expansion}"),
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(theme.muted),
                 )));
             }
             items.push(ListItem::new(lines));
         }
     }
 
+    // L21 / §14 — selected row tinted with Accent background.
+    // Pair with `theme.background` foreground to keep the row
+    // legible regardless of the accent palette in play.
     let list = List::new(items).block(block).highlight_style(
         Style::default()
-            .bg(Color::Blue)
-            .fg(Color::White)
+            .bg(theme.accent)
+            .fg(theme.background)
             .add_modifier(Modifier::BOLD),
     );
 

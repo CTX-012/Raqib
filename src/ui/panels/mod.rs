@@ -5,6 +5,7 @@
 mod activity;
 pub mod alerts;
 pub mod armed_banner;
+pub mod header;
 mod help;
 mod history_overlay;
 pub mod postmortem;
@@ -21,7 +22,7 @@ pub use top_processes::TopProcessesSort;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span};
+use ratatui::text::Span;
 use ratatui::widgets::{Block, Borders, Paragraph};
 
 use crate::runtime::RuntimeState;
@@ -81,16 +82,15 @@ pub fn render(f: &mut Frame, state: &RuntimeState, app: &App, theme: &UiTheme) {
 }
 
 /// The default (and only) v1.0 layout. Per UX_CONTRACT.md §1
-/// region map: status bar + System (vitals) + AI Workloads + Top
-/// processes + Activity + footer. L25 reshapes individual panels;
-/// the top-level structure is locked here. §22 (sizing breakpoints)
-/// will hide Top processes in narrow mode per §12 — that's L22's
-/// row, not this one.
+/// region map: header (§0 mission line) + System (vitals) + AI
+/// Workloads + Top processes + Activity + footer. §12 (sizing
+/// breakpoints) will hide Top processes in narrow mode — that's
+/// L22's row, not this one.
 fn render_default(f: &mut Frame, area: Rect, state: &RuntimeState, app: &App, theme: &UiTheme) {
     let layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1), // status bar
+            Constraint::Length(1), // §0 mission-line header (L25)
             Constraint::Length(7), // vitals (System)
             Constraint::Min(8),    // AI Workloads (flexes)
             Constraint::Length(7), // Top processes (L13)
@@ -99,61 +99,28 @@ fn render_default(f: &mut Frame, area: Rect, state: &RuntimeState, app: &App, th
         ])
         .split(area);
 
-    render_status_bar(f, layout[0], state, app, theme);
+    // L25 / §0 — derive workload + degraded counts from the same row
+    // builder the Workloads panel renders from. Keeping one source of
+    // truth for `WorkloadStatus` per workload means the header count
+    // can never drift from what the operator sees one panel down.
+    let rows = workloads::ordered_rows(state, app);
+    let n_workloads = rows.len();
+    let n_degraded = rows
+        .iter()
+        .filter(|r| {
+            matches!(
+                r.status,
+                ux_contract::WorkloadStatus::Attention | ux_contract::WorkloadStatus::Critical
+            )
+        })
+        .count();
+
+    header::render(f, layout[0], app, theme, n_workloads, n_degraded);
     vitals::render(f, layout[1], state);
     workloads::render(f, layout[2], state, app);
     top_processes::render(f, layout[3], state, app.top_processes_sort());
     activity::render(f, layout[4], state);
     render_footer(f, layout[5], app);
-}
-
-fn render_status_bar(
-    f: &mut Frame,
-    area: Rect,
-    state: &RuntimeState,
-    _app: &App,
-    theme: &UiTheme,
-) {
-    let mode_label = if state.dry_run { "DRY-RUN" } else { "ENFORCE" };
-    let mode_color = if state.dry_run {
-        Color::Yellow
-    } else {
-        Color::Red
-    };
-
-    // L20 / §13 — the status-bar title span is the single panel-fill
-    // point that carries the theme today. L21 will sweep the rest of
-    // the panels; this site exists so `tests/theme_switching.rs` can
-    // observe the contract palette landing on rendered cells.
-    let spans = vec![
-        Span::styled(
-            " edge_monitor ",
-            Style::default()
-                .fg(theme.foreground)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(" "),
-        Span::styled(
-            format!(" {} ", mode_label),
-            Style::default()
-                .bg(mode_color)
-                .fg(Color::Black)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(format!("  tick #{} ", state.tick_count)),
-    ];
-
-    // L2c removed the filter-mode prompt and the post-commit
-    // `(filter: ...)` indicator from the status bar — the `/` key is
-    // unbound and the App no longer carries a filter buffer.
-
-    // The full-row armed-kill banner ([UX-1]) supersedes the old
-    // inline status-bar marker. Leaving them both would double-render
-    // the same state and confuse the operator about which one to
-    // watch.
-
-    let para = Paragraph::new(Line::from(spans));
-    f.render_widget(para, area);
 }
 
 fn render_footer(f: &mut Frame, area: Rect, app: &App) {

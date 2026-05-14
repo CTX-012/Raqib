@@ -47,6 +47,19 @@ impl SymbolSet {
             SymbolSet::Ascii => status.symbol_ascii(),
         }
     }
+
+    /// Mission-line separator glyph (UX_CONTRACT.md §0). Unicode is
+    /// `·` (U+00B7 middle dot), the contract's locked separator;
+    /// ASCII fallback is `-` so the line stays readable on `LANG=C`
+    /// SSH sessions. Routed through the same `SymbolSet` the rest of
+    /// the TUI uses so a session that fell back to Ascii at startup
+    /// gets a coherent look top-to-bottom.
+    pub fn header_separator(self) -> &'static str {
+        match self {
+            SymbolSet::Unicode => "·",
+            SymbolSet::Ascii => "-",
+        }
+    }
 }
 
 /// Resolve the terminal's symbol capability from the process locale.
@@ -186,6 +199,18 @@ mod tests {
         assert_eq!(s.workload_status(WorkloadStatus::Attention), "!");
         assert_eq!(s.workload_status(WorkloadStatus::Critical), "X");
         assert_eq!(s.workload_status(WorkloadStatus::Loading), "o");
+    }
+
+    #[test]
+    fn header_separator_unicode_is_middle_dot() {
+        assert_eq!(SymbolSet::Unicode.header_separator(), "·");
+    }
+
+    #[test]
+    fn header_separator_ascii_is_hyphen_and_ascii_clean() {
+        let sep = SymbolSet::Ascii.header_separator();
+        assert_eq!(sep, "-");
+        assert!(sep.is_ascii(), "ASCII fallback separator must be ASCII");
     }
 
     #[test]

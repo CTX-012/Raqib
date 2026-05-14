@@ -189,6 +189,71 @@ impl RuntimeState {
     }
 }
 
+/// L19 / UX_CONTRACT.md §5 — transient per-PID stderr buffer feeding
+/// the post-mortem card. Lines accumulate while the process is live;
+/// once `mark_exit` is called the buffer enters read-only state and
+/// auto-prunes after [`StderrBuffer::EXPIRY`] (30 s) per "stderr is
+/// ephemeral" (the privacy stance documented at the top of
+/// `src/storage/run_store.rs`).
+///
+/// Bounded by [`StderrBuffer::MAX_LINES`] × [`StderrBuffer::MAX_LINE_BYTES`]
+/// so a chatty workload cannot OOM the monitor through stderr.
+#[derive(Debug, Default, Clone)]
+pub struct StderrBuffer {
+    /// Captured stderr lines, oldest at front. Bounded ring (drop-oldest
+    /// when over `MAX_LINES`).
+    lines: VecDeque<String>,
+    /// `None` while the PID is still live; `Some(t)` once `mark_exit`
+    /// fires. The buffer is considered expired once `EXPIRY` elapses
+    /// past `t`.
+    exit_at: Option<Instant>,
+}
+
+impl StderrBuffer {
+    /// Cap on the number of retained lines. Matches the exec-wrapper's
+    /// `STDERR_TAIL` so the wrapper-side capture and the runtime-side
+    /// buffer agree on "tail length".
+    pub const MAX_LINES: usize = 64;
+    /// Cap on the per-line byte length. Lines longer than this are
+    /// truncated at the nearest UTF-8 boundary ≤ this length.
+    pub const MAX_LINE_BYTES: usize = 1024;
+    /// Window during which the buffer remains queryable after the
+    /// process exits. Matches the post-mortem card's auto-dismiss
+    /// (`PostMortemCard::WINDOW`) so the two lifetimes converge.
+    pub const EXPIRY: Duration = Duration::from_secs(30);
+
+    fn push_line(&mut self, line: &str) {
+        // Trim to MAX_LINE_BYTES on a char boundary so we never store
+        // an invalid UTF-8 prefix.
+        let clipped: String = if line.len() <= Self::MAX_LINE_BYTES {
+            line.to_string()
+        } else {
+            let mut end = Self::MAX_LINE_BYTES;
+            while end > 0 && !line.is_char_boundary(end) {
+                end -= 1;
+            }
+            line[..end].to_string()
+        };
+        self.lines.push_back(clipped);
+        while self.lines.len() > Self::MAX_LINES {
+            self.lines.pop_front();
+        }
+    }
+
+    fn is_expired_at(&self, now: Instant) -> bool {
+        self.exit_at
+            .is_some_and(|t| now.saturating_duration_since(t) >= Self::EXPIRY)
+    }
+
+    /// Read the captured tail as a fresh `Vec<String>` (oldest first).
+    /// Returns an empty vec when the buffer has expired — callers should
+    /// not need to distinguish "no entry at all" from "entry-but-empty";
+    /// either case omits the stderr block on the post-mortem card.
+    pub fn tail(&self) -> Vec<String> {
+        self.lines.iter().cloned().collect()
+    }
+}
+
 /// Owns the per-tick pipeline and the in-memory state shown by the UI.
 /// Instantiated once at startup; `tick()` is the only entry point.
 pub struct Runtime {
@@ -248,6 +313,15 @@ pub struct Runtime {
     /// telemetry cleanup hooks). Drives the Loading-state warmup
     /// gate in `compute_workload_status`.
     pid_first_seen_at: HashMap<u32, Instant>,
+    /// L19 — transient per-PID stderr capture for the post-mortem card.
+    /// Lives in `Runtime` (not in `state`) because the contents are
+    /// **never persisted** (see `src/storage/run_store.rs` "Privacy
+    /// stance: no stderr persistence") and `state` is otherwise the
+    /// surface the storage layer mirrors. Pruned per tick by
+    /// `sweep_expired_stderr`; entries auto-expire 30 s after
+    /// `mark_stderr_exit` and on `clear_stderr` (called from the L24
+    /// Esc cascade when the post-mortem card dismisses).
+    pid_stderr: HashMap<u32, StderrBuffer>,
     /// Cached USER_HZ. Resolved once at startup via sysconf(_SC_CLK_TCK);
     /// falls back to the standard Linux default of 100 if the call fails.
     clk_tck: u64,
@@ -316,6 +390,7 @@ impl Runtime {
             pid_first_seen_at: HashMap::new(),
             governor_killed_pids: HashMap::new(),
             prev_cpu: HashMap::new(),
+            pid_stderr: HashMap::new(),
             clk_tck: read_clk_tck(),
         }
     }
@@ -363,14 +438,24 @@ impl Runtime {
     }
 
     /// Build the post-mortem snapshot for the most recent run of
-    /// `model`, or `None` when the run store has no history for it.
+    /// `model`. Returns the snapshot **and the exited PID** so the
+    /// caller can stamp the PID onto the `PostMortemCard` for the
+    /// L24 Esc cascade's dismiss-clear hook. `None` when the run
+    /// store has no history for the model.
+    ///
     /// Used by the `Enter`-on-focused-row handler in [UX-2] (UI
     /// Contract v2): the card is shown on demand for the focused
     /// workload, not auto-pushed when any AI process exits.
+    ///
+    /// L19 — consults the transient stderr buffer (keyed by the
+    /// exited PID) so the card can render the captured tail when
+    /// present. Empty tail when no buffer entry exists, when the
+    /// 30 s expiry has elapsed, or when no sampler populated the
+    /// buffer for this PID.
     pub fn latest_postmortem(
         &self,
         model: &str,
-    ) -> Option<crate::ui::panels::postmortem::PostMortem> {
+    ) -> Option<(crate::ui::panels::postmortem::PostMortem, u32)> {
         let rs = self.run_store.as_ref()?;
         let mut recent = rs.recent(model, 1);
         if recent.is_empty() {
@@ -383,10 +468,14 @@ impl Runtime {
             model,
             &self.config.regression,
         );
-        Some(crate::ui::panels::postmortem::PostMortem::from_run_record(
+        let exited_pid = record.summary.pid;
+        let stderr_tail = self.stderr_tail(exited_pid);
+        let post_mortem = crate::ui::panels::postmortem::PostMortem::from_run_record_with_stderr(
             &record,
             baseline_status,
-        ))
+            stderr_tail,
+        );
+        Some((post_mortem, exited_pid))
     }
 
     pub fn toggle_dry_run(&mut self) {
@@ -558,13 +647,38 @@ impl Runtime {
                     Vec::new()
                 };
                 let governor_reason = self.governor_killed_pids.remove(&summary.pid);
+                // L19 — feed the transient buffer's tail into
+                // `ExitContext` so Tier 3.5 classification can see
+                // recent stderr (CUDA OOM / CUDA error patterns)
+                // when a runtime-side sampler has populated the
+                // buffer for this PID. Empty when no sampler ran
+                // against this PID — exec_wrapper-launched workloads
+                // still use their in-process tail. Direct field
+                // access keeps the borrow scoped to `pid_stderr`
+                // (a sibling field) so the surrounding
+                // `&mut self.run_store` borrow stays live.
+                let now_for_stderr = Instant::now();
+                let stderr_lines = self
+                    .pid_stderr
+                    .get(&summary.pid)
+                    .filter(|b| !b.is_expired_at(now_for_stderr))
+                    .map(|b| b.tail())
+                    .unwrap_or_default();
                 let ctx = ExitContext {
                     dmesg_lines,
-                    stderr_lines: Vec::new(), // Tier 1.2d exec wrapper will populate this.
+                    stderr_lines,
                     killed_by_governor: governor_reason.is_some(),
                     governor_reason,
                 };
                 record.exit_reason = classify_exit(summary, &ctx);
+                // L19 — mark the buffer for 30 s expiry from this
+                // exit. Until then the post-mortem card can render
+                // the captured tail; after that the entry is swept
+                // by `sweep_expired_stderr`. Direct field access
+                // for the same borrow-scope reason as above.
+                if let Some(buf) = self.pid_stderr.get_mut(&summary.pid) {
+                    buf.exit_at = Some(now_for_stderr);
+                }
                 // L8 / UX_CONTRACT.md §4 — queue an exit-driven
                 // alert if the classified reason warrants one.
                 // Clean exits are silent per §4 ("never on clean
@@ -666,6 +780,12 @@ impl Runtime {
         self.state.last_lifecycle = Some(lifecycle);
         self.state.tick_count += 1;
         self.state.last_tick = Some(Instant::now());
+
+        // L19 — drop stderr buffers whose 30 s post-exit window has
+        // elapsed. Runs once per tick so retained entries never
+        // outlive their contract-defined lifetime by more than one
+        // tick interval (≤ 1 s at the default rate).
+        self.sweep_expired_stderr();
 
         // Tier 2.3 — refresh the Prometheus exporter snapshot if any
         // operator is scraping. publish_metrics() is non-blocking;
@@ -850,6 +970,87 @@ impl Runtime {
         }
         let delta_ticks = (ticks_now - ticks_prev) as f32;
         (delta_ticks / self.clk_tck as f32 / dt) * 100.0
+    }
+}
+
+// L19 / UX_CONTRACT.md §5 — transient stderr-when-fresh buffer.
+// Lives on `Runtime` rather than `RuntimeState` because the contents
+// are never persisted and never serialised (the L18 privacy guard
+// at tests/no_stderr_persistence_guard.rs walks `src/storage/` and
+// forbids any `stderr*` field on a Serialize-deriving type; `Runtime`
+// is out of that scope on purpose).
+impl Runtime {
+    /// Append a stderr line to `pid`'s transient buffer. Caps at
+    /// [`StderrBuffer::MAX_LINES`] × [`StderrBuffer::MAX_LINE_BYTES`];
+    /// oldest lines fall off when full, lines longer than the byte cap
+    /// are truncated at the nearest UTF-8 boundary. No-op once the
+    /// buffer has been marked exited (post-exit data is suspect).
+    pub fn record_stderr_line(&mut self, pid: u32, line: &str) {
+        let buf = self.pid_stderr.entry(pid).or_default();
+        if buf.exit_at.is_some() {
+            return;
+        }
+        buf.push_line(line);
+    }
+
+    /// Mark `pid`'s buffer as exited at `now`. From this instant the
+    /// buffer is read-only and counts down to expiry per
+    /// [`StderrBuffer::EXPIRY`]. No-op when no buffer entry exists —
+    /// we don't allocate empty entries just to time them.
+    ///
+    /// Exposed with an explicit `now` (rather than calling
+    /// `Instant::now` internally) so tests can rewind the timer and
+    /// exercise the expiry branch without sleeping.
+    pub fn mark_stderr_exit_at(&mut self, pid: u32, now: Instant) {
+        if let Some(buf) = self.pid_stderr.get_mut(&pid) {
+            buf.exit_at = Some(now);
+        }
+    }
+
+    /// Convenience for production callers: mark the exit at
+    /// `Instant::now()`.
+    pub fn mark_stderr_exit(&mut self, pid: u32) {
+        self.mark_stderr_exit_at(pid, Instant::now());
+    }
+
+    /// Drop the buffer entry for `pid`. Called from the L24 Esc
+    /// cascade when the post-mortem card dismisses — the buffer must
+    /// not outlive the card's visibility per "stderr is ephemeral".
+    pub fn clear_stderr(&mut self, pid: u32) {
+        self.pid_stderr.remove(&pid);
+    }
+
+    /// Read `pid`'s current stderr tail. Returns an empty vec when no
+    /// entry exists or when the entry has expired (≥
+    /// [`StderrBuffer::EXPIRY`] past `now`'s `exit_at`). Pure read —
+    /// does not prune; callers that want the buffer dropped must call
+    /// [`Self::clear_stderr`] or [`Self::sweep_expired_stderr_at`].
+    pub fn stderr_tail_at(&self, pid: u32, now: Instant) -> Vec<String> {
+        let Some(buf) = self.pid_stderr.get(&pid) else {
+            return Vec::new();
+        };
+        if buf.is_expired_at(now) {
+            return Vec::new();
+        }
+        buf.tail()
+    }
+
+    /// `stderr_tail_at(pid, Instant::now())`.
+    pub fn stderr_tail(&self, pid: u32) -> Vec<String> {
+        self.stderr_tail_at(pid, Instant::now())
+    }
+
+    /// Drop every buffer entry whose 30 s post-exit window has lapsed
+    /// at `now`. Cheap; called once per tick from the tick loop so
+    /// retained entries never outlive their expiry by more than one
+    /// tick interval.
+    pub fn sweep_expired_stderr_at(&mut self, now: Instant) {
+        self.pid_stderr.retain(|_, buf| !buf.is_expired_at(now));
+    }
+
+    /// `sweep_expired_stderr_at(Instant::now())`.
+    pub fn sweep_expired_stderr(&mut self) {
+        self.sweep_expired_stderr_at(Instant::now());
     }
 }
 

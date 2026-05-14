@@ -67,13 +67,35 @@ pub struct PostMortem {
 
 impl PostMortem {
     /// Build the transient card payload from a persisted `RunRecord`
-    /// and a freshly-computed `BaselineStatus`. Stderr is left empty
-    /// — the headless monitor path doesn't own child stdio (the
-    /// exec wrapper, when it lands, will populate this directly
-    /// before constructing the card). Display name resolves to the
-    /// classifier's `model_name` when present, otherwise the raw
-    /// process name.
+    /// and a freshly-computed `BaselineStatus`, with no stderr
+    /// captured. Use when the runtime has no
+    /// `Runtime::stderr_tail(pid)` buffer for this run (e.g. the
+    /// process exited before the buffer was populated, or 30 s have
+    /// passed since exit and the entry was swept).
+    ///
+    /// Display name resolves to the classifier's `model_name` when
+    /// present, otherwise the raw process name.
     pub fn from_run_record(record: &RunRecord, baseline_status: BaselineStatus) -> Self {
+        Self::from_run_record_with_stderr(record, baseline_status, Vec::new())
+    }
+
+    /// L19 — build the transient card payload, attaching the
+    /// transient stderr tail captured by `Runtime`'s buffer for the
+    /// exiting PID. Pure: the buffer's lifecycle (capture, 30 s
+    /// expiry, dismiss-clear) lives in `Runtime`; the card just
+    /// renders what it's handed.
+    ///
+    /// `stderr_tail` is normally `Runtime::stderr_tail(pid)` at the
+    /// moment the card is constructed. Empty when no entry exists,
+    /// when the entry has expired, or when no sampler has populated
+    /// the buffer for this PID — in any of those cases the render
+    /// path omits the stderr block entirely (no "(no stderr)" empty
+    /// state per UI Contract v2).
+    pub fn from_run_record_with_stderr(
+        record: &RunRecord,
+        baseline_status: BaselineStatus,
+        stderr_tail: Vec<String>,
+    ) -> Self {
         let summary = &record.summary;
         let display_name = summary
             .model_name
@@ -87,7 +109,7 @@ impl PostMortem {
             peak_vram_mb: summary.peak_vram_mb,
             tokens_per_sec: record.metrics.tokens_per_sec_avg,
             exit_reason: record.exit_reason.clone(),
-            stderr_tail: Vec::new(),
+            stderr_tail,
             baseline_status,
         }
     }
@@ -152,6 +174,13 @@ impl BaselineStatus {
 pub struct PostMortemCard {
     pub post_mortem: PostMortem,
     pub shown_at: Instant,
+    /// L19 — PID of the exited process this card is showing, when
+    /// known. Used by the L24 Esc cascade to clear the matching
+    /// transient stderr buffer in `Runtime` on dismiss (so the
+    /// buffer doesn't outlive the card's visibility). `None` for
+    /// cards built without PID context — fixtures in unit tests
+    /// take that path.
+    pub pid: Option<u32>,
 }
 
 impl PostMortemCard {
@@ -431,6 +460,7 @@ mod tests {
         PostMortemCard {
             post_mortem: pm,
             shown_at: Instant::now(),
+            pid: None,
         }
     }
 

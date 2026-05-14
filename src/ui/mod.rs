@@ -114,6 +114,14 @@ fn run_loop(
             // drawing so the banner doesn't render with `0s` remaining
             // for one extra frame.
             app.tick_overlays();
+            // L19 — `tick_overlays` may have auto-dismissed an
+            // expired post-mortem card. Drain the dispatcher's
+            // dismissed-PID signal so the runtime stderr buffer
+            // doesn't linger past the card's visibility (a no-op
+            // when `sweep_expired_stderr` already pruned the entry).
+            if let Some(pid) = app.take_dismissed_pid() {
+                runtime.clear_stderr(pid);
+            }
             terminal.draw(|f| panels::render(f, runtime.state(), &app))?;
             last_render = Instant::now();
         }
@@ -211,6 +219,14 @@ fn apply_action(action: Action, runtime: &mut Runtime, app: &mut App) {
             // pre-L2a `DismissPostmortem` action is gone; dismiss now
             // flows through this cascade.
             app.handle_escape();
+            // L19 — if the cascade just dismissed a post-mortem card
+            // tagged with an exited PID, drop the matching transient
+            // stderr buffer in `Runtime` so the buffer doesn't
+            // outlive the card's visibility per "stderr is
+            // ephemeral".
+            if let Some(pid) = app.take_dismissed_pid() {
+                runtime.clear_stderr(pid);
+            }
         }
         // §4 — `a` acknowledges all visible alerts. Silent when
         // no alerts are active; otherwise sets a transient status
@@ -315,10 +331,14 @@ fn handle_show_postmortem(runtime: &Runtime, app: &mut App) {
         return;
     };
     match runtime.latest_postmortem(&model) {
-        Some(post_mortem) => {
+        Some((post_mortem, exited_pid)) => {
             app.show_postmortem(crate::ui::panels::postmortem::PostMortemCard {
                 post_mortem,
                 shown_at: Instant::now(),
+                // L19 — stamp the exited PID so the L24 Esc cascade
+                // can drop the matching transient stderr buffer on
+                // dismiss.
+                pid: Some(exited_pid),
             });
         }
         None => {

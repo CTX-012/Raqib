@@ -81,6 +81,14 @@ pub struct App {
     /// plan row originally spec'd `RuntimeState`; deviation is
     /// documented in the L6 commit.
     alerts: AlertState,
+    /// L19 — one-shot signal set by `handle_escape` when it dismisses
+    /// a post-mortem card. Consumed by the dispatcher in
+    /// `ui::apply_action` so it can ask `Runtime` to drop the matching
+    /// transient stderr buffer. Lives on `App` rather than being
+    /// returned from `handle_escape` so the existing
+    /// `handle_escape -> bool` contract (consumed-or-quit) stays
+    /// stable for the L24 cascade tests.
+    dismissed_pid: Option<u32>,
 }
 
 impl Default for App {
@@ -108,6 +116,7 @@ impl App {
             status: None,
             symbol_set,
             alerts: AlertState::new(),
+            dismissed_pid: None,
         }
     }
 
@@ -309,8 +318,28 @@ impl App {
     /// Clear the post-mortem card. Triggered by `Enter`, by the
     /// cascading `Esc` priority, or by `tick_overlays` when the
     /// 30-second window lapses.
+    ///
+    /// L19 — funnels through `dismissed_pid` so the dispatcher's
+    /// post-Esc hook can drop the matching `Runtime` stderr buffer.
+    /// `tick_overlays`'s auto-dismiss path also sets the signal,
+    /// but by that time the buffer has been swept by
+    /// `Runtime::sweep_expired_stderr` anyway (both fire at the
+    /// 30 s mark) — the dispatcher's `clear_stderr` call is a no-op
+    /// when the entry is already gone.
     pub fn dismiss_postmortem(&mut self) {
-        self.postmortem = None;
+        if let Some(card) = self.postmortem.take() {
+            self.dismissed_pid = card.pid;
+        }
+    }
+
+    /// L19 — take-and-clear the most recent dismissed-card PID. The
+    /// dispatcher in `ui::apply_action` calls this after every Esc
+    /// to find out whether the cascade just dismissed a card, and
+    /// if so for which PID, so it can ask `Runtime` to drop the
+    /// matching transient stderr buffer. `None` when no card was
+    /// dismissed this turn or the dismissed card had no PID context.
+    pub fn take_dismissed_pid(&mut self) -> Option<u32> {
+        self.dismissed_pid.take()
     }
 
     /// Drop expired armed-kill / post-mortem snapshots. Called once
@@ -326,7 +355,14 @@ impl App {
         if let Some(card) = &self.postmortem
             && card.is_expired()
         {
-            self.postmortem = None;
+            // L19 — funnel through `dismiss_postmortem` so the auto-
+            // dismiss path also signals `dismissed_pid`. The runtime
+            // stderr buffer for this PID has already been swept by
+            // `Runtime::sweep_expired_stderr` at the same 30 s mark,
+            // so the dispatcher's `clear_stderr` call is a no-op
+            // here — but signalling keeps the two dismiss paths
+            // (Esc / auto) behaviourally symmetric.
+            self.dismiss_postmortem();
         }
         if let Some((_, t)) = &self.status
             && t.elapsed() >= STATUS_TTL
@@ -358,6 +394,10 @@ impl App {
     /// banner the user hadn't visually consumed yet.
     pub fn handle_escape(&mut self) -> bool {
         if self.postmortem.is_some() {
+            // L19 — `dismiss_postmortem` funnels the dismissed
+            // card's PID into `dismissed_pid` so the dispatcher
+            // can ask `Runtime` to drop the matching transient
+            // stderr buffer post-cascade.
             self.dismiss_postmortem();
             return true;
         }
@@ -642,6 +682,7 @@ mod tests {
                 baseline_status: BaselineStatus::NotAvailable,
             },
             shown_at: std::time::Instant::now(),
+            pid: None,
         }
     }
 

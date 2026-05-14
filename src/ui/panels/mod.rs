@@ -27,7 +27,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
 use crate::runtime::RuntimeState;
-use crate::ui::panels::live_detail::LiveDetailCard;
+use crate::ui::panels::live_detail::{LiveDetailBuffers, LiveDetailCard};
 use crate::ui::theme::UiTheme;
 
 use super::app::App;
@@ -38,6 +38,7 @@ pub fn render(
     app: &App,
     theme: &UiTheme,
     live_detail: Option<&LiveDetailCard>,
+    live_buffers: Option<&LiveDetailBuffers>,
 ) {
     let full = f.area();
 
@@ -90,7 +91,7 @@ pub fn render(
     // necessarily opened after any pre-existing post-mortem — same
     // "latest wins" rule that governs same-kind card replacement.
     if let Some(card) = live_detail {
-        live_detail::render(f, full, card, theme);
+        live_detail::render(f, full, card, theme, live_buffers);
     } else if let Some(card) = app.postmortem() {
         postmortem::render(f, full, card, theme);
     }

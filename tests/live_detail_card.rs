@@ -82,7 +82,7 @@ fn live_card_title_marks_kind_as_live() {
     terminal
         .draw(|f| {
             let area = Rect::new(0, 0, 80, 24);
-            live_detail::render(f, area, &card, &theme);
+            live_detail::render(f, area, &card, &theme, None);
         })
         .expect("draw");
 
@@ -114,7 +114,7 @@ fn live_card_body_contains_pid_cpu_ram() {
     terminal
         .draw(|f| {
             let area = Rect::new(0, 0, 80, 24);
-            live_detail::render(f, area, &card, &theme);
+            live_detail::render(f, area, &card, &theme, None);
         })
         .expect("draw");
 
@@ -141,11 +141,11 @@ fn live_card_body_contains_pid_cpu_ram() {
 }
 
 #[test]
-fn live_card_carries_l17_sparkline_placeholder() {
-    // L17 will swap the placeholder row for live ring-buffer
-    // sparklines. Until then this marker must render so the card
-    // doesn't look "blank below the metrics" and so future
-    // maintainers have a clear swap target.
+fn live_card_with_no_buffers_renders_collecting_rows() {
+    // L17 / §5 — card open but no samples yet (first tick after
+    // Enter). Each of the four metric rows renders a muted
+    // `(collecting…)` placeholder so the height matches the
+    // post-collection layout from the first frame.
     let theme = current_theme("dark");
     let backend = TestBackend::new(80, 24);
     let mut terminal = Terminal::new(backend).expect("test backend");
@@ -154,7 +154,7 @@ fn live_card_carries_l17_sparkline_placeholder() {
     terminal
         .draw(|f| {
             let area = Rect::new(0, 0, 80, 24);
-            live_detail::render(f, area, &card, &theme);
+            live_detail::render(f, area, &card, &theme, None);
         })
         .expect("draw");
 
@@ -167,9 +167,133 @@ fn live_card_carries_l17_sparkline_placeholder() {
         all.push('\n');
     }
     assert!(
-        all.contains("pending L17"),
-        "sparkline placeholder missing: {all}"
+        all.contains("(collecting…)"),
+        "expected (collecting…) placeholder when buffers are None:\n{all}"
     );
+    // Each metric label must still appear so the row scaffold is in
+    // place — render path can't omit rows or the card height would
+    // shift between the pre-data and post-data state.
+    for label in ["CPU", "RAM", "VRAM", "Tokens/s"] {
+        assert!(
+            all.contains(label),
+            "expected sparkline label {label} in collecting state:\n{all}"
+        );
+    }
+    assert!(
+        !all.contains("pending L17"),
+        "pre-L17 placeholder must not leak into the themed render path:\n{all}"
+    );
+}
+
+#[test]
+fn live_card_with_filled_buffers_renders_sparkline_glyphs() {
+    // L17 / §5 — once samples arrive, the `(collecting…)` text
+    // disappears and the row carries block-character cells. Push
+    // five known values into each buffer and assert at least one
+    // block glyph (▁▂▃▄▅▆▇█) renders inside the card area.
+    use edge_monitor::ui::panels::live_detail::LiveDetailBuffers;
+
+    let theme = current_theme("dark");
+    let backend = TestBackend::new(80, 24);
+    let mut terminal = Terminal::new(backend).expect("test backend");
+    let card = LiveDetailCard::new(fixture("phi3-mini"));
+    let mut buffers = LiveDetailBuffers::new(4242);
+    for v in [10.0, 30.0, 50.0, 70.0, 90.0] {
+        buffers.cpu.push(v);
+        buffers.ram_pct.push(v);
+        buffers.vram_pct.push(v);
+        buffers.tokens_per_sec.push(v);
+    }
+
+    terminal
+        .draw(|f| {
+            let area = Rect::new(0, 0, 80, 24);
+            live_detail::render(f, area, &card, &theme, Some(&buffers));
+        })
+        .expect("draw");
+
+    let buffer = terminal.backend().buffer().clone();
+    let mut all = String::new();
+    for y in 0..24 {
+        for x in 0..80 {
+            all.push_str(buffer.cell((x, y)).expect("cell").symbol());
+        }
+        all.push('\n');
+    }
+    assert!(
+        !all.contains("(collecting…)"),
+        "filled buffers must replace the collecting placeholder:\n{all}"
+    );
+    let blocks = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+    assert!(
+        blocks.iter().any(|c| all.contains(*c)),
+        "expected at least one block-character glyph in rendered card:\n{all}"
+    );
+    // Trailing instantaneous-value column should show the most
+    // recent sample (90.0) for the metrics with threshold range.
+    assert!(
+        all.contains("90.0%"),
+        "expected most-recent percentage in trailing column:\n{all}"
+    );
+}
+
+#[test]
+fn live_card_sparkline_critical_cell_uses_theme_critical_fg() {
+    // §14 + §5 — when the latest buffered CPU sample is ≥95%, the
+    // corresponding sparkline cell must render in theme.critical
+    // (not theme.foreground). This is the regression guard for
+    // L17's threshold coloring path.
+    use edge_monitor::ui::panels::live_detail::LiveDetailBuffers;
+    use ratatui::style::Color;
+
+    let theme = current_theme("dark");
+    let backend = TestBackend::new(80, 24);
+    let mut terminal = Terminal::new(backend).expect("test backend");
+    let card = LiveDetailCard::new(fixture("phi3-mini"));
+    let mut buffers = LiveDetailBuffers::new(4242);
+    // Single high sample so we can find a single critical cell.
+    buffers.cpu.push(97.0);
+    buffers.ram_pct.push(10.0);
+    buffers.vram_pct.push(10.0);
+    buffers.tokens_per_sec.push(10.0);
+
+    terminal
+        .draw(|f| {
+            let area = Rect::new(0, 0, 80, 24);
+            live_detail::render(f, area, &card, &theme, Some(&buffers));
+        })
+        .expect("draw");
+
+    let buffer = terminal.backend().buffer().clone();
+    let blocks = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+    let mut found_critical = false;
+    for y in 0..24 {
+        for x in 0..80 {
+            let cell = buffer.cell((x, y)).expect("cell");
+            let sym = cell.symbol();
+            // A block glyph rendered in theme.critical proves the
+            // threshold coloring fired. There's exactly one CPU
+            // sample at 97% — finding the cell anywhere in the
+            // card region is enough.
+            if blocks.iter().any(|b| sym.starts_with(*b))
+                && cell.style().fg == Some(theme.critical)
+            {
+                found_critical = true;
+                break;
+            }
+        }
+        if found_critical {
+            break;
+        }
+    }
+    assert!(
+        found_critical,
+        "expected at least one critical-colored sparkline cell for CPU=97%"
+    );
+    // Sanity check: the critical color we're matching is actually
+    // the contract's dark-palette critical, not some accident from
+    // an unrelated panel.
+    assert_eq!(theme.critical, Color::Rgb(0xf7, 0x76, 0x8e));
 }
 
 #[test]
@@ -189,7 +313,7 @@ fn live_card_title_fg_tracks_theme_accent() {
     terminal
         .draw(|f| {
             let area = Rect::new(0, 0, 80, 24);
-            live_detail::render(f, area, &card, &theme);
+            live_detail::render(f, area, &card, &theme, None);
         })
         .expect("draw");
 

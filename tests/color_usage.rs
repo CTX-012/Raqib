@@ -39,7 +39,7 @@ fn footer_key_letters_render_in_accent() {
     let app = App::new();
 
     terminal
-        .draw(|f| panels::render(f, runtime.state(), &app, &theme, None))
+        .draw(|f| panels::render(f, runtime.state(), &app, &theme, None, None))
         .expect("draw");
 
     let buffer = terminal.backend().buffer().clone();
@@ -78,7 +78,7 @@ fn footer_descriptions_render_in_muted() {
     let app = App::new();
 
     terminal
-        .draw(|f| panels::render(f, runtime.state(), &app, &theme, None))
+        .draw(|f| panels::render(f, runtime.state(), &app, &theme, None, None))
         .expect("draw");
 
     let buffer = terminal.backend().buffer().clone();
@@ -183,7 +183,7 @@ fn vitals_panel_renders_with_muted_block_border() {
     let app = App::new();
 
     terminal
-        .draw(|f| panels::render(f, runtime.state(), &app, &theme, None))
+        .draw(|f| panels::render(f, runtime.state(), &app, &theme, None, None))
         .expect("draw");
 
     let buffer = terminal.backend().buffer().clone();
@@ -216,7 +216,7 @@ fn workloads_panel_renders_with_accent_block_border_when_focused() {
     let app = App::new();
 
     terminal
-        .draw(|f| panels::render(f, runtime.state(), &app, &theme, None))
+        .draw(|f| panels::render(f, runtime.state(), &app, &theme, None, None))
         .expect("draw");
 
     let buffer = terminal.backend().buffer().clone();
@@ -253,7 +253,7 @@ fn switching_theme_changes_footer_key_letter_color() {
         let runtime = Runtime::new(Config::default());
         let app = App::new();
         terminal
-            .draw(|f| panels::render(f, runtime.state(), &app, theme, None))
+            .draw(|f| panels::render(f, runtime.state(), &app, theme, None, None))
             .expect("draw");
         let buffer = terminal.backend().buffer().clone();
         let footer_y = 39u16;

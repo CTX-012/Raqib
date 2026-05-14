@@ -30,7 +30,7 @@ use ratatui::backend::CrosstermBackend;
 
 use crate::runtime::Runtime;
 use crate::ui::panels::armed_banner::ArmedKill;
-use crate::ui::panels::live_detail::{LiveDetail, LiveDetailCard};
+use crate::ui::panels::live_detail::{LiveDetail, LiveDetailBuffers, LiveDetailCard};
 use crate::ui::theme::UiTheme;
 
 use app::{Action, App};
@@ -83,6 +83,14 @@ fn run_loop(
     // because pre-L16 dispatch + multiple test fixtures already wire
     // it that way.
     let mut live_detail: Option<LiveDetailCard> = None;
+    // L17 / §5 — sparkline rolling buffers for the live-detail card.
+    // Pinned to the card's PID via `LiveDetailBuffers.pid` so a
+    // focus shift to another workload resets the buffers cleanly.
+    // Stays paired with `live_detail` (both created on Enter, both
+    // dropped on dismiss / expiry) — see L16's BACKLOG entry for
+    // why this state lives here rather than on `App`. Lifting both
+    // to App together is filed as a follow-up refactor row.
+    let mut live_buffers: Option<LiveDetailBuffers> = None;
 
     // Prime the state once so the first frame isn't empty.
     if let Err(e) = runtime.tick() {
@@ -106,7 +114,13 @@ fn run_loop(
             && let Ok(Event::Key(key)) = event::read()
             && let Some(action) = input::translate(key, &app)
         {
-            apply_action(action, runtime, &mut app, &mut live_detail);
+            apply_action(
+                action,
+                runtime,
+                &mut app,
+                &mut live_detail,
+                &mut live_buffers,
+            );
         }
 
         if last_tick.elapsed() >= tick {
@@ -125,6 +139,16 @@ fn run_loop(
             for event in runtime.drain_exit_alerts() {
                 app.observe_exit(now, &event);
             }
+            // L17 / §5 — append one sample to each sparkline buffer
+            // when a live-detail card is open. No-op when the card
+            // is closed (buffers are None) or when the focused PID
+            // has exited mid-card (sample() short-circuits on the
+            // PID lookup). Tied to the tick cadence — one sample
+            // per `runtime.tick_interval_ms`, which defaults to
+            // 1 s; the 60-entry buffer therefore holds 60 s.
+            if let Some(buffers) = live_buffers.as_mut() {
+                buffers.sample(runtime.state());
+            }
             last_tick = now;
         }
 
@@ -139,9 +163,20 @@ fn run_loop(
                 && card.is_expired()
             {
                 live_detail = None;
+                // Card gone → drop the sparkline buffers too. They
+                // re-init on the next Enter, pinned to whatever PID
+                // is focused at that moment.
+                live_buffers = None;
             }
             terminal.draw(|f| {
-                panels::render(f, runtime.state(), &app, &theme, live_detail.as_ref())
+                panels::render(
+                    f,
+                    runtime.state(),
+                    &app,
+                    &theme,
+                    live_detail.as_ref(),
+                    live_buffers.as_ref(),
+                )
             })?;
             last_render = Instant::now();
         }
@@ -155,6 +190,7 @@ fn apply_action(
     runtime: &mut Runtime,
     app: &mut App,
     live_detail: &mut Option<LiveDetailCard>,
+    live_buffers: &mut Option<LiveDetailBuffers>,
 ) {
     match action {
         Action::Quit => app.request_quit(),
@@ -238,16 +274,19 @@ fn apply_action(
             }
         }
         Action::OpenGrafana => handle_open_dashboard(runtime, app),
-        Action::OpenDetail => handle_open_detail(runtime, app, live_detail),
+        Action::OpenDetail => handle_open_detail(runtime, app, live_detail, live_buffers),
         Action::EscapeCascade => {
             // L16 — live-detail card sits at the front of the dismiss
             // queue; only when nothing live is up do we delegate to
             // `App::handle_escape` (which owns the post-mortem /
             // armed-kill / history / help / quit cascade). Keeping the
             // live branch local avoids reaching into app.rs for L16,
-            // which is L24's edit territory.
+            // which is L24's edit territory. L17 — drop the sparkline
+            // buffers alongside the card so a re-open with a different
+            // PID doesn't reuse the previous workload's samples.
             if live_detail.is_some() {
                 *live_detail = None;
+                *live_buffers = None;
             } else {
                 app.handle_escape();
             }
@@ -344,13 +383,16 @@ fn handle_open_detail(
     runtime: &Runtime,
     app: &mut App,
     live_detail: &mut Option<LiveDetailCard>,
+    live_buffers: &mut Option<LiveDetailBuffers>,
 ) {
     // Enter on an already-open card dismisses it — the card's
     // footer advertises `[Enter] dismiss`, and routing the second
     // press here keeps the contract honest without needing a new
-    // Action variant.
+    // Action variant. L17: also drops the sparkline buffers so the
+    // next open starts fresh against the then-focused PID.
     if live_detail.is_some() {
         *live_detail = None;
+        *live_buffers = None;
         return;
     }
     if app.postmortem().is_some() {
@@ -366,9 +408,17 @@ fn handle_open_detail(
 
     // Running-workload branch: live PID present in this tick's
     // annotated processes wins outright. Builds a LiveDetail
-    // snapshot and parks it in the local slot.
+    // snapshot and parks it in the local slot. L17 / §5 — also
+    // spins up the per-metric rolling buffers pinned to this PID
+    // and primes the first sample from the current tick so the
+    // sparkline rows have something to render on the very next
+    // frame (otherwise the row would read `(collecting…)` for one
+    // tick before any data appeared).
     if let Some(detail) = LiveDetail::from_focused(state, pid) {
+        let mut buffers = LiveDetailBuffers::new(pid);
+        buffers.sample(state);
         *live_detail = Some(LiveDetailCard::new(detail));
+        *live_buffers = Some(buffers);
         return;
     }
 

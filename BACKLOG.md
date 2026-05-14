@@ -137,6 +137,63 @@ pub mod degraded_line {
 }
 ```
 
+### CAR-13: §0 mission-line template
+
+**Surfaced by:** L25 mission-line header (Linux) / W46 mission-line
+header (Windows mirror).
+
+L25 (f15a5f7) shipped the §0 mission line header with the literal
+string hardcoded:
+
+```
+edge_monitor · {n} workloads · {m} degraded · press ? for help
+```
+
+`ux_contract` v0.3.5 had no §0 mission template to source this
+from. WinCleanup's W46 (Windows mirror) also hardcoded the same
+string and flagged the same gap.
+
+Contract is drafting CAR-13 for v0.3.6 to add a `mission` module
+exposing the template as a const. When v0.3.6 vendors on the
+Linux path-dep, L25's hardcoded string should swap to consume
+`mission::TEMPLATE`.
+
+Suggested addition to `ux_contract`:
+```rust
+pub mod mission {
+    /// §0 mission line shown as the TUI header.
+    pub const TEMPLATE: &str =
+        "edge_monitor · {n} workloads · {m} degraded · press ? for help";
+}
+```
+
+Resolution: tracked. Awaits v0.3.6 landing on the Linux path-dep.
+
+## Architectural decisions to revisit
+
+### L16 state placement: live_detail card lives in run_loop's local `Option<LiveDetailCard>` rather than on App
+
+**Filed:** 2026-05-14 by LinuxImpl.
+
+L16 (39eba7e) parked the live-detail card in `run_loop`'s local
+`Option<LiveDetailCard>` threaded through `apply_action` and
+`panels::render`, rather than adding a `live_detail` field on
+`App`. The dispatch instruction "don't touch src/ui/app.rs" was
+meant to protect L24's territory but was interpreted as a
+permanent restriction. State placement is functionally correct
+(gates green, 19 new tests pass) but architecturally
+questionable — modal card state arguably belongs on `App`
+alongside other card state (`postmortem`, `armed_kill`,
+`history`, `show_help`).
+
+Revisit during L17 (sparklines). If L17's rolling buffers also
+need to live in `run_loop` local scope, the pattern compounds
+and a refactor lifting both to `App` may be cheaper than
+continuing the local-scope pattern.
+
+Resolution: leave L16 as-is for now. L17 implementer decides
+whether to absorb the refactor or continue the pattern.
+
 ## v1.1 (post-v1.0)
 
 ### Activity panel: surface AlertState raise / ack events

@@ -37,6 +37,20 @@ suite). Not a regression — pre-existed across L1-L8.
 Proposal: tighten the test bounds or use a synthetic clock to
 avoid wall-clock dependency. Low priority; not blocking ship.
 
+### Wide-tier two-column workload selection highlight (filed 2026-05-13, LinuxParity)
+
+**Surfaced by:** L22 (1b53e65).
+
+L22 shipped the Wide-tier 2-column workload layout via
+`RuntimeState` clone+filter, but `App::selected_index` is a single
+global pointer with no half-awareness. At Wide tier with 4+
+workloads, the same local index could render selected in both
+halves simultaneously.
+
+Resolution: map global `selected_index` to `(half, local)` and only
+highlight in the active half. Probably bundles cleanly with L21's
+panel audit or a v1.0-polish row.
+
 ## Resolved Contract Amendment Requests
 
 ### CAR-7 — RESOLVED in v0.3.4

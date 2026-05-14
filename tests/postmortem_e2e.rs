@@ -5,13 +5,43 @@
 //! baseline-status banding. Render-shape assertions live in
 //! `src/ui/panels/postmortem.rs::tests` since `build_lines` is
 //! pub-crate; this file owns the cross-module integration claims.
+//!
+//! L24 added the §6 Esc cascade tests that pin overlay-close >
+//! alerts-ack > quit precedence. They live in this file because the
+//! pre-existing card > armed-kill cascade test already lived here and
+//! the §6 cascade is one coherent contract.
 
+use std::time::Instant;
+
+use edge_monitor::runtime::ExitAlertEvent;
+use edge_monitor::storage::run_store::ExitReason;
 use edge_monitor::ui::app::App;
 use edge_monitor::ui::panels::armed_banner::ArmedKill;
 use edge_monitor::ui::panels::postmortem::{
     BaselineStatus, PostMortem, PostMortemCard,
 };
-use edge_monitor::storage::run_store::ExitReason;
+use ux_contract::AlertId;
+
+/// Fire an instant exit-driven alert (`OomDetected`) so the test sees
+/// `active_count() > 0` without having to step through the per-tick
+/// sustain gate. Exit-driven alerts bypass the sustain window by
+/// design — they're "this PID exited with X reason", which has no
+/// "still breaching" semantics.
+fn fire_active_alert(app: &mut App) {
+    app.observe_exit(
+        Instant::now(),
+        &ExitAlertEvent {
+            pid: 1234,
+            workload_name: "test-llm".into(),
+            alert_id: AlertId::OomDetected,
+            reason: None,
+        },
+    );
+    assert!(
+        app.alerts().active_count() > 0,
+        "test fixture must leave at least one Active alert behind",
+    );
+}
 
 fn fixture_post_mortem(model: &str) -> PostMortem {
     PostMortem {
@@ -87,6 +117,80 @@ fn cascading_escape_clears_card_before_armed_kill() {
     // Second Esc disarms the kill.
     assert!(app.handle_escape());
     assert!(app.armed_kill().is_none());
+}
+
+/// L24 / §6 step 3 > step 4 — when history is open AND alerts are
+/// visible, Esc closes history first. The user has to press Esc a
+/// second time to acknowledge the alerts. This is the rule the row
+/// description calls out explicitly ("ack all comes after history/
+/// help close").
+#[test]
+fn cascading_escape_closes_history_before_acking_alerts() {
+    let mut app = App::new();
+    app.open_history("phi3-mini".into(), Vec::new());
+    fire_active_alert(&mut app);
+    assert!(app.is_history_open());
+
+    // First Esc: history closes; alerts must NOT be ack'd this round.
+    assert!(app.handle_escape());
+    assert!(!app.is_history_open());
+    assert!(
+        app.alerts().active_count() > 0,
+        "alerts must survive the Esc that closed history — step 3 \
+         is strictly above step 4 in the §6 cascade",
+    );
+
+    // Second Esc: nothing else in the way, alerts get ack'd.
+    assert!(app.handle_escape());
+    assert_eq!(app.alerts().active_count(), 0);
+    assert!(!app.should_quit(), "step 4 ack must not fall through to step 5 quit");
+}
+
+/// L24 / §6 step 3 > step 4 — help variant of the precedence rule.
+/// History and help are both step 3 per §6; pin help separately so a
+/// future refactor that splits the two cases cannot regress one
+/// without the other failing visibly.
+#[test]
+fn cascading_escape_closes_help_before_acking_alerts() {
+    let mut app = App::new();
+    app.toggle_help();
+    fire_active_alert(&mut app);
+    assert!(app.show_help());
+
+    assert!(app.handle_escape());
+    assert!(!app.show_help());
+    assert!(
+        app.alerts().active_count() > 0,
+        "alerts must survive the Esc that closed help",
+    );
+
+    assert!(app.handle_escape());
+    assert_eq!(app.alerts().active_count(), 0);
+    assert!(!app.should_quit());
+}
+
+/// L24 / §6 step 4 > step 5 — when alerts are visible and no card /
+/// disarm / overlay is in the way, Esc acknowledges the alerts
+/// instead of quitting. Without this step, an alert region open
+/// over an otherwise-idle layout would receive a quit on Esc, which
+/// would be a footgun for an operator using Esc as "clear this
+/// noise".
+#[test]
+fn cascading_escape_acks_alerts_before_quit_when_no_overlay_is_open() {
+    let mut app = App::new();
+    fire_active_alert(&mut app);
+    assert!(app.postmortem().is_none());
+    assert!(app.armed_kill().is_none());
+    assert!(!app.is_history_open());
+    assert!(!app.show_help());
+
+    let consumed = app.handle_escape();
+    assert!(consumed, "step 4 must return true to distinguish from step 5 quit");
+    assert_eq!(app.alerts().active_count(), 0);
+    assert!(
+        !app.should_quit(),
+        "step 4 ack must take precedence over step 5 quit per §6",
+    );
 }
 
 #[test]

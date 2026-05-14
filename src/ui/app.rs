@@ -335,18 +335,27 @@ impl App {
         }
     }
 
-    /// Cascading-priority Escape handler per UI Contract v2.
+    /// Cascading-priority Escape handler per UX_CONTRACT.md §6.
     ///
     /// Priority order:
     ///   1. post-mortem card → dismiss
     ///   2. armed kill → disarm
-    ///   3. other overlay (history, help) → close
-    ///   4. nothing to dismiss → quit (same as `q`)
+    ///   3. history or help overlay → close
+    ///   4. alerts visible → acknowledge all (same effect as `a`)
+    ///   5. nothing to dismiss → quit (same as `q`)
     ///
-    /// Returns `true` when steps 1–3 consumed the press, `false`
-    /// when step 4 fired. Either way `quit_requested` is set in
-    /// the step-4 branch; callers can use the return to log
+    /// Returns `true` when steps 1–4 consumed the press, `false`
+    /// when step 5 fired. Either way `quit_requested` is set in
+    /// the step-5 branch; callers can use the return to log
     /// `Esc → quit` differently from a `q`-quit if desired.
+    ///
+    /// L24 / §6 — step 4 sits **after** the overlay-close step on
+    /// purpose. When the alert region is non-empty *and* history
+    /// or help is also open, the first Esc closes the overlay; the
+    /// operator has to press Esc a second time to ack the alerts.
+    /// Order matters: an Esc that silently ack'd alerts while the
+    /// user was just trying to close history would erase the alert
+    /// banner the user hadn't visually consumed yet.
     pub fn handle_escape(&mut self) -> bool {
         if self.postmortem.is_some() {
             self.dismiss_postmortem();
@@ -364,7 +373,15 @@ impl App {
             self.show_help = false;
             return true;
         }
-        // UI Contract v2 step 4: nothing to dismiss → quit.
+        // §6 step 4 — when no card / disarm / overlay is in the way
+        // but alerts are visible on screen, Esc acknowledges them.
+        // Sits below the overlay-close step so an Esc with history
+        // or help open closes the overlay first.
+        if self.alerts.active_count() > 0 {
+            self.acknowledge_alerts();
+            return true;
+        }
+        // §6 step 5: nothing to dismiss → quit.
         self.quit_requested = true;
         false
     }

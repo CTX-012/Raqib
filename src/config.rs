@@ -31,6 +31,29 @@ pub struct Config {
     pub regression: RegressionConfig,
     pub telemetry: TelemetryConfig,
     pub dashboard: DashboardConfig,
+    pub ui: UiConfig,
+}
+
+/// TUI presentation knobs. Today this is only the §13 theme name; future
+/// rows that add presentation toggles (e.g. dim-mode, no-color override)
+/// land here so they share one `[ui]` section in the TOML.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UiConfig {
+    /// One of `dark` / `light` / `high-contrast` (or `high_contrast`).
+    /// Case-insensitive. Unknown values fall back to `dark` at render
+    /// time — the validator only warns rather than rejecting so a
+    /// freshly-pulled `--theme` value that this binary doesn't know
+    /// yet still lets the operator launch the TUI.
+    pub theme: String,
+}
+
+impl Default for UiConfig {
+    fn default() -> Self {
+        Self {
+            theme: "dark".to_string(),
+        }
+    }
 }
 
 /// [UX-3] — what the `g` keybinding opens in the user's default

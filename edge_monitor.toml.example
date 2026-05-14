@@ -124,3 +124,11 @@ prometheus_bind = ""
 # instantaneous fps flows into the telemetry accumulator. Disabled by
 # default.
 vision_probe_socket = ""
+
+[ui]
+# Color theme (UX_CONTRACT.md §13). One of "dark" (default), "light", or
+# "high-contrast" / "high_contrast". Case-insensitive. The CLI flag
+# `--theme <name>` overrides this for a single launch. Unknown values
+# fall back to "dark" at render time so an unrecognised theme name
+# doesn't refuse to start the TUI.
+theme = "dark"

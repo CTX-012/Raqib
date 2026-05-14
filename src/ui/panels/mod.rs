@@ -25,10 +25,11 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
 use crate::runtime::RuntimeState;
+use crate::ui::theme::UiTheme;
 
 use super::app::App;
 
-pub fn render(f: &mut Frame, state: &RuntimeState, app: &App) {
+pub fn render(f: &mut Frame, state: &RuntimeState, app: &App, theme: &UiTheme) {
     let full = f.area();
 
     // [UX-1] — reserve the top row for the armed-kill banner ONLY when
@@ -61,7 +62,7 @@ pub fn render(f: &mut Frame, state: &RuntimeState, app: &App) {
     // 6-panel layout that surfaced rogues/culprits/audit). v0.3 §1
     // defines a single layout, so the default render is the only
     // path now.
-    render_default(f, body_area, state, app);
+    render_default(f, body_area, state, app, theme);
 
     if app.show_help() {
         help::render(f, body_area);
@@ -85,7 +86,7 @@ pub fn render(f: &mut Frame, state: &RuntimeState, app: &App) {
 /// the top-level structure is locked here. §22 (sizing breakpoints)
 /// will hide Top processes in narrow mode per §12 — that's L22's
 /// row, not this one.
-fn render_default(f: &mut Frame, area: Rect, state: &RuntimeState, app: &App) {
+fn render_default(f: &mut Frame, area: Rect, state: &RuntimeState, app: &App, theme: &UiTheme) {
     let layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -98,7 +99,7 @@ fn render_default(f: &mut Frame, area: Rect, state: &RuntimeState, app: &App) {
         ])
         .split(area);
 
-    render_status_bar(f, layout[0], state, app);
+    render_status_bar(f, layout[0], state, app, theme);
     vitals::render(f, layout[1], state);
     workloads::render(f, layout[2], state, app);
     top_processes::render(f, layout[3], state, app.top_processes_sort());
@@ -106,7 +107,13 @@ fn render_default(f: &mut Frame, area: Rect, state: &RuntimeState, app: &App) {
     render_footer(f, layout[5], app);
 }
 
-fn render_status_bar(f: &mut Frame, area: Rect, state: &RuntimeState, _app: &App) {
+fn render_status_bar(
+    f: &mut Frame,
+    area: Rect,
+    state: &RuntimeState,
+    _app: &App,
+    theme: &UiTheme,
+) {
     let mode_label = if state.dry_run { "DRY-RUN" } else { "ENFORCE" };
     let mode_color = if state.dry_run {
         Color::Yellow
@@ -114,10 +121,16 @@ fn render_status_bar(f: &mut Frame, area: Rect, state: &RuntimeState, _app: &App
         Color::Red
     };
 
+    // L20 / §13 — the status-bar title span is the single panel-fill
+    // point that carries the theme today. L21 will sweep the rest of
+    // the panels; this site exists so `tests/theme_switching.rs` can
+    // observe the contract palette landing on rendered cells.
     let spans = vec![
         Span::styled(
             " edge_monitor ",
-            Style::default().add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme.foreground)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::raw(" "),
         Span::styled(

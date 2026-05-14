@@ -13,6 +13,7 @@ pub mod app;
 pub mod input;
 pub mod panels;
 pub mod symbols;
+pub mod theme;
 
 use std::io;
 use std::sync::Arc;
@@ -29,19 +30,27 @@ use ratatui::backend::CrosstermBackend;
 
 use crate::runtime::Runtime;
 use crate::ui::panels::armed_banner::ArmedKill;
+use crate::ui::theme::UiTheme;
 
 use app::{Action, App};
 
 /// Drive the TUI tick/render loop until the user quits or `shutdown` is set.
 /// Caller is responsible for handling SIGINT/SIGTERM via `shutdown`.
-pub fn run(mut runtime: Runtime, shutdown: Arc<AtomicBool>) -> anyhow::Result<Runtime> {
+/// `theme` is resolved by the caller from CLI flag → config → §13
+/// default; the loop owns the converted `UiTheme` for the session and
+/// passes it to every render call.
+pub fn run(
+    mut runtime: Runtime,
+    shutdown: Arc<AtomicBool>,
+    theme: UiTheme,
+) -> anyhow::Result<Runtime> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let result = run_loop(&mut terminal, &mut runtime, shutdown);
+    let result = run_loop(&mut terminal, &mut runtime, shutdown, theme);
 
     // Always restore the terminal, even if the loop errored.
     disable_raw_mode().ok();
@@ -56,6 +65,7 @@ fn run_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     runtime: &mut Runtime,
     shutdown: Arc<AtomicBool>,
+    theme: UiTheme,
 ) -> anyhow::Result<()> {
     let tick = Duration::from_millis(runtime.config().runtime.tick_interval_ms);
     let render = Duration::from_millis(runtime.config().runtime.render_interval_ms);
@@ -114,7 +124,7 @@ fn run_loop(
             // drawing so the banner doesn't render with `0s` remaining
             // for one extra frame.
             app.tick_overlays();
-            terminal.draw(|f| panels::render(f, runtime.state(), &app))?;
+            terminal.draw(|f| panels::render(f, runtime.state(), &app, &theme))?;
             last_render = Instant::now();
         }
     }

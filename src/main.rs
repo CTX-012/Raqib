@@ -66,6 +66,12 @@ struct Cli {
     #[arg(long)]
     log_stderr: bool,
 
+    /// UI theme: `dark` (default), `light`, or `high-contrast`. Per
+    /// UX_CONTRACT.md §13. CLI flag overrides `[ui].theme` in the
+    /// config; unrecognised values fall back to `dark` at render time.
+    #[arg(long, value_name = "NAME")]
+    theme: Option<String>,
+
     /// Subcommand. Defaults to running the monitor (TUI / headless) when
     /// omitted, preserving the Phase-1 invocation.
     #[command(subcommand)]
@@ -164,8 +170,17 @@ fn main() -> anyhow::Result<()> {
     if cli.no_ui {
         run_headless(runtime, shutdown, cli.ticks)?;
     } else {
+        // §13 — resolve theme from CLI flag → [ui].theme → default
+        // `dark`. The CLI string wins outright when provided so an
+        // operator can flip themes for a single launch without
+        // touching the config file.
+        let theme_name = cli
+            .theme
+            .clone()
+            .unwrap_or_else(|| runtime.config().ui.theme.clone());
+        let theme = edge_monitor::ui::theme::current_theme(&theme_name);
         // Returns the runtime back to us so we can flush state on the way out.
-        let runtime = ui::run(runtime, shutdown)?;
+        let runtime = ui::run(runtime, shutdown, theme)?;
         tracing::info!("exited cleanly after {} ticks", runtime.state().tick_count);
     }
 

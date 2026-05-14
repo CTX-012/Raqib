@@ -1136,7 +1136,7 @@ The crate produces no runtime overhead — everything is `const` data. The compi
 | **W38** | §5 stderr-when-fresh | `crates/cli/src/main.rs`, `crates/cli/src/ui/post_mortem_card.rs` | Mirror Linux L19 — transient stderr buffer cleared on dismiss/30s. | Mirror Linux. |
 | **W39** | Cleanup (legacy storage) | `crates/cli/src/main.rs` | Stop double-writing `LogStore("./logs")`. Use only `RunStore("./run_history")`. The audit found three on-disk layouts simultaneously. | New test asserts only one write site fires per exit. |
 | **W40** | Cleanup (script slurp) | `crates/cli/src/main.rs:1378-1387` | Cache `fs::read_to_string` results by absolute path. Currently re-reads referenced `.py` files every tick. | Microbenchmark before/after on a 200-process system. |
-| **W41** | §13 themes | New `crates/cli/src/ui/theme.rs` | Mirror Linux L20. The existing `crates/cli/src/ui/theme.rs` is `#![allow(dead_code)]`; replace it with the contract-driven version. | Mirror Linux `tests/theme_switching.rs`. |
+| **W41** | §13 themes | New `crates/cli/src/ui/theme.rs` | SHIPPED via W41a (5b5d5da) + W41b (a7b0f24). Integration test mirror at `crates/cli/tests/theme_switching.rs` landed as W41c. | Mirror Linux `tests/theme_switching.rs`. |
 | **W42** | §14 color usage | All of `crates/cli/src/ui/panels/*` | Mirror Linux L21. | Mirror Linux. |
 | **W43** | §12 sizing | `crates/cli/src/ui/tui.rs` | Mirror Linux L22. | Mirror Linux. |
 | **W44** | §10 minimal Grafana | `crates/cli/src/ui/tui.rs::resolve_dashboard_url` + new `preflight` call | Use `core::dashboard_preflight::probe_reachable` (wired in W22) before launching browser. | Mirror Linux. |

@@ -30,6 +30,7 @@ use ratatui::backend::CrosstermBackend;
 
 use crate::runtime::Runtime;
 use crate::ui::panels::armed_banner::ArmedKill;
+use crate::ui::panels::live_detail::{LiveDetail, LiveDetailCard};
 use crate::ui::theme::UiTheme;
 
 use app::{Action, App};
@@ -75,6 +76,14 @@ fn run_loop(
     // resize.
     let mut app = App::with_symbol_set(symbols::detect());
 
+    // L16 / §5 — live-detail card slot. Lives here in the run_loop
+    // rather than on `App` to keep app.rs unchanged (its `handle_escape`
+    // cascade is L24's territory and merging additive fields under
+    // that change would be risky). The post-mortem card stays on App
+    // because pre-L16 dispatch + multiple test fixtures already wire
+    // it that way.
+    let mut live_detail: Option<LiveDetailCard> = None;
+
     // Prime the state once so the first frame isn't empty.
     if let Err(e) = runtime.tick() {
         tracing::error!("initial tick failed: {}", e);
@@ -97,7 +106,7 @@ fn run_loop(
             && let Ok(Event::Key(key)) = event::read()
             && let Some(action) = input::translate(key, &app)
         {
-            apply_action(action, runtime, &mut app);
+            apply_action(action, runtime, &mut app, &mut live_detail);
         }
 
         if last_tick.elapsed() >= tick {
@@ -122,9 +131,18 @@ fn run_loop(
         if last_render.elapsed() >= render {
             // Drop expired armed-kill / post-mortem snapshots before
             // drawing so the banner doesn't render with `0s` remaining
-            // for one extra frame.
+            // for one extra frame. The live-detail card's 30s window
+            // gets the same treatment here so both detail-card kinds
+            // share dismissal timing.
             app.tick_overlays();
-            terminal.draw(|f| panels::render(f, runtime.state(), &app, &theme))?;
+            if let Some(card) = &live_detail
+                && card.is_expired()
+            {
+                live_detail = None;
+            }
+            terminal.draw(|f| {
+                panels::render(f, runtime.state(), &app, &theme, live_detail.as_ref())
+            })?;
             last_render = Instant::now();
         }
     }
@@ -132,7 +150,12 @@ fn run_loop(
     Ok(())
 }
 
-fn apply_action(action: Action, runtime: &mut Runtime, app: &mut App) {
+fn apply_action(
+    action: Action,
+    runtime: &mut Runtime,
+    app: &mut App,
+    live_detail: &mut Option<LiveDetailCard>,
+) {
     match action {
         Action::Quit => app.request_quit(),
         Action::ToggleHelp => app.toggle_help(),
@@ -215,12 +238,19 @@ fn apply_action(action: Action, runtime: &mut Runtime, app: &mut App) {
             }
         }
         Action::OpenGrafana => handle_open_dashboard(runtime, app),
-        Action::OpenDetail => handle_show_postmortem(runtime, app),
+        Action::OpenDetail => handle_open_detail(runtime, app, live_detail),
         Action::EscapeCascade => {
-            // Cascading priority is in `App::handle_escape`. The
-            // pre-L2a `DismissPostmortem` action is gone; dismiss now
-            // flows through this cascade.
-            app.handle_escape();
+            // L16 — live-detail card sits at the front of the dismiss
+            // queue; only when nothing live is up do we delegate to
+            // `App::handle_escape` (which owns the post-mortem /
+            // armed-kill / history / help / quit cascade). Keeping the
+            // live branch local avoids reaching into app.rs for L16,
+            // which is L24's edit territory.
+            if live_detail.is_some() {
+                *live_detail = None;
+            } else {
+                app.handle_escape();
+            }
         }
         // §4 — `a` acknowledges all visible alerts. Silent when
         // no alerts are active; otherwise sets a transient status
@@ -294,25 +324,67 @@ fn handle_open_dashboard(runtime: &Runtime, app: &mut App) {
     }
 }
 
-/// `Enter`-on-focused-row handler ([UX-2], UI Contract v2). Builds a
-/// post-mortem snapshot for the focused workload's *most recent* run
-/// and pushes it as a card. Skipped silently when no row is focused
-/// or the focused workload has no run history yet — the latter is
-/// expected for AI processes that have never exited; surfacing a
-/// blank card would mislead more than logging it skips.
-fn handle_show_postmortem(runtime: &Runtime, app: &mut App) {
+/// L16 / UX_CONTRACT.md §5 — `Enter`-on-focused-row dispatch.
+///
+/// Routes to one of two cards based on the focused workload's
+/// lifecycle state:
+///   * Running PID in `state.annotated` → live-detail card with
+///     instantaneous metrics (L17 will swap the placeholder for
+///     sparklines).
+///   * No live PID but `latest_postmortem(model)` returns a record
+///     → post-mortem card with the retrospective summary.
+///
+/// Pressing `Enter` while a detail card is already open dismisses
+/// it. Skipped silently when no row is focused — surfacing a blank
+/// card would mislead more than logging-and-skipping. The two card
+/// kinds are mutually exclusive at the render layer (see
+/// `panels::render`); this dispatcher enforces the same invariant
+/// at open time.
+fn handle_open_detail(
+    runtime: &Runtime,
+    app: &mut App,
+    live_detail: &mut Option<LiveDetailCard>,
+) {
+    // Enter on an already-open card dismisses it — the card's
+    // footer advertises `[Enter] dismiss`, and routing the second
+    // press here keeps the contract honest without needing a new
+    // Action variant.
+    if live_detail.is_some() {
+        *live_detail = None;
+        return;
+    }
+    if app.postmortem().is_some() {
+        app.dismiss_postmortem();
+        return;
+    }
+
     let Some(pid) = app.selected_pid(runtime.state()) else {
         tracing::info!("No workload focused — select a row first");
         return;
     };
     let state = runtime.state();
+
+    // Running-workload branch: live PID present in this tick's
+    // annotated processes wins outright. Builds a LiveDetail
+    // snapshot and parks it in the local slot.
+    if let Some(detail) = LiveDetail::from_focused(state, pid) {
+        *live_detail = Some(LiveDetailCard::new(detail));
+        return;
+    }
+
+    // Exited-workload branch: the focused row is no longer
+    // running but we have history for its model. This path
+    // remains the pre-L16 behaviour intentionally — there is no
+    // selectable Activity/history row yet (see L25 / §1 region
+    // 6); when one lands, this branch widens to consume its
+    // selection.
     let key = state
         .annotated
         .iter()
         .find(|p| p.pid == pid)
         .and_then(|p| p.model_name.clone().or(Some(p.name.clone())));
     let Some(model) = key else {
-        tracing::info!(%pid, "Focused row has no model/name — skipping post-mortem");
+        tracing::info!(%pid, "Focused row has no model/name — skipping detail card");
         return;
     };
     match runtime.latest_postmortem(&model) {

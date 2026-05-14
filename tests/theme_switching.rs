@@ -40,7 +40,7 @@ fn rendered_title_fg(theme: &UiTheme) -> Color {
     // that's fine, the status bar only reads `dry_run` and
     // `tick_count` from state, both of which are present on default.
     terminal
-        .draw(|f| panels::render(f, runtime.state(), &app, theme))
+        .draw(|f| panels::render(f, runtime.state(), &app, theme, None))
         .expect("draw");
 
     let buffer = terminal.backend().buffer().clone();

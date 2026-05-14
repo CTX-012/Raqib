@@ -8,6 +8,7 @@ pub mod armed_banner;
 pub mod header;
 mod help;
 mod history_overlay;
+pub mod live_detail;
 pub mod postmortem;
 mod top_processes;
 mod vitals;
@@ -26,11 +27,18 @@ use ratatui::text::Span;
 use ratatui::widgets::{Block, Borders, Paragraph};
 
 use crate::runtime::RuntimeState;
+use crate::ui::panels::live_detail::LiveDetailCard;
 use crate::ui::theme::UiTheme;
 
 use super::app::App;
 
-pub fn render(f: &mut Frame, state: &RuntimeState, app: &App, theme: &UiTheme) {
+pub fn render(
+    f: &mut Frame,
+    state: &RuntimeState,
+    app: &App,
+    theme: &UiTheme,
+    live_detail: Option<&LiveDetailCard>,
+) {
     let full = f.area();
 
     // [UX-1] — reserve the top row for the armed-kill banner ONLY when
@@ -74,9 +82,16 @@ pub fn render(f: &mut Frame, state: &RuntimeState, app: &App, theme: &UiTheme) {
     // being open simultaneously.
     history_overlay::render(f, body_area, app);
 
-    // [UX-2] — post-mortem card renders LAST so it floats above
-    // everything else, including the help / history overlays.
-    if let Some(card) = app.postmortem() {
+    // L16 / §5 — detail card renders LAST so it floats above every
+    // other panel. The two card kinds are mutually exclusive at the
+    // dispatch level (`handle_open_detail` in `ui::mod.rs` picks one
+    // based on whether the focused workload is running or exited);
+    // when both happen to be set the live card wins because it was
+    // necessarily opened after any pre-existing post-mortem — same
+    // "latest wins" rule that governs same-kind card replacement.
+    if let Some(card) = live_detail {
+        live_detail::render(f, full, card, theme);
+    } else if let Some(card) = app.postmortem() {
         postmortem::render(f, full, card);
     }
 }

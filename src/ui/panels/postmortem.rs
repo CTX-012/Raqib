@@ -1,5 +1,13 @@
 //! Post-mortem card ([UX-2], UI Contract v2).
 //!
+//! L16 / UX_CONTRACT.md §5 — this module is the **exited-workload**
+//! half of the detail-card split. The running-workload half lives at
+//! [`super::live_detail`]; both share dimensions, lifetime semantics,
+//! and the z-order slot but render different content. Triggered when
+//! `Enter` lands on a row that has run history but no live PID; the
+//! Workloads-panel `Enter` path now routes to live_detail for running
+//! workloads and reserves this card for the retrospective view.
+//!
 //! Centered overlay shown for 30 seconds after an AI workload exits.
 //! Surfaces the run summary so the operator sees the "oh, that's
 //! what happened" moment without having to invoke

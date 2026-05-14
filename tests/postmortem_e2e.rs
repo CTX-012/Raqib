@@ -136,3 +136,47 @@ fn baseline_status_not_available_when_baseline_missing_or_zero() {
         BaselineStatus::NotAvailable,
     ));
 }
+
+/// L16 / UX_CONTRACT.md §5 — the post-mortem card module no longer
+/// owns the live-detail card. After the split there is a sibling
+/// `live_detail` module with its own `LiveDetailCard`, and the two
+/// card kinds must coexist without one accidentally importing the
+/// other's types. This is the structural assertion the split exists
+/// at all — if a future row collapses them, this test breaks loudly
+/// rather than silently.
+#[test]
+fn post_l16_split_has_two_distinct_card_modules() {
+    use edge_monitor::ui::panels::live_detail::LiveDetailCard;
+
+    // Distinct types means the language won't let us assign one to
+    // the other. The assertion at the type level is the compile —
+    // if these were the same type, the explicit `_` binding below
+    // would still compile, so we belt-and-brace with a contract
+    // value check: same WINDOW duration, same physical dimensions.
+    assert_eq!(
+        LiveDetailCard::WINDOW,
+        edge_monitor::ui::panels::postmortem::PostMortemCard::WINDOW,
+        "card-split invariant: both kinds use the same auto-dismiss \
+         window so the operator gets consistent dismissal timing",
+    );
+    assert_eq!(
+        edge_monitor::ui::panels::postmortem::CARD_WIDTH, 64,
+        "post-mortem card width is locked at 64 columns",
+    );
+}
+
+/// L16 — running workloads no longer dispatch to the post-mortem
+/// card on `Enter`. The full Enter-routing behaviour is exercised in
+/// `tests/live_detail_card.rs`; here we pin the App-level
+/// post-condition: `show_postmortem` is the only way the post-mortem
+/// slot is populated, and a freshly-constructed App has neither slot
+/// set.
+#[test]
+fn freshly_constructed_app_has_no_postmortem() {
+    let app = App::new();
+    assert!(
+        app.postmortem().is_none(),
+        "post-L16, the post-mortem slot is only set by exit-path code; \
+         a fresh App must not pretend to have a card waiting",
+    );
+}

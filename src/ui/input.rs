@@ -194,6 +194,7 @@ mod tests {
                 baseline_status: BaselineStatus::NotAvailable,
             },
             shown_at: Instant::now(),
+            pid: None,
         });
         assert_eq!(
             translate(key(KeyCode::Enter), &app),

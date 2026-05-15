@@ -21,12 +21,17 @@ pub mod workloads;
 pub use top_processes::TopProcessesSort;
 
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+// L22 — `Alignment` is for the centred TERMINAL_TOO_SMALL paragraph.
+// `Color` from wp5's pre-L21 status_bar/footer is intentionally
+// dropped: L21 (l14) routes all colour through `theme: &UiTheme`,
+// so the merged render_footer never references `Color::*` literals.
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
 use crate::runtime::RuntimeState;
+use crate::ui::SizeTier;
 use crate::ui::panels::live_detail::{LiveDetailBuffers, LiveDetailCard};
 use crate::ui::theme::UiTheme;
 
@@ -41,6 +46,16 @@ pub fn render(
     live_buffers: Option<&LiveDetailBuffers>,
 ) {
     let full = f.area();
+    let tier = SizeTier::classify(full.width, full.height);
+
+    // L22 / §12 — below `MIN_COLS × MIN_ROWS` the contract forbids a
+    // degraded render. Paint the `errors::TERMINAL_TOO_SMALL` message
+    // and return; the banner / alerts / overlays would fight for the
+    // few cells we have left.
+    if tier == SizeTier::TooSmall {
+        render_too_small(f, full);
+        return;
+    }
 
     // [UX-1] — reserve the top row for the armed-kill banner ONLY when
     // a kill is armed. Allocating an empty row otherwise would leave
@@ -72,7 +87,7 @@ pub fn render(
     // 6-panel layout that surfaced rogues/culprits/audit). v0.3 §1
     // defines a single layout, so the default render is the only
     // path now.
-    render_default(f, body_area, state, app, theme);
+    render_default(f, body_area, state, app, theme, tier);
 
     if app.show_help() {
         help::render(f, body_area, theme);
@@ -97,22 +112,69 @@ pub fn render(
     }
 }
 
-/// The default (and only) v1.0 layout. Per UX_CONTRACT.md §1
-/// region map: header (§0 mission line) + System (vitals) + AI
-/// Workloads + Top processes + Activity + footer. §12 (sizing
-/// breakpoints) will hide Top processes in narrow mode — that's
-/// L22's row, not this one.
-fn render_default(f: &mut Frame, area: Rect, state: &RuntimeState, app: &App, theme: &UiTheme) {
-    let layout = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
+/// L22 / §12 — minimum-viable terminal: paint the contract's
+/// `errors::TERMINAL_TOO_SMALL` message centered, with the current
+/// dimensions substituted in so the operator knows how far they need
+/// to drag the resize handle.
+fn render_too_small(f: &mut Frame, area: Rect) {
+    let msg = ux_contract::errors::TERMINAL_TOO_SMALL
+        .replace("{w}", &area.width.to_string())
+        .replace("{h}", &area.height.to_string());
+    let paragraph = Paragraph::new(msg)
+        .alignment(Alignment::Center)
+        .wrap(Wrap { trim: false });
+    f.render_widget(paragraph, area);
+}
+
+/// The §1 layout, parametrised by `tier`. `Narrow` drops the Top
+/// processes panel (§12: "first to drop on narrow screens"); `Wide`
+/// renders the workloads panel side-by-side when there are 4+
+/// workloads. The rest of the §1 region map is identical across
+/// non-TooSmall tiers. `theme` threads through to every panel
+/// (L21 § 14 color usage).
+///
+/// **L22 deferral:** panel-internal sizing (bar graph cell counts —
+/// 17/25/40, Activity 3-row cap, sparkline 30-cell extension in the
+/// live detail card) is left to a follow-up row (likely absorbed by
+/// L21's panel audit). This commit only owns the layout gate.
+///
+/// **L25 / L22 merge:** the merged region renders the §0 mission-line
+/// header (L25) at layout[0] in every non-TooSmall tier. The prior
+/// wp5 `render_status_bar` is dropped in favor of the contract-
+/// aligned header (which carries the same operator-facing role).
+fn render_default(
+    f: &mut Frame,
+    area: Rect,
+    state: &RuntimeState,
+    app: &App,
+    theme: &UiTheme,
+    tier: SizeTier,
+) {
+    let constraints: &[Constraint] = if tier == SizeTier::Narrow {
+        // 1 + 7 + Min(8) + 7 + 1 = 24 fixed/min rows → fits §12's
+        // 80×24 floor exactly with Min(8) absorbing the workload
+        // panel. Header (L25 mission line) replaces the prior
+        // status bar at layout[0].
+        &[
+            Constraint::Length(1), // §0 mission-line header (L25)
+            Constraint::Length(7), // vitals (System)
+            Constraint::Min(8),    // AI Workloads (flexes)
+            Constraint::Length(7), // Activity (Top processes hidden)
+            Constraint::Length(1), // hint footer
+        ]
+    } else {
+        &[
             Constraint::Length(1), // §0 mission-line header (L25)
             Constraint::Length(7), // vitals (System)
             Constraint::Min(8),    // AI Workloads (flexes)
             Constraint::Length(7), // Top processes (L13)
-            Constraint::Length(7), // Activity (L15, was 8 — yielded 1 row to Top processes)
+            Constraint::Length(7), // Activity (L15)
             Constraint::Length(1), // hint footer
-        ])
+        ]
+    };
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(constraints)
         .split(area);
 
     // L25 / §0 — derive workload + degraded counts from the same row
@@ -133,10 +195,69 @@ fn render_default(f: &mut Frame, area: Rect, state: &RuntimeState, app: &App, th
 
     header::render(f, layout[0], app, theme, n_workloads, n_degraded);
     vitals::render(f, layout[1], state, theme);
-    workloads::render(f, layout[2], state, app, theme);
-    top_processes::render(f, layout[3], state, app.top_processes_sort(), theme);
-    activity::render(f, layout[4], state, theme);
-    render_footer(f, layout[5], app, theme);
+
+    // L22 / §12 Wide tier — split workloads into two columns when
+    // there are 4+ workloads; single-column otherwise (Narrow /
+    // Standard tiers always use single-column).
+    let workload_count = state.ai_processes().count();
+    if tier == SizeTier::Wide && workload_count >= 4 {
+        render_workloads_two_col(f, layout[2], state, app, theme);
+    } else {
+        workloads::render(f, layout[2], state, app, theme);
+    }
+
+    if tier == SizeTier::Narrow {
+        // §12: Top processes is "first to drop on narrow screens".
+        activity::render(f, layout[3], state, theme);
+        render_footer(f, layout[4], app, theme);
+    } else {
+        top_processes::render(f, layout[3], state, app.top_processes_sort(), theme);
+        activity::render(f, layout[4], state, theme);
+        render_footer(f, layout[5], app, theme);
+    }
+}
+
+/// L22 / §12 Wide tier — split the workloads area into two columns
+/// when there are 4+ workloads. Done by cloning `state` into two
+/// narrow views, each retaining a contiguous half of the
+/// AI-classified workloads (RuntimeState's doc-comment says it's
+/// "cheap to clone for the UI to render between samples"; we pay
+/// that cost only at Wide tier with 4+ workloads).
+///
+/// **Known limitation:** the selection highlight may render in both
+/// halves at the same local index because `App::selected_index` is
+/// a global pointer with no two-column awareness. Mapping the global
+/// selection cleanly into one half is deferred to a follow-up — the
+/// L22 commit owns the layout gate, not the input-mapping rewrite.
+fn render_workloads_two_col(
+    f: &mut Frame,
+    area: Rect,
+    state: &RuntimeState,
+    app: &App,
+    theme: &UiTheme,
+) {
+    let halves = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(area);
+
+    // First-half / second-half partition of the AI subset only.
+    // Non-AI entries in `annotated` are dropped from each clone for
+    // free because `workloads::render` filters via
+    // `state.ai_processes()` anyway, but explicitly retaining only
+    // the AI PIDs in each half keeps the partition exact.
+    let ai_pids: Vec<u32> = state.ai_processes().map(|p| p.pid).collect();
+    let mid = ai_pids.len().div_ceil(2);
+    let left_pids: std::collections::HashSet<u32> =
+        ai_pids[..mid].iter().copied().collect();
+
+    let mut left = state.clone();
+    left.annotated.retain(|p| left_pids.contains(&p.pid));
+    let mut right = state.clone();
+    right.annotated.retain(|p| !left_pids.contains(&p.pid));
+
+    workloads::render(f, halves[0], &left, app, theme);
+    workloads::render(f, halves[1], &right, app, theme);
 }
 
 fn render_footer(f: &mut Frame, area: Rect, app: &App, theme: &UiTheme) {

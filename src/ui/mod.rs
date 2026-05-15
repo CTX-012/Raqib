@@ -178,6 +178,14 @@ fn run_loop(
                 // is focused at that moment.
                 live_buffers = None;
             }
+            // L19 — `tick_overlays` may have auto-dismissed an
+            // expired post-mortem card. Drain the dispatcher's
+            // dismissed-PID signal so the runtime stderr buffer
+            // doesn't linger past the card's visibility (a no-op
+            // when `sweep_expired_stderr` already pruned the entry).
+            if let Some(pid) = app.take_dismissed_pid() {
+                runtime.clear_stderr(pid);
+            }
             terminal.draw(|f| {
                 panels::render(
                     f,
@@ -302,6 +310,14 @@ fn apply_action(
                 *live_buffers = None;
             } else {
                 app.handle_escape();
+                // L19 — if the cascade just dismissed a post-mortem
+                // card tagged with an exited PID, drop the matching
+                // transient stderr buffer in `Runtime` so the buffer
+                // doesn't outlive the card's visibility per "stderr
+                // is ephemeral".
+                if let Some(pid) = app.take_dismissed_pid() {
+                    runtime.clear_stderr(pid);
+                }
             }
         }
         // §4 — `a` acknowledges all visible alerts. Silent when
@@ -393,6 +409,17 @@ fn handle_open_dashboard(runtime: &Runtime, app: &mut App) {
         .find(|p| p.pid == pid)
         .and_then(|p| p.model_name.clone());
     let url = compute_dashboard_url(&template, model.as_deref(), pid);
+    // WP5 — TCP preflight gates the spawn. `xdg-open` against a dead
+    // Grafana surfaces a generic "couldn't open this page" via the
+    // browser, indistinguishable from "the keybinding is broken". The
+    // probe converts that into the contract-templated unreachable
+    // message instead. No `--no-preflight` escape hatch in v1.0; if the
+    // probe is wrong the operator can run `xdg-open <url>` themselves.
+    if let Err(e) = crate::dashboard_preflight::probe(&url) {
+        tracing::warn!(%url, error = %e, "Grafana preflight failed — skipping xdg-open");
+        app.set_status(format_grafana_unreachable(&url));
+        return;
+    }
     match std::process::Command::new("xdg-open")
         .arg(&url)
         .stdout(std::process::Stdio::null())
@@ -490,10 +517,14 @@ fn handle_open_detail(
         return;
     };
     match runtime.latest_postmortem(&model) {
-        Some(post_mortem) => {
+        Some((post_mortem, exited_pid)) => {
             app.show_postmortem(crate::ui::panels::postmortem::PostMortemCard {
                 post_mortem,
                 shown_at: Instant::now(),
+                // L19 — stamp the exited PID so the L24 Esc cascade
+                // can drop the matching transient stderr buffer on
+                // dismiss.
+                pid: Some(exited_pid),
             });
         }
         None => {
@@ -530,6 +561,112 @@ pub fn compute_dashboard_url(template: &str, model: Option<&str>, pid: u32) -> S
     template
         .replace("{model}", model.unwrap_or(""))
         .replace("{pid}", &pid.to_string())
+}
+
+/// Substitutes `{url}` into the
+/// `ux_contract::status::GRAFANA_UNREACHABLE` template (WP5). Kept as a
+/// pure function so the substitution rule can be pinned by tests without
+/// running the preflight probe or the spawn. The template is owned by
+/// the contract crate — display strings stay byte-for-byte identical to
+/// the Windows side because both consume the same const.
+pub fn format_grafana_unreachable(url: &str) -> String {
+    ux_contract::status::GRAFANA_UNREACHABLE.replace("{url}", url)
+}
+
+/// L22 / UX_CONTRACT.md §12 — terminal size class. The renderer picks
+/// a layout variant by tier so the same panel module can produce a
+/// degraded view on small terminals without each panel re-querying
+/// the frame size.
+///
+/// Classification lives in `ui` proper (not `ui::panels`) so callers
+/// outside the render path — tests, future config surfaces, the
+/// resize-event hook — can ask "what tier is this size?" without
+/// invoking any render machinery.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SizeTier {
+    /// Below `MIN_COLS × MIN_ROWS`. §12: "render
+    /// `ERR_TERMINAL_TOO_SMALL` message and wait for resize. Do not
+    /// attempt degraded render."
+    TooSmall,
+    /// `MIN ≤ size < STANDARD`. Single-column workloads, Top
+    /// processes panel hidden (§12: "first to drop on narrow
+    /// screens").
+    Narrow,
+    /// `STANDARD ≤ size < WIDE_COLS` width. The default §1 layout.
+    Standard,
+    /// `width ≥ WIDE_COLS`. Workloads may render side-by-side when
+    /// there are 4+ workloads.
+    Wide,
+}
+
+impl SizeTier {
+    /// Classify a frame size against the §12 breakpoints.
+    ///
+    /// Width and height are checked independently against `MIN_*` and
+    /// `STANDARD_*` — a terminal that is wide enough but too short for
+    /// Standard still renders Narrow, matching §12's "Minimum: 80×24"
+    /// row (the 80×24 dimension is a floor on *both* axes, not just
+    /// width).
+    ///
+    /// `Wide` is keyed off `WIDE_COLS` only: the row table and the
+    /// contract expose `WIDE_COLS` but no `WIDE_ROWS`, even though
+    /// §12 prose says "160+ × 50+". We follow the row table literally
+    /// here; a future contract amendment can add `WIDE_ROWS` if the
+    /// height threshold turns out to matter for parity.
+    pub fn classify(width: u16, height: u16) -> Self {
+        use ux_contract::sizing;
+        if width < sizing::MIN_COLS || height < sizing::MIN_ROWS {
+            return SizeTier::TooSmall;
+        }
+        if width < sizing::STANDARD_COLS || height < sizing::STANDARD_ROWS {
+            return SizeTier::Narrow;
+        }
+        if width < sizing::WIDE_COLS {
+            return SizeTier::Standard;
+        }
+        SizeTier::Wide
+    }
+}
+
+#[cfg(test)]
+mod size_tier_tests {
+    use super::SizeTier;
+
+    #[test]
+    fn below_minimum_is_too_small() {
+        assert_eq!(SizeTier::classify(70, 20), SizeTier::TooSmall);
+        assert_eq!(SizeTier::classify(79, 24), SizeTier::TooSmall);
+        assert_eq!(SizeTier::classify(80, 23), SizeTier::TooSmall);
+    }
+
+    #[test]
+    fn exactly_minimum_is_narrow() {
+        assert_eq!(SizeTier::classify(80, 24), SizeTier::Narrow);
+    }
+
+    #[test]
+    fn between_min_and_standard_is_narrow() {
+        // wide enough but too short
+        assert_eq!(SizeTier::classify(120, 39), SizeTier::Narrow);
+        // tall enough but too narrow
+        assert_eq!(SizeTier::classify(119, 40), SizeTier::Narrow);
+    }
+
+    #[test]
+    fn exactly_standard_is_standard() {
+        assert_eq!(SizeTier::classify(120, 40), SizeTier::Standard);
+    }
+
+    #[test]
+    fn below_wide_cols_stays_standard_regardless_of_height() {
+        assert_eq!(SizeTier::classify(159, 100), SizeTier::Standard);
+    }
+
+    #[test]
+    fn at_or_above_wide_cols_is_wide() {
+        assert_eq!(SizeTier::classify(160, 50), SizeTier::Wide);
+        assert_eq!(SizeTier::classify(200, 40), SizeTier::Wide);
+    }
 }
 
 #[cfg(test)]

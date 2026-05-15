@@ -90,6 +90,14 @@ pub struct App {
     /// UI-only state with no relevance to the platform/governor
     /// pipeline.
     top_processes_sort: TopProcessesSort,
+    /// L19 — one-shot signal set by `handle_escape` when it dismisses
+    /// a post-mortem card. Consumed by the dispatcher in
+    /// `ui::apply_action` so it can ask `Runtime` to drop the matching
+    /// transient stderr buffer. Lives on `App` rather than being
+    /// returned from `handle_escape` so the existing
+    /// `handle_escape -> bool` contract (consumed-or-quit) stays
+    /// stable for the L24 cascade tests.
+    dismissed_pid: Option<u32>,
 }
 
 impl Default for App {
@@ -118,6 +126,7 @@ impl App {
             symbol_set,
             alerts: AlertState::new(),
             top_processes_sort: TopProcessesSort::default(),
+            dismissed_pid: None,
         }
     }
 
@@ -369,8 +378,28 @@ impl App {
     /// Clear the post-mortem card. Triggered by `Enter`, by the
     /// cascading `Esc` priority, or by `tick_overlays` when the
     /// 30-second window lapses.
+    ///
+    /// L19 — funnels through `dismissed_pid` so the dispatcher's
+    /// post-Esc hook can drop the matching `Runtime` stderr buffer.
+    /// `tick_overlays`'s auto-dismiss path also sets the signal,
+    /// but by that time the buffer has been swept by
+    /// `Runtime::sweep_expired_stderr` anyway (both fire at the
+    /// 30 s mark) — the dispatcher's `clear_stderr` call is a no-op
+    /// when the entry is already gone.
     pub fn dismiss_postmortem(&mut self) {
-        self.postmortem = None;
+        if let Some(card) = self.postmortem.take() {
+            self.dismissed_pid = card.pid;
+        }
+    }
+
+    /// L19 — take-and-clear the most recent dismissed-card PID. The
+    /// dispatcher in `ui::apply_action` calls this after every Esc
+    /// to find out whether the cascade just dismissed a card, and
+    /// if so for which PID, so it can ask `Runtime` to drop the
+    /// matching transient stderr buffer. `None` when no card was
+    /// dismissed this turn or the dismissed card had no PID context.
+    pub fn take_dismissed_pid(&mut self) -> Option<u32> {
+        self.dismissed_pid.take()
     }
 
     /// Drop expired armed-kill / post-mortem snapshots. Called once
@@ -386,7 +415,14 @@ impl App {
         if let Some(card) = &self.postmortem
             && card.is_expired()
         {
-            self.postmortem = None;
+            // L19 — funnel through `dismiss_postmortem` so the auto-
+            // dismiss path also signals `dismissed_pid`. The runtime
+            // stderr buffer for this PID has already been swept by
+            // `Runtime::sweep_expired_stderr` at the same 30 s mark,
+            // so the dispatcher's `clear_stderr` call is a no-op
+            // here — but signalling keeps the two dismiss paths
+            // (Esc / auto) behaviourally symmetric.
+            self.dismiss_postmortem();
         }
         if let Some((_, t)) = &self.status
             && t.elapsed() >= STATUS_TTL
@@ -395,20 +431,33 @@ impl App {
         }
     }
 
-    /// Cascading-priority Escape handler per UI Contract v2.
+    /// Cascading-priority Escape handler per UX_CONTRACT.md §6.
     ///
     /// Priority order:
     ///   1. post-mortem card → dismiss
     ///   2. armed kill → disarm
-    ///   3. other overlay (history, help) → close
-    ///   4. nothing to dismiss → quit (same as `q`)
+    ///   3. history or help overlay → close
+    ///   4. alerts visible → acknowledge all (same effect as `a`)
+    ///   5. nothing to dismiss → quit (same as `q`)
     ///
-    /// Returns `true` when steps 1–3 consumed the press, `false`
-    /// when step 4 fired. Either way `quit_requested` is set in
-    /// the step-4 branch; callers can use the return to log
+    /// Returns `true` when steps 1–4 consumed the press, `false`
+    /// when step 5 fired. Either way `quit_requested` is set in
+    /// the step-5 branch; callers can use the return to log
     /// `Esc → quit` differently from a `q`-quit if desired.
+    ///
+    /// L24 / §6 — step 4 sits **after** the overlay-close step on
+    /// purpose. When the alert region is non-empty *and* history
+    /// or help is also open, the first Esc closes the overlay; the
+    /// operator has to press Esc a second time to ack the alerts.
+    /// Order matters: an Esc that silently ack'd alerts while the
+    /// user was just trying to close history would erase the alert
+    /// banner the user hadn't visually consumed yet.
     pub fn handle_escape(&mut self) -> bool {
         if self.postmortem.is_some() {
+            // L19 — `dismiss_postmortem` funnels the dismissed
+            // card's PID into `dismissed_pid` so the dispatcher
+            // can ask `Runtime` to drop the matching transient
+            // stderr buffer post-cascade.
             self.dismiss_postmortem();
             return true;
         }
@@ -424,7 +473,15 @@ impl App {
             self.show_help = false;
             return true;
         }
-        // UI Contract v2 step 4: nothing to dismiss → quit.
+        // §6 step 4 — when no card / disarm / overlay is in the way
+        // but alerts are visible on screen, Esc acknowledges them.
+        // Sits below the overlay-close step so an Esc with history
+        // or help open closes the overlay first.
+        if self.alerts.active_count() > 0 {
+            self.acknowledge_alerts();
+            return true;
+        }
+        // §6 step 5: nothing to dismiss → quit.
         self.quit_requested = true;
         false
     }
@@ -809,6 +866,7 @@ mod tests {
                 baseline_status: BaselineStatus::NotAvailable,
             },
             shown_at: std::time::Instant::now(),
+            pid: None,
         }
     }
 

@@ -6,6 +6,32 @@
 //! files; it can be removed once Tier 1.1 (history viewer) ships and
 //! operators have migrated.
 //!
+//! # Privacy stance: no stderr persistence
+//!
+//! `RunRecord` and every sibling type defined in this module
+//! deliberately do **not** persist process stderr output to disk.
+//! stderr lines can contain credentials, file paths, API tokens, prompt
+//! text, or other sensitive material that must not survive past a
+//! single run. The v1 schema briefly carried a `stderr_lines` field on
+//! `RunRecord`; UI Contract v2 reverted it under the rule "Stderr is
+//! ephemeral" (see also [`crate::ui::panels::postmortem`]).
+//!
+//! Live stderr access for the post-mortem card is handled by the
+//! transient `PostMortem::stderr_tail` buffer in
+//! `src/ui/panels/postmortem.rs`. That buffer is held only while the
+//! card is visible (≤30s after exit, per UI Contract v2) and dropped
+//! when the card is dismissed or auto-closes — it is never written to
+//! the per-run JSON, the index, or any other on-disk artefact owned by
+//! this module.
+//!
+//! Future drift is guarded by `tests/no_stderr_persistence_guard.rs`,
+//! which walks this module and fails the build if any field literally
+//! named `stderr` or `stderr_*` is added with `Serialize` in scope. If
+//! a future feature genuinely needs persistent stderr it must be a
+//! deliberate schema decision (amend UI Contract v2, update this doc
+//! block, and adjust or remove the guard) — not a quiet side-effect of
+//! another change.
+//!
 //! On-disk layout:
 //! ```text
 //! <root>/

@@ -339,17 +339,88 @@ mod tests {
         );
     }
 
+    // Fix-1 — flip of the prior "RMW_IMPLEMENTATION alone classifies
+    // as ROS2" test. The audit found that `RMW_IMPLEMENTATION` is set
+    // by `/opt/ros/<distro>/setup.bash` and inherited by every child
+    // process, so trusting it standalone misclassified user shells,
+    // browsers, and CLI tools (including the Claude Code agents
+    // running this session). With Fix-1 it requires cmdline OR
+    // library corroboration to count.
     #[test]
-    fn ros2_process_with_rmw_implementation_env_classified_as_ros2() {
+    fn rmw_implementation_alone_does_not_classify_as_ros2() {
         let s = sample_with_env(
             "rclcpp_component_container",
-            &["rclcpp_component_container"],
+            // Note: the process name `rclcpp_component_container` is
+            // ITSELF a cmdline marker per `ROS2_CMDLINE_MARKERS`.
+            // To isolate the env-only path we use a non-matching
+            // cmdline.
+            &["some-binary"],
+            &[("RMW_IMPLEMENTATION", "rmw_cyclonedds_cpp")],
+        );
+        assert_ne!(
+            classify_process(&s).workload_category,
+            WorkloadCategory::ROS2,
+            "RMW_IMPLEMENTATION alone must not classify as ROS2 \
+             (set by setup.bash; every shell child inherits it)",
+        );
+    }
+
+    #[test]
+    fn rmw_implementation_plus_cmdline_marker_classifies_as_ros2() {
+        // The intended ROS2 path: env var is corroborated by the
+        // standalone-trustworthy cmdline marker. The cmdline alone
+        // would have classified it anyway; this test pins that the
+        // env-var presence doesn't accidentally suppress classification.
+        let s = sample_with_env(
+            "rclcpp_component_container",
+            &["rclcpp_component_container", "--ros-args"],
             &[("RMW_IMPLEMENTATION", "rmw_cyclonedds_cpp")],
         );
         assert_eq!(
             classify_process(&s).workload_category,
             WorkloadCategory::ROS2
         );
+    }
+
+    #[test]
+    fn ros_distro_alone_does_not_classify_as_ros2() {
+        let s = sample_with_env("bash", &["bash"], &[("ROS_DISTRO", "humble")]);
+        assert_ne!(
+            classify_process(&s).workload_category,
+            WorkloadCategory::ROS2,
+        );
+    }
+
+    // Fix-1 acceptance test — the user-facing case the audit
+    // surfaced. A Claude Code CLI process inherits the user-shell
+    // ROS env (because the user's `.bashrc` sources
+    // `/opt/ros/humble/setup.bash`) but is not actually a ROS2
+    // node. Must classify as NotAi, not ROS2.
+    #[test]
+    fn claude_code_with_inherited_ros_env_classified_as_not_ai() {
+        use crate::model::AICategory;
+        let s = sample_with_env(
+            "node",
+            &[
+                "node",
+                "/home/u/.vscode-server/extensions/anthropic.claude-code/cli.js",
+            ],
+            &[
+                ("RMW_IMPLEMENTATION", "rmw_cyclonedds_cpp"),
+                ("ROS_DISTRO", "humble"),
+                ("AMENT_PREFIX_PATH", "/opt/ros/humble"),
+                ("ROS_VERSION", "2"),
+            ],
+        );
+        let result = classify_process(&s);
+        assert_eq!(
+            result.category,
+            AICategory::NotAi,
+            "Claude Code (node CLI) with inherited setup.bash env \
+             must NOT be classified as AI/ROS2 — would put the agent \
+             in the ROS panel of the operator's workload monitor",
+        );
+        assert_ne!(result.workload_category, WorkloadCategory::ROS2);
     }
 
     #[test]

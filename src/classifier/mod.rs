@@ -1,6 +1,7 @@
 mod keyword_match;
 mod model_extract;
 mod ros2;
+mod saas_llm;
 mod script_sniff;
 
 use crate::model::{ClassificationResult, ProcessSample};
@@ -14,15 +15,24 @@ use crate::model::{ClassificationResult, ProcessSample};
 ///    grouping it under LLM would hide it from the operator's ROS2
 ///    section per UX_CONTRACT.md §1 region 4.
 /// 1. Model file in cmdline or strong model env var → Inference (most specific signal)
-/// 2. Known AI process name → category from NAME_KEYWORDS table
-/// 3. AI keyword in any cmdline token → category from CMDLINE_KEYWORDS table
-/// 4. Python script source contains AI import/call → category from AI_PATTERNS
-/// 5. NotAi
+/// 2. **SaaS-LLM CLI** path fragment (Claude Code, Cursor, Aider,
+///    Continue) → Inference + LLM. Sits between `model_extract` and
+///    `NAME_KEYWORDS` because these processes have no local model
+///    file (model_extract correctly skips) and run as bare `node` or
+///    `python` (NAME_KEYWORDS correctly skips) — only the publisher-
+///    qualified path fragment is a reliable signal.
+/// 3. Known AI process name → category from NAME_KEYWORDS table
+/// 4. AI keyword in any cmdline token → category from CMDLINE_KEYWORDS table
+/// 5. Python script source contains AI import/call → category from AI_PATTERNS
+/// 6. NotAi
 pub fn classify_process(sample: &ProcessSample) -> ClassificationResult {
     if let Some(result) = ros2::classify(sample) {
         return result;
     }
     if let Some(result) = model_extract::classify(sample) {
+        return result;
+    }
+    if let Some(result) = saas_llm::classify(sample) {
         return result;
     }
     if let Some(result) = keyword_match::classify_by_name(&sample.name) {
@@ -432,6 +442,103 @@ mod tests {
         assert_eq!(
             workload_category_from_model_path(Path::new("/models/sdxl-1.0.safetensors")),
             WorkloadCategory::Vision
+        );
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // Fix 2 — SaaS-LLM CLI recognition dispatch tests.
+    //
+    // The saas_llm module has its own unit tests for the pattern
+    // matcher; these verify the dispatch order — running between
+    // model_extract and NAME_KEYWORDS — actually routes Claude Code
+    // / Cursor / Aider as Inference + LLM end-to-end.
+    // ════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn claude_code_node_dispatch_classifies_as_inference_llm() {
+        // Pre-fix the audit symptom: `node` from VS Code's
+        // Anthropic extension fell through every predicate to
+        // NotAi. Confirm the new saas_llm priority catches it.
+        let s = sample(
+            "node",
+            &[
+                "node",
+                "/home/faiz/.vscode-server/extensions/anthropic.claude-code-2.1.0/cli.js",
+            ],
+        );
+        let r = classify_process(&s);
+        assert_eq!(r.category, AICategory::Inference);
+        assert_eq!(r.workload_category, WorkloadCategory::LLM);
+        assert!(r.evidence.contains("SaaS-LLM CLI"));
+    }
+
+    #[test]
+    fn cursor_dispatch_classifies_as_inference_llm() {
+        let s = sample(
+            "node",
+            &[
+                "node",
+                "/root/.vscode-server/extensions/cursor-0.5.0/extension.js",
+            ],
+        );
+        let r = classify_process(&s);
+        assert!(r.is_ai(), "cursor must classify as AI");
+        assert_eq!(r.workload_category, WorkloadCategory::LLM);
+    }
+
+    #[test]
+    fn aider_dispatch_classifies_as_inference_llm() {
+        let s = sample("aider-chat", &["aider-chat", "--model", "claude-3.5"]);
+        let r = classify_process(&s);
+        assert!(r.is_ai());
+        assert_eq!(r.workload_category, WorkloadCategory::LLM);
+    }
+
+    #[test]
+    fn saas_llm_does_not_override_ros2_priority() {
+        // ROS2 detection sits at priority 0; even a process whose
+        // cmdline mentions a SaaS-LLM extension path must group as
+        // ROS2 if the ROS_DOMAIN_ID env signal is present. Pins
+        // the dispatch-order contract so a future reorder doesn't
+        // silently regress ROS2 grouping.
+        let s = sample_with_env(
+            "node",
+            &[
+                "node",
+                "/home/dev/.vscode-server/extensions/anthropic.claude-code/cli.js",
+            ],
+            &[("ROS_DOMAIN_ID", "0")],
+        );
+        let r = classify_process(&s);
+        assert_eq!(
+            r.workload_category,
+            WorkloadCategory::ROS2,
+            "ROS2 priority must beat saas_llm: {r:?}"
+        );
+    }
+
+    #[test]
+    fn saas_llm_does_not_override_model_extract_priority() {
+        // model_extract sits at priority 1. A process whose cmdline
+        // contains BOTH a SaaS-LLM extension path AND a concrete
+        // model file should classify by the model file — the file
+        // is the more specific signal, and saas_llm running second
+        // means we never overwrite a real model-path match.
+        let s = sample(
+            "node",
+            &[
+                "node",
+                "/home/dev/.vscode-server/extensions/anthropic.claude-code/cli.js",
+                "--model",
+                "/models/llama3.gguf",
+            ],
+        );
+        let r = classify_process(&s);
+        // model_extract wins → model_name is populated; saas_llm
+        // would have left model_name None.
+        assert!(
+            r.model_name.is_some(),
+            "model_extract priority must win when both signals fire: {r:?}"
         );
     }
 

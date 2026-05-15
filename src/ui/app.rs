@@ -330,6 +330,35 @@ impl App {
         self.armed_kill = None;
     }
 
+    /// CAR-14 / Row 1 — atomically check + take the armed kill record
+    /// for Enter-confirm dispatch.
+    ///
+    /// Returns `Some(armed)` when the kill is armed AND the 5s window
+    /// is still active; the field is cleared before return so the
+    /// next render frame drops the banner. Returns `None` when no
+    /// kill is armed, OR when the armed kill is past its window —
+    /// both cases route `Enter` to its pre-CAR-14 detail-card
+    /// behaviour.
+    ///
+    /// Naming mirrors `Option::take`: caller receives ownership of
+    /// the value, the slot becomes empty. Using a dedicated method
+    /// rather than open-coding `armed_kill.take().filter(...)` at the
+    /// dispatch site keeps the "PIN to armed.pid, NEVER recompute
+    /// from focused" invariant readable (Row 1 INV-1 / INV-2) and
+    /// gives tests a single point to drive.
+    pub fn take_armed_kill_if_active(&mut self) -> Option<ArmedKill> {
+        let armed = self.armed_kill.as_ref()?;
+        if armed.is_expired() {
+            // Drop expired arm without dispatching — operator missed
+            // the 5-second window, and post-CAR-14 the Enter press
+            // should fall through to detail-card behaviour, not
+            // fire a stale kill.
+            self.armed_kill = None;
+            return None;
+        }
+        self.armed_kill.take()
+    }
+
     /// Push a new post-mortem snapshot. Latest wins; any existing card
     /// is replaced (no queue). Triggered from the runtime's exit hook
     /// and from the exec wrapper's exit path.
@@ -558,6 +587,130 @@ mod tests {
         assert!(!armed.allowlisted);
         // Just-armed window has 5 integer seconds remaining.
         assert_eq!(armed.seconds_remaining(), 5);
+    }
+
+    // ── Row 1 — CAR-14 Enter-confirm dispatch surface ────────────
+
+    #[test]
+    fn take_armed_kill_if_active_returns_none_when_unarmed() {
+        let mut app = App::new();
+        assert!(app.take_armed_kill_if_active().is_none());
+    }
+
+    #[test]
+    fn take_armed_kill_if_active_returns_and_clears_when_fresh() {
+        // Row 1 INV-2: a fresh arm must be takeable on Enter, and
+        // the field must be cleared atomically so the next render
+        // frame drops the banner.
+        let mut app = App::new();
+        app.arm_kill(fake_armed(4242, "ollama", false));
+        let taken = app.take_armed_kill_if_active().expect("should be active");
+        assert_eq!(taken.pid, 4242);
+        assert_eq!(taken.name, "ollama");
+        assert!(
+            app.armed_kill().is_none(),
+            "take_* must clear the slot to match Option::take semantics",
+        );
+    }
+
+    #[test]
+    fn take_armed_kill_if_active_returns_none_when_expired_and_clears() {
+        // Row 1 INV-3: an expired arm must NOT confirm — Enter
+        // should fall through to the detail-card path. The expired
+        // slot is also cleared so the operator doesn't see a stale
+        // banner.
+        let mut app = App::new();
+        app.arm_kill(ArmedKill {
+            pid: 4242,
+            name: "ollama".into(),
+            allowlisted: false,
+            // 6 seconds ago — past the 5-second WINDOW.
+            armed_at: std::time::Instant::now() - std::time::Duration::from_secs(6),
+        });
+        assert!(app.take_armed_kill_if_active().is_none());
+        assert!(
+            app.armed_kill().is_none(),
+            "expired arm must be cleared so the banner doesn't linger",
+        );
+    }
+
+    /// Row 1 INV-1: armed PID must be PINNED for the WINDOW
+    /// regardless of `selected_pid(state)` volatility. The arm
+    /// records `pid` as `u32`; subsequent state reshuffles can't
+    /// change that field. This test sets up a state where
+    /// `selected_pid` returns one PID, arms on that PID, then
+    /// reorders the state so `selected_pid` returns a different
+    /// PID, and verifies the armed slot still carries the original.
+    #[test]
+    fn armed_pid_pinned_across_selected_pid_shifts() {
+        let s_first = state_with(vec![
+            ann(101, "a", AICategory::Inference),
+            ann(202, "b", AICategory::Inference),
+        ]);
+        let mut app = App::new();
+        // selected=0 → first PID in render order.
+        let focused_a = app.selected_pid(&s_first).expect("first PID");
+        app.arm_kill(fake_armed(focused_a, "a", false));
+
+        // Reshuffle: same selected=0, but a different PID set.
+        // This mimics what happens when status priority resorts the
+        // workloads panel between vitals refreshes.
+        let s_after = state_with(vec![
+            ann(303, "c", AICategory::Inference),
+            ann(202, "b", AICategory::Inference),
+        ]);
+        let focused_after = app.selected_pid(&s_after).expect("first PID after shift");
+        assert_ne!(
+            focused_a, focused_after,
+            "test precondition: selected_pid must drift across the state reshuffle"
+        );
+
+        // Armed PID is still the original — vitals tick did not
+        // mutate it.
+        let armed = app.armed_kill().expect("still armed");
+        assert_eq!(
+            armed.pid, focused_a,
+            "armed PID must be pinned at arm time, not recomputed from current selected_pid"
+        );
+
+        // Confirm-dispatch (take_armed_kill_if_active) reads from
+        // the pinned ArmedKill, not from selected_pid — so even
+        // after the shift, the kill target is the original PID.
+        let taken = app.take_armed_kill_if_active().expect("active");
+        assert_eq!(taken.pid, focused_a);
+    }
+
+    /// Row 1 INV-6: pressing `k` a second time on a different
+    /// focused PID switches the armed target and refreshes
+    /// `armed_at`. Encoded at the App API level via `arm_kill`
+    /// replacement — every press creates a fresh `ArmedKill`.
+    #[test]
+    fn second_arm_switches_pid_and_refreshes_window() {
+        use std::time::Duration;
+        let mut app = App::new();
+        // First arm — synthetic timestamp 3s in the past.
+        app.arm_kill(ArmedKill {
+            pid: 101,
+            name: "a".into(),
+            allowlisted: false,
+            armed_at: std::time::Instant::now() - Duration::from_secs(3),
+        });
+        let first_remaining = app.armed_kill().unwrap().seconds_remaining();
+        assert!(
+            first_remaining <= 3,
+            "precondition: first arm has used ~3s of the 5s window"
+        );
+
+        // Second `k` on a different focused PID — fresh
+        // ArmedKill, fresh timer.
+        app.arm_kill(fake_armed(202, "b", false));
+        let armed = app.armed_kill().expect("still armed");
+        assert_eq!(armed.pid, 202, "INV-6: second arm switches PID");
+        assert_eq!(
+            armed.seconds_remaining(),
+            5,
+            "INV-6: second arm refreshes armed_at to the new now"
+        );
     }
 
     #[test]

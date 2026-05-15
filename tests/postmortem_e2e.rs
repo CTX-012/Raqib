@@ -180,3 +180,83 @@ fn freshly_constructed_app_has_no_postmortem() {
          a fresh App must not pretend to have a card waiting",
     );
 }
+
+// ── Row 1 — CAR-14 Enter-confirm cross-state precedence ──────────
+//
+// These integration tests pin the priority contract from outside the
+// crate: with both an armed kill AND a postmortem card visible,
+// Enter must confirm the kill, NOT dismiss the postmortem. The
+// inverse — Enter with no armed kill but a postmortem — must dismiss
+// the card. Both invariants are exercised at the App / take_armed_*
+// surface because the dispatch routing in `ui::mod.rs::apply_action`
+// is private.
+
+#[test]
+fn enter_with_armed_kill_takes_precedence_over_postmortem_dismiss() {
+    // Row 1 INV-2 — when both `armed_kill` and `postmortem` are
+    // present, the dispatcher consumes the armed kill first. The
+    // postmortem card stays put (it's dismissed on its own Enter
+    // press once the arm is cleared).
+    let mut app = App::new();
+    app.show_postmortem(fixture_card("phi3-mini"));
+    app.arm_kill(edge_monitor::ui::panels::armed_banner::ArmedKill {
+        pid: 4242,
+        name: "ollama".into(),
+        allowlisted: false,
+        armed_at: std::time::Instant::now(),
+    });
+
+    // Simulate the post-Row-1 Enter handler: take_armed_* first;
+    // only when it returns None does the dispatch fall to the
+    // postmortem-dismiss path.
+    let taken = app.take_armed_kill_if_active();
+    assert!(taken.is_some(), "armed kill must be taken first on Enter");
+    assert_eq!(taken.unwrap().pid, 4242);
+    // Card untouched — the operator still has it on screen and
+    // can dismiss with a second Enter (which now falls through to
+    // the existing handle_open_detail dismiss-branch).
+    assert!(
+        app.postmortem().is_some(),
+        "postmortem card must survive an Enter that confirmed a kill"
+    );
+}
+
+#[test]
+fn enter_with_no_armed_kill_falls_through_to_postmortem_path() {
+    // Row 1 INV-3 — no armed kill (or armed-and-expired) means
+    // Enter routes to handle_open_detail, which is what
+    // dismisses an already-open postmortem.
+    let mut app = App::new();
+    app.show_postmortem(fixture_card("phi3-mini"));
+    let taken = app.take_armed_kill_if_active();
+    assert!(
+        taken.is_none(),
+        "no armed kill → take_* returns None and Enter falls through"
+    );
+    // Caller (apply_action::OpenDetail) would call
+    // dismiss_postmortem() on the fall-through; pin that the slot
+    // still has the card so the dispatch has work to do.
+    assert!(app.postmortem().is_some());
+}
+
+#[test]
+fn expired_armed_kill_does_not_fire_on_enter() {
+    // Row 1 INV-3 — armed-but-expired routes the same as unarmed.
+    // The arm is dropped silently rather than firing a stale kill.
+    let mut app = App::new();
+    app.arm_kill(edge_monitor::ui::panels::armed_banner::ArmedKill {
+        pid: 4242,
+        name: "ollama".into(),
+        allowlisted: false,
+        // 6 seconds ago — past the 5-second WINDOW.
+        armed_at: std::time::Instant::now() - std::time::Duration::from_secs(6),
+    });
+    assert!(
+        app.take_armed_kill_if_active().is_none(),
+        "expired arm must not be returned for dispatch"
+    );
+    assert!(
+        app.armed_kill().is_none(),
+        "expired arm must also be cleared so the banner doesn't linger"
+    );
+}

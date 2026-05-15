@@ -20,7 +20,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use crossterm::event::{self, Event};
+use crossterm::event::{self, Event, KeyEventKind};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -112,6 +112,16 @@ fn run_loop(
 
         if event::poll(wait)?
             && let Ok(Event::Key(key)) = event::read()
+            // Row 1 INV-5 — crossterm 0.28 emits Press / Repeat /
+            // Release variants. Only Press should drive dispatch;
+            // Repeat events from a briefly-held key would otherwise
+            // re-enter the kill-arming branch and silently switch
+            // the armed PID across vitals refreshes, and Release
+            // would double-dispatch every press. Synthesized
+            // KeyEvents from terminals without kind reporting
+            // default to Press in crossterm, so this filter doesn't
+            // drop events on legacy hosts.
+            && should_dispatch_key(key.kind)
             && let Some(action) = input::translate(key, &app)
         {
             apply_action(
@@ -198,48 +208,30 @@ fn apply_action(
         Action::SelectUp => app.select_prev(runtime.state()),
         Action::SelectDown => app.select_next(runtime.state()),
         Action::KillOrConfirm => {
-            // FIRE branch: once armed, the kill is committed to the
-            // armed PID. A second `k` must fire on `armed_kill_pid`
-            // (not `selected_pid`) — otherwise selection drift between
-            // ticks (PID list reshuffle, focus moves that the user
-            // didn't notice) silently re-arms instead of firing, which
-            // looks like the keypress was lost.
-            if let Some(armed_pid) = app.armed_kill_pid() {
-                // Snapshot name + dry-run state BEFORE disarm: the
-                // armed-kill record is dropped by `disarm_kill`, and
-                // `runtime.dry_run()` could in principle change between
-                // the read and the message — pin both to the value at
-                // the moment the kill was dispatched.
-                let armed_name = app
-                    .armed_kill()
-                    .map(|a| a.name.clone())
-                    .unwrap_or_default();
-                let was_dry_run = runtime.dry_run();
-                let reason = "manual kill via TUI".to_string();
-                if let Err(e) = runtime.manual_kill(armed_pid, reason) {
-                    tracing::warn!("manual kill failed: {}", e);
-                } else if was_dry_run {
-                    // Dry-run swallows the signal silently in
-                    // `kill_sigterm` — the operator needs explicit
-                    // feedback that the press was received but the
-                    // process is still alive on purpose.
-                    app.set_status(format!(
-                        "DRY-RUN: would have sent SIGTERM to PID {armed_pid} ({armed_name}) — press d to enforce",
-                    ));
-                }
-                app.disarm_kill();
-            } else if let Some(pid) = app.selected_pid(runtime.state()) {
-                // ARM branch: resolve name + allowlist status at the
-                // moment of the keypress so the banner renders without
-                // having to re-walk the runtime state every frame.
+            // CAR-14 / Row 1 — `k` is arm-only. Confirm fires on
+            // Enter (see Action::OpenDetail below). Pre-CAR-14 the
+            // second `k` press fired the kill; the contract changed
+            // after smoke testing surfaced "did I press k once or
+            // twice?" ambiguity.
+            //
+            // INV-6 — pressing `k` while a kill is already armed:
+            //   * Same focused PID → refresh armed_at (extends the
+            //     5s window from now).
+            //   * Different focused PID → switch armed to the new
+            //     PID with armed_at = Instant::now() (treats the
+            //     second press as an explicit retarget).
+            // Both cases are covered uniformly by ARMING fresh on
+            // every `k` press: the new ArmedKill replaces the
+            // prior one, and its `armed_at` is the new now.
+            //
+            // No-focus case: leave any prior armed_kill in place
+            // and do nothing — operator can still press Enter to
+            // confirm if a focus blip is transient.
+            if let Some(pid) = app.selected_pid(runtime.state()) {
                 let state = runtime.state();
                 let proc = state.annotated.iter().find(|p| p.pid == pid);
                 let name = proc.map(|p| p.name.clone()).unwrap_or_default();
-                let allowlisted = runtime
-                    .config()
-                    .policy
-                    .allowlist
-                    .contains(&name);
+                let allowlisted = runtime.config().policy.allowlist.contains(&name);
                 app.arm_kill(ArmedKill {
                     pid,
                     name,
@@ -274,7 +266,28 @@ fn apply_action(
             }
         }
         Action::OpenGrafana => handle_open_dashboard(runtime, app),
-        Action::OpenDetail => handle_open_detail(runtime, app, live_detail, live_buffers),
+        Action::OpenDetail => {
+            // CAR-14 / Row 1 INV-2 — armed kill takes priority over
+            // the detail-card open path. Dispatching on `armed.pid`
+            // (PINNED at arm time, snapshotted into the `ArmedKill`
+            // struct) is what protects INV-1: the dispatched PID is
+            // whatever the user armed, NOT whatever
+            // `selected_pid(state)` returns now (which is volatile
+            // across vitals refreshes because the workloads panel
+            // sorts by status priority, and a workload transitioning
+            // Healthy → Attention shifts row order).
+            //
+            // INV-3 + INV-4 — when no kill is armed (or armed-and-
+            // expired), Enter falls through to the pre-CAR-14
+            // `handle_open_detail` path: open live-detail if focused
+            // PID is running, open post-mortem if exited+history
+            // exists, otherwise no-op (logged).
+            if let Some(armed) = app.take_armed_kill_if_active() {
+                confirm_armed_kill(runtime, app, armed);
+            } else {
+                handle_open_detail(runtime, app, live_detail, live_buffers);
+            }
+        }
         Action::EscapeCascade => {
             // L16 — live-detail card sits at the front of the dismiss
             // queue; only when nothing live is up do we delegate to
@@ -303,6 +316,45 @@ fn apply_action(
         // method; this dispatch site is just the routing.
         Action::CycleTopSort => app.cycle_top_sort(),
     }
+}
+
+/// CAR-14 / Row 1 — Enter-confirm dispatch for the armed kill.
+///
+/// Receives the armed record by value (already taken out of `App`
+/// by `take_armed_kill_if_active`) so the field is guaranteed
+/// cleared by the time this function runs — no second mutable
+/// borrow of `app` for `disarm_kill` is needed. Calls
+/// `runtime.manual_kill(armed.pid, …)` on the PINNED PID
+/// (INV-1 / INV-2): even if `selected_pid(state)` has drifted to
+/// a different workload between arm and confirm, the kill fires
+/// on whatever the operator armed.
+///
+/// Dry-run mode surfaces the same status-footer hint the pre-
+/// CAR-14 FIRE branch used so the operator gets explicit
+/// feedback that the press was received and the signal was
+/// suppressed by policy, not lost.
+fn confirm_armed_kill(runtime: &mut Runtime, app: &mut App, armed: ArmedKill) {
+    let was_dry_run = runtime.dry_run();
+    let reason = "manual kill via TUI (Enter confirm)".to_string();
+    if let Err(e) = runtime.manual_kill(armed.pid, reason) {
+        tracing::warn!(pid = armed.pid, error = %e, "manual kill failed");
+    } else if was_dry_run {
+        app.set_status(format!(
+            "DRY-RUN: would have sent SIGTERM to PID {} ({}) — press d to enforce",
+            armed.pid, armed.name,
+        ));
+    }
+}
+
+/// Row 1 INV-5 — `true` when a `KeyEventKind` should drive
+/// dispatch. Only `Press` qualifies; `Repeat` (key held) and
+/// `Release` are dropped so the kill-arming branch can't re-enter
+/// on a single physical keypress.
+///
+/// Extracted as a free function so unit tests can pin the
+/// filter contract without spinning up an event loop.
+pub(crate) fn should_dispatch_key(kind: KeyEventKind) -> bool {
+    matches!(kind, KeyEventKind::Press)
 }
 
 /// `g` keybinding handler ([UX-3]) per UI Contract v2.
@@ -478,4 +530,33 @@ pub fn compute_dashboard_url(template: &str, model: Option<&str>, pid: u32) -> S
     template
         .replace("{model}", model.unwrap_or(""))
         .replace("{pid}", &pid.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── Row 1 — KeyEventKind filter (INV-5) ──────────────────────
+
+    #[test]
+    fn press_keys_dispatch() {
+        assert!(should_dispatch_key(KeyEventKind::Press));
+    }
+
+    #[test]
+    fn repeat_keys_are_filtered() {
+        // crossterm 0.28 emits `Repeat` on held keys. Pre-Row-1 the
+        // event loop accepted them, which re-entered the
+        // kill-arming branch and silently retargeted the armed PID
+        // when vitals reshuffled the workloads list between repeats.
+        assert!(!should_dispatch_key(KeyEventKind::Repeat));
+    }
+
+    #[test]
+    fn release_keys_are_filtered() {
+        // Release double-dispatches every press. Filtering here
+        // also matches the Windows-side audit fix so the two
+        // binaries treat held-down keys identically.
+        assert!(!should_dispatch_key(KeyEventKind::Release));
+    }
 }

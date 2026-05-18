@@ -224,9 +224,10 @@ fn workloads_panel_renders_with_accent_block_border_when_focused() {
     // Layout from render_default:
     //   row 0     : §0 header
     //   rows 1-7  : vitals (7)
-    //   rows 8-N  : workloads (flexes)
-    // First row of the workloads block border is row 8.
-    let workloads_border_cell = buffer.cell((0, 8)).expect("cell");
+    //   row 8     : B7 spacer (1)
+    //   rows 9-N  : workloads (flexes)
+    // First row of the workloads block border is row 9.
+    let workloads_border_cell = buffer.cell((0, 9)).expect("cell");
     assert_eq!(
         workloads_border_cell.style().fg,
         Some(theme.accent),

@@ -25,7 +25,7 @@
 //!
 //! Hz / per-topic rate sampling is **v1.1+**. v1.0 ROS2 rows show
 //! process-level CPU/RAM only; `panels::workloads::primary_metric`
-//! returns `"(no metrics)"` for the category until topic-rate
+//! returns `"running actively"` for the category until topic-rate
 //! telemetry lands.
 
 use std::fs;

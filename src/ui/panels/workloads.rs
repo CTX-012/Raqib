@@ -47,12 +47,17 @@ use super::super::app::App;
 use super::panel_block;
 use crate::ui::theme::UiTheme;
 
-/// Local placeholder for the no-data primary metric — non-LLM
-/// workloads without their type-specific metric stream show this.
-/// Matches the contract's "(no metrics)" fallback in §2 but no
-/// Contract const exists for it yet (filed in BACKLOG as a future
-/// CAR; low priority since only one render site uses it).
-const NO_METRICS: &str = "(no metrics)";
+/// Local placeholder for the primary-metric column when a workload
+/// is alive but its category sampler hasn't reported a value this
+/// tick (LLM with no KV cache yet, non-LLM categories whose
+/// per-type sampler isn't wired in v1.0). "running actively"
+/// conveys "process alive, doing work, just no metrics this tick"
+/// — the prior "(no metrics)" framing read as a fault. The
+/// genuinely-distinct cold-start state continues to render
+/// `status::COLD_LOADING` via the Loading-status override above.
+/// No Contract const exists for this slot yet (filed in BACKLOG as
+/// a future CAR; low priority since only one render site uses it).
+const RUNNING_ACTIVELY: &str = "running actively";
 
 /// L11c — map the local `WorkloadCategory` enum to the v0.3.4
 /// contract group-header const. Contract refined CAR-8 to
@@ -261,8 +266,9 @@ pub(crate) fn degraded_line(row: &Row) -> Option<String> {
 
 /// Format the primary metric for a row. Returns `"cold-loading"`
 /// when the row is in `Loading` state regardless of category;
-/// otherwise category-specific (or `"(no metrics)"` when the
-/// telemetry isn't available).
+/// otherwise category-specific (or `"running actively"` when the
+/// process is alive but the type-specific sampler hasn't reported
+/// a value this tick).
 fn primary_metric(row: &Row) -> String {
     if matches!(row.status, WorkloadStatus::Loading) {
         return COLD_LOADING.to_string();
@@ -271,15 +277,15 @@ fn primary_metric(row: &Row) -> String {
         // L11b doesn't yet wire live tok/s / fps / emb/s — those
         // come from `live_telemetry` once the samplers expose them
         // per category. Until then non-LLM categories report
-        // `(no metrics)` and LLM reports KV cache when available.
+        // `running actively` and LLM reports KV cache when available.
         WorkloadCategory::LLM => match row.kv_cache_pct {
             Some(kv) => format!("KV {kv:>4.0}%"),
-            None => NO_METRICS.to_string(),
+            None => RUNNING_ACTIVELY.to_string(),
         },
         WorkloadCategory::Vision
         | WorkloadCategory::ROS2
         | WorkloadCategory::Embeddings
-        | WorkloadCategory::Unknown => NO_METRICS.to_string(),
+        | WorkloadCategory::Unknown => RUNNING_ACTIVELY.to_string(),
     }
 }
 

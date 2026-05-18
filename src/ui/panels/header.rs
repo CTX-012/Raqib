@@ -25,6 +25,8 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
+use ux_contract::mission;
+
 use crate::ui::app::App;
 use crate::ui::symbols::SymbolSet;
 use crate::ui::theme::UiTheme;
@@ -59,9 +61,25 @@ pub fn render(
 /// Pure — exposed for unit tests in this module and the integration
 /// test at `tests/header_rendering.rs` so assertions can target the
 /// text shape without spinning a `TestBackend`.
+///
+/// D5 — sources the template from `ux_contract::mission::TEMPLATE`
+/// rather than rebuilding the format string locally, so any future
+/// edit to the §0 mission line happens once in the contract crate and
+/// both consumers (L25 here, W46 on Windows) pick it up. The
+/// `SymbolSet` override is preserved for `LANG=C` SSH sessions that
+/// fall back to ASCII: when the active symbol set isn't Unicode we
+/// swap the contract's `·` for the set's `header_separator()` so the
+/// header matches the rest of the TUI's glyph regime.
 pub fn mission_line_text(set: SymbolSet, n_workloads: usize, n_degraded: usize) -> String {
-    let sep = format!(" {} ", set.header_separator());
-    format!("edge_monitor{sep}{n_workloads} workloads{sep}{n_degraded} degraded{sep}press ? for help")
+    let text = mission::TEMPLATE
+        .replace("{n}", &n_workloads.to_string())
+        .replace("{m}", &n_degraded.to_string());
+    let sep = set.header_separator();
+    if sep == "·" {
+        text
+    } else {
+        text.replace('·', sep)
+    }
 }
 
 #[cfg(test)]

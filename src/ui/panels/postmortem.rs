@@ -42,6 +42,8 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
 
+use ux_contract::postmortem_labels;
+
 use crate::storage::RunRecord;
 use crate::storage::run_store::ExitReason;
 use crate::ui::theme::UiTheme;
@@ -319,11 +321,14 @@ fn build_lines_with(card: &PostMortemCard, theme: Option<&UiTheme>) -> Vec<Line<
         lines.push(Line::from(Span::styled(text, style)));
     }
 
-    // 9-11. stderr block (when we have any)
+    // 9-11. stderr block (when we have any). D6 — header text comes
+    // from `postmortem_labels::LAST_STDERR` so the Linux and Windows
+    // consumers share the same locked spelling ("Last stderr:");
+    // amend the contract to retitle it.
     if !pm.stderr_tail.is_empty() {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
-            "Last stderr lines:",
+            postmortem_labels::LAST_STDERR,
             Style::default().add_modifier(Modifier::BOLD),
         )));
         // Inner width = card width - 2 border - 2 padding = CARD_WIDTH - 4.
@@ -658,8 +663,8 @@ mod tests {
     }
 
     /// Stderr block renders only when `stderr_tail` is non-empty,
-    /// header reads `Last stderr lines:`, and clamps to last 3
-    /// (newest at the bottom).
+    /// header reads `postmortem_labels::LAST_STDERR`, and clamps to
+    /// last 3 (newest at the bottom).
     #[test]
     fn stderr_block_renders_only_when_present_and_clamps_to_three() {
         let mut pm = fixture_post_mortem(true, BaselineStatus::NotAvailable);
@@ -678,7 +683,7 @@ mod tests {
             .join("\n");
 
         assert!(
-            rendered.contains("Last stderr lines:"),
+            rendered.contains(postmortem_labels::LAST_STDERR),
             "stderr header missing:\n{rendered}",
         );
         assert!(!rendered.contains("old line 1"));
@@ -697,7 +702,7 @@ mod tests {
             .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(!rendered.contains("Last stderr lines:"));
+        assert!(!rendered.contains(postmortem_labels::LAST_STDERR));
     }
 
     /// UI Contract v2 — verbatim baseline headlines for each band.

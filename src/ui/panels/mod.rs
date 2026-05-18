@@ -151,14 +151,15 @@ fn render_default(
     tier: SizeTier,
 ) {
     let constraints: &[Constraint] = if tier == SizeTier::Narrow {
-        // 1 + 7 + Min(8) + 7 + 1 = 24 fixed/min rows → fits §12's
-        // 80×24 floor exactly with Min(8) absorbing the workload
-        // panel. Header (L25 mission line) replaces the prior
-        // status bar at layout[0].
+        // B7 — insert a 1-row spacer between vitals and AI Workloads so
+        // the two panel borders don't visually merge. 1+7+1+Min(7)+7+1
+        // = 24 fits §12's 80×24 floor (Min absorbs the gap cost from 8
+        // → 7; still leaves a usable workloads area at Narrow).
         &[
             Constraint::Length(1), // §0 mission-line header (L25)
             Constraint::Length(7), // vitals (System)
-            Constraint::Min(8),    // AI Workloads (flexes)
+            Constraint::Length(1), // B7 spacer
+            Constraint::Min(7),    // AI Workloads (flexes)
             Constraint::Length(7), // Activity (Top processes hidden)
             Constraint::Length(1), // hint footer
         ]
@@ -166,6 +167,7 @@ fn render_default(
         &[
             Constraint::Length(1), // §0 mission-line header (L25)
             Constraint::Length(7), // vitals (System)
+            Constraint::Length(1), // B7 spacer
             Constraint::Min(8),    // AI Workloads (flexes)
             Constraint::Length(7), // Top processes (L13)
             Constraint::Length(7), // Activity (L15)
@@ -195,25 +197,26 @@ fn render_default(
 
     header::render(f, layout[0], app, theme, n_workloads, n_degraded);
     vitals::render(f, layout[1], state, theme);
+    // layout[2] is the B7 spacer — intentionally unrendered.
 
     // L22 / §12 Wide tier — split workloads into two columns when
     // there are 4+ workloads; single-column otherwise (Narrow /
     // Standard tiers always use single-column).
     let workload_count = state.ai_processes().count();
     if tier == SizeTier::Wide && workload_count >= 4 {
-        render_workloads_two_col(f, layout[2], state, app, theme);
+        render_workloads_two_col(f, layout[3], state, app, theme);
     } else {
-        workloads::render(f, layout[2], state, app, theme);
+        workloads::render(f, layout[3], state, app, theme);
     }
 
     if tier == SizeTier::Narrow {
         // §12: Top processes is "first to drop on narrow screens".
-        activity::render(f, layout[3], state, theme);
-        render_footer(f, layout[4], app, theme);
-    } else {
-        top_processes::render(f, layout[3], state, app.top_processes_sort(), theme);
         activity::render(f, layout[4], state, theme);
         render_footer(f, layout[5], app, theme);
+    } else {
+        top_processes::render(f, layout[4], state, app.top_processes_sort(), theme);
+        activity::render(f, layout[5], state, theme);
+        render_footer(f, layout[6], app, theme);
     }
 }
 

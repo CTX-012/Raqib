@@ -37,8 +37,8 @@ fn rendered_title_fg(theme: &UiTheme) -> Color {
 
     // Prime: Runtime::new doesn't tick on construction, so render
     // against a `RuntimeState` that's still at its initial default —
-    // that's fine, the status bar only reads `dry_run` and
-    // `tick_count` from state, both of which are present on default.
+    // that's fine, the status bar only reads `tick_count` from state,
+    // which is present on default.
     terminal
         .draw(|f| panels::render(f, runtime.state(), &app, theme, None, None))
         .expect("draw");

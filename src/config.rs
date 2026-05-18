@@ -20,8 +20,10 @@ pub enum ConfigError {
 
 /// Top-level runtime configuration. Loaded from TOML; CLI flags override.
 ///
-/// Defaults intentionally bias toward safety: dry-run is on, the allowlist
-/// covers shells and init, and tick rate is conservative.
+/// Defaults bias toward safety: the allowlist covers shells and init,
+/// and tick rate is conservative. Kill confirmation is handled by the
+/// TUI's kill_confirm card (CAR-17 / v0.3.8); there is no longer a
+/// dry-run policy switch.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -242,8 +244,6 @@ pub struct PolicyConfig {
     pub default_ai_action: PolicyAction,
     /// SIGTERM → SIGKILL grace period in seconds. Minimum 1s.
     pub sigterm_grace_secs: u64,
-    /// True = actually send signals; false = log only. Default false.
-    pub enforce: bool,
     /// Max automated kills permitted inside `rate_limit_window_secs`.
     /// Mirrors CLAUDE.md safety rule 5 (default 3).
     pub rate_limit_max_kills: u32,
@@ -290,7 +290,6 @@ impl Default for PolicyConfig {
             blocklist: policy.blacklist_names,
             default_ai_action: policy.default_ai_action,
             sigterm_grace_secs: policy.sigterm_grace_period_secs,
-            enforce: policy.enforce,
             rate_limit_max_kills: policy.rate_limit_max_kills,
             rate_limit_window_secs: policy.rate_limit_window_secs,
         }
@@ -369,15 +368,9 @@ impl Config {
             blacklist_names: self.policy.blocklist.clone(),
             default_ai_action: self.policy.default_ai_action,
             sigterm_grace_period_secs: self.policy.sigterm_grace_secs,
-            enforce: self.policy.enforce,
             rate_limit_max_kills: self.policy.rate_limit_max_kills,
             rate_limit_window_secs: self.policy.rate_limit_window_secs,
         }
-    }
-
-    /// Force dry-run regardless of file contents. Used by `--dry-run` flag.
-    pub fn force_dry_run(&mut self) {
-        self.policy.enforce = false;
     }
 }
 
@@ -385,15 +378,6 @@ impl Config {
 mod tests {
     use super::*;
     use std::io::Write;
-
-    #[test]
-    fn default_is_dry_run() {
-        let cfg = Config::default();
-        assert!(
-            !cfg.policy.enforce,
-            "safety: default config must be dry-run"
-        );
-    }
 
     #[test]
     fn default_validates() {
@@ -415,14 +399,6 @@ mod tests {
     }
 
     #[test]
-    fn force_dry_run_overrides_enforce() {
-        let mut cfg = Config::default();
-        cfg.policy.enforce = true;
-        cfg.force_dry_run();
-        assert!(!cfg.policy.enforce);
-    }
-
-    #[test]
     fn build_policy_roundtrips_allowlist() {
         let mut cfg = Config::default();
         cfg.policy.allowlist.insert("my_app".into());
@@ -435,10 +411,8 @@ mod tests {
         let mut f = tempfile::NamedTempFile::new().unwrap();
         // Empty TOML — every field falls back to default.
         writeln!(f, "[runtime]\ntick_interval_ms = 500").unwrap();
-        writeln!(f, "[policy]\nenforce = false").unwrap();
         let cfg = Config::from_file(f.path()).unwrap();
         assert_eq!(cfg.runtime.tick_interval_ms, 500);
-        assert!(!cfg.policy.enforce);
     }
 
     #[test]

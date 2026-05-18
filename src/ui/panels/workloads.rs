@@ -160,12 +160,25 @@ pub(crate) struct Row {
     pub governor_armed: bool,
 }
 
+/// CAR-17 — compute the §3 `WorkloadStatus` for a single annotated
+/// process using the same input pipeline as the workloads panel.
+/// Public so the kill_confirm card can render the workload's status
+/// in its body without re-implementing the breach logic.
+pub fn status_for(
+    proc: &AnnotatedProcess,
+    state: &RuntimeState,
+    app: &App,
+) -> WorkloadStatus {
+    let inputs = build_status_inputs(proc, state, app.kill_confirm_pid(), Instant::now());
+    compute_workload_status(&inputs)
+}
+
 /// Build the in-render-order row list. Crate-public for tests + the
 /// app's selection logic so navigation stays in lock-step with the
 /// rendered order.
 pub(crate) fn ordered_rows(state: &RuntimeState, app: &App) -> Vec<Row> {
     let now = Instant::now();
-    let armed = app.armed_kill_pid();
+    let armed = app.kill_confirm_pid();
     let mut rows: Vec<Row> = state
         .ai_processes()
         .map(|p| {
@@ -515,19 +528,27 @@ mod tests {
 
     #[test]
     fn workloads_within_category_sorted_by_status_priority() {
-        // Two LLM rows, both warm. Arming the higher-PID row
-        // escalates its status to Critical via `governor_armed`.
+        // Two LLM rows, both warm. Opening kill_confirm on the
+        // higher-PID row escalates its status to Critical via
+        // `governor_armed` (the kill_confirm-targeted flag).
         let mut app = App::new();
         let s = state_with(vec![
             make_proc(10, "calm", WorkloadCategory::LLM, warm()),
             make_proc(99, "armed", WorkloadCategory::LLM, warm()),
         ]);
-        app.arm_kill(crate::ui::panels::armed_banner::ArmedKill {
-            pid: 99,
-            name: "armed".into(),
-            allowlisted: false,
-            armed_at: Instant::now(),
-        });
+        app.open_kill_confirm(
+            crate::ui::panels::kill_confirm::KillConfirmCard::new(
+                "armed".into(),
+                99,
+                "LLM".into(),
+                "Running".into(),
+                10,
+                5.0,
+                256,
+                None,
+                false,
+            ),
+        );
         let pids: Vec<u32> = ordered_rows(&s, &app)
             .into_iter()
             .map(|r| r.pid)

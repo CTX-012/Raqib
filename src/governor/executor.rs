@@ -29,7 +29,6 @@ impl GovernorExecutor {
 
     /// Evaluate all processes and determine actions. Mutable because the
     /// rate limiter records each kill intent against the sliding window.
-    /// Dry-run decisions do NOT consume the budget; only real kills do.
     pub fn evaluate(
         &mut self,
         lifecycle_snapshot: &LifecycleSnapshot,
@@ -70,32 +69,22 @@ impl GovernorExecutor {
                 format!("allowed by policy ({})", lifecycle.name),
             ),
             crate::governor::policy::PolicyAction::Kill => {
-                if self.policy.enforce {
-                    if self.rate_limit_exceeded() {
-                        (
-                            KillAction::RateLimited,
-                            format!(
-                                "rate limit: {} kills in {}s window — deferring {}",
-                                self.policy.rate_limit_max_kills,
-                                self.policy.rate_limit_window_secs,
-                                lifecycle.name,
-                            ),
-                        )
-                    } else {
-                        (
-                            KillAction::SignalTermSent,
-                            format!(
-                                "AI process marked for kill: {:?}",
-                                category.unwrap_or(AICategory::NotAi)
-                            ),
-                        )
-                    }
+                if self.rate_limit_exceeded() {
+                    (
+                        KillAction::RateLimited,
+                        format!(
+                            "rate limit: {} kills in {}s window — deferring {}",
+                            self.policy.rate_limit_max_kills,
+                            self.policy.rate_limit_window_secs,
+                            lifecycle.name,
+                        ),
+                    )
                 } else {
                     (
-                        KillAction::DryRunTermWould,
+                        KillAction::SignalTermSent,
                         format!(
-                            "Would stop {} (dry-run mode — no action taken)",
-                            lifecycle.name,
+                            "AI process marked for kill: {:?}",
+                            category.unwrap_or(AICategory::NotAi)
                         ),
                     )
                 }
@@ -134,7 +123,7 @@ impl GovernorExecutor {
         self.policy.rate_limit_max_kills.saturating_sub(used)
     }
 
-    /// Send SIGTERM to process. Does nothing in dry-run mode.
+    /// Send SIGTERM to process.
     ///
     /// Captures a Linux pidfd and `/proc/<pid>/stat` starttime *before*
     /// signalling so the SIGKILL escalation can verify the PID has not
@@ -145,11 +134,6 @@ impl GovernorExecutor {
         name: String,
         category: AICategory,
     ) -> GovernorResult<()> {
-        if !self.policy.enforce {
-            tracing::info!("DRY-RUN: SIGTERM would be sent to PID {}: {}", pid, name);
-            return Ok(());
-        }
-
         // Capture identity tokens BEFORE the signal — between the open and
         // the kill there is still a tiny window, but anything else (open
         // after kill) would be useless. pidfd_open + read of /proc/.../stat
@@ -199,13 +183,7 @@ impl GovernorExecutor {
     /// meaning the original process is gone and either the PID is now
     /// unassigned or the OS has handed it to an unrelated new process. In
     /// the abort case **no signal is sent** (CLAUDE.md safety rule 1).
-    /// Dry-run mode short-circuits to `DryRunKillWould`.
     pub fn send_sigkill(&mut self, pid: u32, name: &str) -> GovernorResult<KillAction> {
-        if !self.policy.enforce {
-            tracing::info!("DRY-RUN: SIGKILL would be sent to PID {}: {}", pid, name);
-            return Ok(KillAction::DryRunKillWould);
-        }
-
         // Identity verification. Two layers, in priority order:
         //  1. pidfd captured at SIGTERM — kernel-guaranteed race-free.
         //  2. /proc/<pid>/stat starttime re-read and compared.
@@ -411,57 +389,6 @@ mod tests {
     }
 
     #[test]
-    fn executor_evaluate_dry_run() {
-        let policy = GovernorPolicy::safe_default();
-        let mut executor = GovernorExecutor::new(policy);
-
-        let mut snapshot = crate::lifecycle::LifecycleSnapshot::new();
-        snapshot.processes.insert(
-            102,
-            make_lifecycle(102, "unknown_ai", Some(AICategory::Training), false),
-        );
-
-        let decisions = executor.evaluate(&snapshot);
-        assert_eq!(decisions.len(), 1);
-        assert_eq!(decisions[0].1, KillAction::DryRunTermWould);
-    }
-
-    /// Dry-run reason string is operator-facing (lands in the Audit
-    /// panel and stderr). It must name the actual process by name and
-    /// state plainly that no action was taken — the prior phrasing
-    /// shouted "DRY-RUN" in caps and leaked the `AICategory` Debug
-    /// variant. Pinning the new format here prevents accidental
-    /// regression when the executor logic gets restructured.
-    #[test]
-    fn dry_run_reason_string_uses_process_name_and_plain_english() {
-        let policy = GovernorPolicy::safe_default();
-        let mut executor = GovernorExecutor::new(policy);
-
-        let mut snapshot = crate::lifecycle::LifecycleSnapshot::new();
-        snapshot.processes.insert(
-            42,
-            make_lifecycle(42, "ollama", Some(AICategory::Inference), false),
-        );
-
-        let decisions = executor.evaluate(&snapshot);
-        assert_eq!(decisions.len(), 1);
-        let (_pid, action, reason) = &decisions[0];
-        assert_eq!(*action, KillAction::DryRunTermWould);
-        assert_eq!(
-            reason,
-            "Would stop ollama (dry-run mode — no action taken)",
-        );
-        assert!(
-            !reason.contains("DRY-RUN"),
-            "old shouty `DRY-RUN:` prefix must not return"
-        );
-        assert!(
-            !reason.contains("Inference"),
-            "category Debug variant must not leak into operator-facing text"
-        );
-    }
-
-    #[test]
     fn executor_pending_kills_count() {
         let policy = GovernorPolicy::safe_default();
         let mut executor = GovernorExecutor::new(policy);
@@ -477,7 +404,6 @@ mod tests {
         // 10 kill-eligible processes, budget 3 — only 3 get SignalTermSent,
         // the rest are RateLimited. Matches HANDOFF Module 5 acceptance test.
         let mut policy = GovernorPolicy::safe_default();
-        policy.enforce = true;
         policy.rate_limit_max_kills = 3;
         policy.rate_limit_window_secs = 60;
         let mut executor = GovernorExecutor::new(policy);
@@ -509,38 +435,8 @@ mod tests {
     }
 
     #[test]
-    fn executor_rate_limit_not_consumed_in_dry_run() {
-        // Dry-run decisions must not burn through the kill budget — otherwise
-        // operators who leave the tool in dry-run for a minute lose their
-        // ability to ever enforce later. Safety rule 5 only applies to real
-        // kills.
-        let mut policy = GovernorPolicy::safe_default();
-        policy.enforce = false;
-        policy.rate_limit_max_kills = 3;
-        let mut executor = GovernorExecutor::new(policy);
-
-        let mut snapshot = crate::lifecycle::LifecycleSnapshot::new();
-        for pid in 300..310u32 {
-            snapshot.processes.insert(
-                pid,
-                make_lifecycle(pid, &format!("w{pid}"), Some(AICategory::Inference), false),
-            );
-        }
-
-        let decisions = executor.evaluate(&snapshot);
-        assert_eq!(decisions.len(), 10);
-        assert!(
-            decisions
-                .iter()
-                .all(|(_, a, _)| *a == KillAction::DryRunTermWould)
-        );
-        assert_eq!(executor.kills_remaining_in_window(), 3);
-    }
-
-    #[test]
     fn executor_rate_limit_disabled_when_max_is_zero() {
         let mut policy = GovernorPolicy::safe_default();
-        policy.enforce = true;
         policy.rate_limit_max_kills = 0;
         let mut executor = GovernorExecutor::new(policy);
 

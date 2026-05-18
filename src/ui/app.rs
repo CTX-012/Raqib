@@ -4,13 +4,12 @@ use crate::runtime::RuntimeState;
 use crate::storage::RunRecord;
 use crate::ui::alerts::{AlertState, WorkloadRef};
 use crate::ui::panels::TopProcessesSort;
-use crate::ui::panels::armed_banner::ArmedKill;
+use crate::ui::panels::kill_confirm::KillConfirmCard;
 use crate::ui::panels::postmortem::PostMortemCard;
 use crate::ui::symbols::SymbolSet;
 
 /// How long an ephemeral status footer message stays on screen
-/// before `tick_overlays` clears it. Mirrors the operator-feedback
-/// rhythm of the armed-kill banner: long enough to read, short
+/// before `tick_overlays` clears it. Long enough to read, short
 /// enough not to mask the keybind hints permanently.
 pub(crate) const STATUS_TTL: Duration = Duration::from_secs(3);
 
@@ -50,11 +49,13 @@ pub struct App {
     selected: usize,
     show_help: bool,
     quit_requested: bool,
-    /// Two-stage manual-kill ([UX-1]). `Some(_)` after the first `k`
-    /// press; auto-disarms after `ArmedKill::WINDOW`. Carries pid +
-    /// name + allowlisted so the banner can render without re-reading
-    /// the runtime state on every frame.
-    armed_kill: Option<ArmedKill>,
+    /// CAR-17 — kill_confirm card. `Some(_)` while the modal is open
+    /// after the user pressed `k` on the focused workload. Carries the
+    /// workload snapshot the card renders, including the PID it will
+    /// dispatch against on Enter. Replaces the v0.3.x `ArmedKill`
+    /// banner state — there is no auto-dismiss timer, the operator
+    /// must explicitly confirm (Enter) or cancel (Esc).
+    kill_confirm: Option<KillConfirmCard>,
     /// Most recent post-mortem-eligible exit ([UX-2]). Latest wins;
     /// dismissed by Esc or auto at `PostMortemCard::WINDOW`.
     postmortem: Option<PostMortemCard>,
@@ -63,10 +64,10 @@ pub struct App {
     /// reading.
     history: Option<HistoryOverlay>,
     /// Ephemeral status footer message + when it was set. Auto-cleared
-    /// by `tick_overlays` after `STATUS_TTL`. Used to surface kill-flow
-    /// feedback (especially the dry-run "would-have-sent" message) so
-    /// the operator gets confirmation a keypress was received even
-    /// when the underlying signal was suppressed.
+    /// by `tick_overlays` after `STATUS_TTL`. Used to surface
+    /// transient action feedback (alerts acknowledged, sort cycled,
+    /// kill dispatched) so the operator gets confirmation a keypress
+    /// was received.
     status: Option<(String, Instant)>,
     /// L4 / UX_CONTRACT.md §15 — symbol set resolved at TUI startup.
     /// Render sites must route status-dot rendering through
@@ -76,9 +77,10 @@ pub struct App {
     symbol_set: SymbolSet,
     /// L5/L6 / UX_CONTRACT.md §4 — alert state machine. Lives on
     /// `App` (not `RuntimeState`) because acks are session-scoped UI
-    /// state and one of the breach inputs (`armed_kill_pid`) lives
-    /// on `App` already; keeping the state on the same shelf
-    /// avoids an awkward cross-boundary dispatch every tick. The L
+    /// state and one of the breach inputs (the kill_confirm card's
+    /// target PID) lives on `App` already; keeping the state on the
+    /// same shelf avoids an awkward cross-boundary dispatch every
+    /// tick. The L
     /// plan row originally spec'd `RuntimeState`; deviation is
     /// documented in the L6 commit.
     alerts: AlertState,
@@ -119,7 +121,7 @@ impl App {
             selected: 0,
             show_help: false,
             quit_requested: false,
-            armed_kill: None,
+            kill_confirm: None,
             postmortem: None,
             history: None,
             status: None,
@@ -229,7 +231,12 @@ impl App {
             .as_ref()
             .map(|s| s.gpu.total_vram_all_devices())
             .filter(|&v| v > 0);
-        let armed_pid = self.armed_kill_pid();
+        // CAR-17 — the kill_confirm card's open-state replaces the
+        // v0.3.x armed-kill flag as the per-PID "operator has primed
+        // a kill" signal. The GovernorArmed alert id is retained in
+        // ux_contract v0.3.8 for backward compat (scheduled removal
+        // in v0.4.x); it fires while the card targets this PID.
+        let armed_pid = self.kill_confirm_pid();
         let workloads: Vec<(u32, String, Option<u64>, Option<f32>)> = state
             .ai_processes()
             .map(|p| {
@@ -303,14 +310,17 @@ impl App {
     pub fn should_quit(&self) -> bool {
         self.quit_requested
     }
-    pub fn armed_kill_pid(&self) -> Option<u32> {
-        self.armed_kill.as_ref().map(|a| a.pid)
+    /// PID the open kill_confirm card targets, or `None` when no card
+    /// is open. Read by `observe_alerts` to fire `AlertId::GovernorArmed`
+    /// and by the workloads panel to highlight the targeted row.
+    pub fn kill_confirm_pid(&self) -> Option<u32> {
+        self.kill_confirm.as_ref().map(|c| c.pid)
     }
 
-    /// Full armed-kill state for the banner panel. `None` when no kill
-    /// is armed.
-    pub fn armed_kill(&self) -> Option<&ArmedKill> {
-        self.armed_kill.as_ref()
+    /// Full kill_confirm card snapshot for the overlay renderer. `None`
+    /// when no card is open.
+    pub fn kill_confirm(&self) -> Option<&KillConfirmCard> {
+        self.kill_confirm.as_ref()
     }
 
     /// Most recent post-mortem-eligible exit. `None` when no card is
@@ -327,45 +337,34 @@ impl App {
         self.show_help = !self.show_help;
     }
 
-    /// Arm a kill on `armed`. Replaces any prior arm (e.g. user moves
-    /// focus and re-arms on a new row). The caller is expected to
-    /// resolve `name` + `allowlisted` against the runtime at the time
-    /// of the keypress so the banner doesn't have to re-resolve them
-    /// on every render frame.
-    pub fn arm_kill(&mut self, armed: ArmedKill) {
-        self.armed_kill = Some(armed);
-    }
-    pub fn disarm_kill(&mut self) {
-        self.armed_kill = None;
+    /// CAR-17 — open the kill_confirm card on `card`. Replaces any
+    /// prior card (e.g. operator pressed `k` on a new row before
+    /// confirming the previous prompt). Caller resolves the workload
+    /// snapshot from the live `RuntimeState` so the renderer doesn't
+    /// re-walk state every frame.
+    pub fn open_kill_confirm(&mut self, card: KillConfirmCard) {
+        self.kill_confirm = Some(card);
     }
 
-    /// CAR-14 / Row 1 — atomically check + take the armed kill record
-    /// for Enter-confirm dispatch.
+    /// Dismiss the kill_confirm card without firing. Called by the
+    /// Esc cascade and on focus shifts (`select_next` / `select_prev`)
+    /// for the same safety reason the v0.3.x banner cleared on nav.
+    pub fn dismiss_kill_confirm(&mut self) {
+        self.kill_confirm = None;
+    }
+
+    /// CAR-17 — take the kill_confirm card for Enter-confirm dispatch.
+    /// Returns `Some(card)` when one is open; the slot becomes empty
+    /// so the next render frame drops the overlay. Returns `None`
+    /// when no card is open — Enter then falls through to the
+    /// live_detail / post_mortem dispatch path.
     ///
-    /// Returns `Some(armed)` when the kill is armed AND the 5s window
-    /// is still active; the field is cleared before return so the
-    /// next render frame drops the banner. Returns `None` when no
-    /// kill is armed, OR when the armed kill is past its window —
-    /// both cases route `Enter` to its pre-CAR-14 detail-card
-    /// behaviour.
-    ///
-    /// Naming mirrors `Option::take`: caller receives ownership of
-    /// the value, the slot becomes empty. Using a dedicated method
-    /// rather than open-coding `armed_kill.take().filter(...)` at the
-    /// dispatch site keeps the "PIN to armed.pid, NEVER recompute
-    /// from focused" invariant readable (Row 1 INV-1 / INV-2) and
-    /// gives tests a single point to drive.
-    pub fn take_armed_kill_if_active(&mut self) -> Option<ArmedKill> {
-        let armed = self.armed_kill.as_ref()?;
-        if armed.is_expired() {
-            // Drop expired arm without dispatching — operator missed
-            // the 5-second window, and post-CAR-14 the Enter press
-            // should fall through to detail-card behaviour, not
-            // fire a stale kill.
-            self.armed_kill = None;
-            return None;
-        }
-        self.armed_kill.take()
+    /// Pinning the kill target on the *card* (not on `selected_pid`)
+    /// is the safety invariant the v0.3.x ARMED banner enforced via
+    /// `ArmedKill::pid` — it survives here because the card carries
+    /// the same field.
+    pub fn take_kill_confirm(&mut self) -> Option<KillConfirmCard> {
+        self.kill_confirm.take()
     }
 
     /// Push a new post-mortem snapshot. Latest wins; any existing card
@@ -402,16 +401,12 @@ impl App {
         self.dismissed_pid.take()
     }
 
-    /// Drop expired armed-kill / post-mortem snapshots. Called once
-    /// per render tick (10 Hz). No I/O, no side effects beyond the
-    /// `App`'s own state — the loop runs even when the user isn't
-    /// pressing keys, so countdown displays decay smoothly.
+    /// Drop expired post-mortem snapshots and stale status footers.
+    /// Called once per render tick (10 Hz). No I/O, no side effects
+    /// beyond the `App`'s own state. CAR-17 — the kill_confirm card
+    /// has no auto-dismiss window (the operator must explicitly
+    /// confirm or cancel), so it is not swept here.
     pub fn tick_overlays(&mut self) {
-        if let Some(armed) = &self.armed_kill
-            && armed.is_expired()
-        {
-            self.armed_kill = None;
-        }
         if let Some(card) = &self.postmortem
             && card.is_expired()
         {
@@ -434,35 +429,35 @@ impl App {
     /// Cascading-priority Escape handler per UX_CONTRACT.md §6.
     ///
     /// Priority order:
-    ///   1. post-mortem card → dismiss
-    ///   2. armed kill → disarm
+    ///   1. kill_confirm card → dismiss without firing (CAR-17)
+    ///   2. post-mortem card → dismiss
     ///   3. history or help overlay → close
     ///   4. alerts visible → acknowledge all (same effect as `a`)
     ///   5. nothing to dismiss → quit (same as `q`)
     ///
     /// Returns `true` when steps 1–4 consumed the press, `false`
-    /// when step 5 fired. Either way `quit_requested` is set in
-    /// the step-5 branch; callers can use the return to log
-    /// `Esc → quit` differently from a `q`-quit if desired.
+    /// when step 5 fired.
     ///
-    /// L24 / §6 — step 4 sits **after** the overlay-close step on
-    /// purpose. When the alert region is non-empty *and* history
-    /// or help is also open, the first Esc closes the overlay; the
+    /// CAR-17 — the kill_confirm card sits at the front of the
+    /// cascade because it's the destructive prompt: an Esc with a
+    /// pending kill must always cancel the kill before being routed
+    /// to any other overlay, never the other way around.
+    ///
+    /// L24 / §6 — step 4 sits after the overlay-close step on
+    /// purpose. When the alert region is non-empty *and* history or
+    /// help is also open, the first Esc closes the overlay; the
     /// operator has to press Esc a second time to ack the alerts.
-    /// Order matters: an Esc that silently ack'd alerts while the
-    /// user was just trying to close history would erase the alert
-    /// banner the user hadn't visually consumed yet.
     pub fn handle_escape(&mut self) -> bool {
+        if self.kill_confirm.is_some() {
+            self.dismiss_kill_confirm();
+            return true;
+        }
         if self.postmortem.is_some() {
             // L19 — `dismiss_postmortem` funnels the dismissed
             // card's PID into `dismissed_pid` so the dispatcher
             // can ask `Runtime` to drop the matching transient
             // stderr buffer post-cascade.
             self.dismiss_postmortem();
-            return true;
-        }
-        if self.armed_kill.is_some() {
-            self.disarm_kill();
             return true;
         }
         if self.history.is_some() {
@@ -506,14 +501,16 @@ impl App {
             return;
         }
         self.selected = (self.selected + 1).min(len - 1);
-        self.armed_kill = None;
+        // CAR-17 safety invariant — focus drift cancels any pending
+        // kill_confirm so the prompt's PID can never silently retarget.
+        self.kill_confirm = None;
     }
 
     pub fn select_prev(&mut self, _state: &RuntimeState) {
         if self.selected > 0 {
             self.selected -= 1;
         }
-        self.armed_kill = None;
+        self.kill_confirm = None;
     }
 
     /// Resolve the currently selected list to PIDs. Used both by `select_*`
@@ -568,13 +565,18 @@ mod tests {
         }
     }
 
-    fn fake_armed(pid: u32, name: &str, allowlisted: bool) -> ArmedKill {
-        ArmedKill {
+    fn fake_card(pid: u32, name: &str, allowlisted: bool) -> KillConfirmCard {
+        KillConfirmCard::new(
+            name.into(),
             pid,
-            name: name.into(),
+            "LLM".into(),
+            "Running".into(),
+            42,
+            17.0,
+            512,
+            None,
             allowlisted,
-            armed_at: std::time::Instant::now(),
-        }
+        )
     }
 
     #[test]
@@ -607,111 +609,81 @@ mod tests {
     }
 
     #[test]
-    fn arm_then_confirm_kill_clears_arm() {
+    fn open_then_dismiss_kill_confirm_clears_slot() {
         let mut app = App::new();
-        app.arm_kill(fake_armed(42, "ollama", false));
-        assert_eq!(app.armed_kill_pid(), Some(42));
-        app.disarm_kill();
-        assert_eq!(app.armed_kill_pid(), None);
+        app.open_kill_confirm(fake_card(42, "ollama", false));
+        assert_eq!(app.kill_confirm_pid(), Some(42));
+        app.dismiss_kill_confirm();
+        assert_eq!(app.kill_confirm_pid(), None);
     }
 
-    /// Safety invariant: any navigation movement clears a pending arm
-    /// so the user can't accidentally fire on a different PID after
-    /// the selection drifts. This invariant survived the
-    /// focus-mechanism removal in L2b — keep it locked even though
-    /// `select_next` (j) and `select_prev` (K/Up) are the only nav
-    /// paths now, and stays load-bearing if v1.1 ever re-introduces
-    /// multi-panel focus. Don't remove this test as redundant.
+    /// CAR-17 safety invariant: any navigation movement dismisses a
+    /// pending kill_confirm card so the operator can't accidentally
+    /// fire on a different PID after the selection drifts. Inherited
+    /// from the v0.3.x ARMED banner invariant (which itself survived
+    /// the L2b focus-mechanism removal). Don't remove as redundant.
     #[test]
-    fn select_disarms_kill_for_safety() {
+    fn select_dismisses_kill_confirm_for_safety() {
         let s = state_with(vec![
             ann(1, "ollama", AICategory::Inference),
             ann(2, "vllm", AICategory::Inference),
         ]);
         let mut app = App::new();
-        app.arm_kill(fake_armed(42, "ollama", false));
+        app.open_kill_confirm(fake_card(42, "ollama", false));
         app.select_next(&s);
-        assert_eq!(app.armed_kill_pid(), None);
+        assert_eq!(app.kill_confirm_pid(), None);
     }
 
     #[test]
-    fn arm_kill_records_pid_and_name_and_allowlisted() {
+    fn open_kill_confirm_records_pid_and_workload_fields() {
         let mut app = App::new();
-        app.arm_kill(fake_armed(4242, "ollama", false));
-        let armed = app.armed_kill().expect("should be armed");
-        assert_eq!(armed.pid, 4242);
-        assert_eq!(armed.name, "ollama");
-        assert!(!armed.allowlisted);
-        // Just-armed window has 5 integer seconds remaining.
-        assert_eq!(armed.seconds_remaining(), 5);
+        app.open_kill_confirm(fake_card(4242, "ollama", false));
+        let card = app.kill_confirm().expect("card open");
+        assert_eq!(card.pid, 4242);
+        assert_eq!(card.display_name, "ollama");
+        assert!(!card.allowlisted);
     }
 
-    // ── Row 1 — CAR-14 Enter-confirm dispatch surface ────────────
+    // ── CAR-17 — Enter-confirm dispatch surface ──────────────────
 
     #[test]
-    fn take_armed_kill_if_active_returns_none_when_unarmed() {
+    fn take_kill_confirm_returns_none_when_no_card() {
         let mut app = App::new();
-        assert!(app.take_armed_kill_if_active().is_none());
+        assert!(app.take_kill_confirm().is_none());
     }
 
     #[test]
-    fn take_armed_kill_if_active_returns_and_clears_when_fresh() {
-        // Row 1 INV-2: a fresh arm must be takeable on Enter, and
-        // the field must be cleared atomically so the next render
-        // frame drops the banner.
+    fn take_kill_confirm_returns_and_clears_slot() {
+        // Enter on the kill_confirm card must take ownership of the
+        // snapshot AND clear the slot atomically so the next render
+        // frame drops the overlay.
         let mut app = App::new();
-        app.arm_kill(fake_armed(4242, "ollama", false));
-        let taken = app.take_armed_kill_if_active().expect("should be active");
+        app.open_kill_confirm(fake_card(4242, "ollama", false));
+        let taken = app.take_kill_confirm().expect("card was open");
         assert_eq!(taken.pid, 4242);
-        assert_eq!(taken.name, "ollama");
+        assert_eq!(taken.display_name, "ollama");
         assert!(
-            app.armed_kill().is_none(),
+            app.kill_confirm().is_none(),
             "take_* must clear the slot to match Option::take semantics",
         );
     }
 
+    /// CAR-17 PID-pinning invariant: the kill_confirm card carries
+    /// `pid` as a frozen `u32`. Subsequent state reshuffles (workload
+    /// list sort order changes between vitals refreshes) must not
+    /// retarget the card. Confirm-dispatch reads from the card, not
+    /// from `selected_pid(state)`.
     #[test]
-    fn take_armed_kill_if_active_returns_none_when_expired_and_clears() {
-        // Row 1 INV-3: an expired arm must NOT confirm — Enter
-        // should fall through to the detail-card path. The expired
-        // slot is also cleared so the operator doesn't see a stale
-        // banner.
-        let mut app = App::new();
-        app.arm_kill(ArmedKill {
-            pid: 4242,
-            name: "ollama".into(),
-            allowlisted: false,
-            // 6 seconds ago — past the 5-second WINDOW.
-            armed_at: std::time::Instant::now() - std::time::Duration::from_secs(6),
-        });
-        assert!(app.take_armed_kill_if_active().is_none());
-        assert!(
-            app.armed_kill().is_none(),
-            "expired arm must be cleared so the banner doesn't linger",
-        );
-    }
-
-    /// Row 1 INV-1: armed PID must be PINNED for the WINDOW
-    /// regardless of `selected_pid(state)` volatility. The arm
-    /// records `pid` as `u32`; subsequent state reshuffles can't
-    /// change that field. This test sets up a state where
-    /// `selected_pid` returns one PID, arms on that PID, then
-    /// reorders the state so `selected_pid` returns a different
-    /// PID, and verifies the armed slot still carries the original.
-    #[test]
-    fn armed_pid_pinned_across_selected_pid_shifts() {
+    fn kill_confirm_pid_pinned_across_selected_pid_shifts() {
         let s_first = state_with(vec![
             ann(101, "a", AICategory::Inference),
             ann(202, "b", AICategory::Inference),
         ]);
         let mut app = App::new();
-        // selected=0 → first PID in render order.
         let focused_a = app.selected_pid(&s_first).expect("first PID");
-        app.arm_kill(fake_armed(focused_a, "a", false));
+        app.open_kill_confirm(fake_card(focused_a, "a", false));
 
-        // Reshuffle: same selected=0, but a different PID set.
-        // This mimics what happens when status priority resorts the
-        // workloads panel between vitals refreshes.
+        // Reshuffle: same selected=0, different PID set.
         let s_after = state_with(vec![
             ann(303, "c", AICategory::Inference),
             ann(202, "b", AICategory::Inference),
@@ -719,94 +691,57 @@ mod tests {
         let focused_after = app.selected_pid(&s_after).expect("first PID after shift");
         assert_ne!(
             focused_a, focused_after,
-            "test precondition: selected_pid must drift across the state reshuffle"
+            "precondition: selected_pid must drift across the state reshuffle"
         );
 
-        // Armed PID is still the original — vitals tick did not
-        // mutate it.
-        let armed = app.armed_kill().expect("still armed");
+        let card = app.kill_confirm().expect("card still open");
         assert_eq!(
-            armed.pid, focused_a,
-            "armed PID must be pinned at arm time, not recomputed from current selected_pid"
+            card.pid, focused_a,
+            "card PID must be pinned at open time, not recomputed from selected_pid"
         );
 
-        // Confirm-dispatch (take_armed_kill_if_active) reads from
-        // the pinned ArmedKill, not from selected_pid — so even
-        // after the shift, the kill target is the original PID.
-        let taken = app.take_armed_kill_if_active().expect("active");
+        let taken = app.take_kill_confirm().expect("card open");
         assert_eq!(taken.pid, focused_a);
     }
 
-    /// Row 1 INV-6: pressing `k` a second time on a different
-    /// focused PID switches the armed target and refreshes
-    /// `armed_at`. Encoded at the App API level via `arm_kill`
-    /// replacement — every press creates a fresh `ArmedKill`.
     #[test]
-    fn second_arm_switches_pid_and_refreshes_window() {
-        use std::time::Duration;
+    fn esc_dismisses_kill_confirm_when_no_postmortem_present() {
         let mut app = App::new();
-        // First arm — synthetic timestamp 3s in the past.
-        app.arm_kill(ArmedKill {
-            pid: 101,
-            name: "a".into(),
-            allowlisted: false,
-            armed_at: std::time::Instant::now() - Duration::from_secs(3),
-        });
-        let first_remaining = app.armed_kill().unwrap().seconds_remaining();
-        assert!(
-            first_remaining <= 3,
-            "precondition: first arm has used ~3s of the 5s window"
-        );
-
-        // Second `k` on a different focused PID — fresh
-        // ArmedKill, fresh timer.
-        app.arm_kill(fake_armed(202, "b", false));
-        let armed = app.armed_kill().expect("still armed");
-        assert_eq!(armed.pid, 202, "INV-6: second arm switches PID");
-        assert_eq!(
-            armed.seconds_remaining(),
-            5,
-            "INV-6: second arm refreshes armed_at to the new now"
-        );
-    }
-
-    #[test]
-    fn esc_disarms_kill_when_no_postmortem_present() {
-        let mut app = App::new();
-        app.arm_kill(fake_armed(4242, "ollama", false));
+        app.open_kill_confirm(fake_card(4242, "ollama", false));
         let consumed = app.handle_escape();
         assert!(consumed);
-        assert!(app.armed_kill().is_none());
+        assert!(app.kill_confirm().is_none());
     }
 
+    /// CAR-17 — kill_confirm sits at the FRONT of the Esc cascade
+    /// (above postmortem). The destructive prompt must be canceled
+    /// before any other overlay is touched, never the other way
+    /// around.
     #[test]
-    fn esc_dismisses_postmortem_in_priority_over_disarm() {
+    fn esc_dismisses_kill_confirm_before_postmortem() {
         let mut app = App::new();
-        app.arm_kill(fake_armed(4242, "ollama", false));
+        app.open_kill_confirm(fake_card(4242, "ollama", false));
         app.show_postmortem(test_card());
         let consumed = app.handle_escape();
-        // Cascading priority: card cleared first; armed kill survives
-        // this Esc and would need a second Esc to clear.
         assert!(consumed);
-        assert!(app.postmortem().is_none());
         assert!(
-            app.armed_kill().is_some(),
-            "Esc should clear card before disarming",
+            app.kill_confirm().is_none(),
+            "kill_confirm must dismiss first — destructive prompt has top priority"
+        );
+        assert!(
+            app.postmortem().is_some(),
+            "post-mortem card must survive the first Esc when kill_confirm is open"
         );
     }
 
-    /// UI Contract v2 step 4 — when no overlay / armed kill / card is
-    /// present, Esc falls through to quit. Matches the user's intuition
-    /// that Esc means "get me out of whatever I'm in", and gives the
-    /// keyboard a second route to quit alongside `q`. Returns `false`
-    /// (only steps 1–3 return `true`); the quit signal lives in
-    /// `quit_requested`, not in the return value.
+    /// §6 step 5 — when no overlay / kill_confirm / card is present,
+    /// Esc falls through to quit. Returns `false`; the quit signal
+    /// lives in `quit_requested`.
     #[test]
     fn esc_quits_when_nothing_to_dismiss() {
         let mut app = App::new();
-        // No card, no armed kill, no overlay, no help.
         assert!(app.postmortem().is_none());
-        assert!(app.armed_kill().is_none());
+        assert!(app.kill_confirm().is_none());
         assert!(!app.is_history_open());
         assert!(!app.show_help());
 
@@ -814,7 +749,7 @@ mod tests {
         assert!(
             !consumed,
             "fall-through-to-quit must return false to distinguish \
-             from a card/disarm/overlay-close consumption",
+             from a card/dismiss/overlay-close consumption",
         );
         assert!(
             app.should_quit(),
@@ -822,18 +757,20 @@ mod tests {
         );
     }
 
+    /// CAR-17 — the kill_confirm card has NO auto-dismiss timer; it
+    /// stays open until the operator explicitly confirms or cancels.
+    /// `tick_overlays` must not sweep it away.
     #[test]
-    fn tick_overlays_drops_expired_armed_kill() {
+    fn tick_overlays_does_not_drop_open_kill_confirm() {
         let mut app = App::new();
-        app.arm_kill(ArmedKill {
-            pid: 4242,
-            name: "ollama".into(),
-            allowlisted: false,
-            // Arm 6s ago; the 5s window has already lapsed.
-            armed_at: std::time::Instant::now() - std::time::Duration::from_secs(6),
-        });
-        app.tick_overlays();
-        assert!(app.armed_kill().is_none());
+        app.open_kill_confirm(fake_card(4242, "ollama", false));
+        for _ in 0..100 {
+            app.tick_overlays();
+        }
+        assert!(
+            app.kill_confirm().is_some(),
+            "kill_confirm card must persist across ticks — only explicit Enter/Esc dismisses it"
+        );
     }
 
     #[test]

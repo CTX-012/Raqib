@@ -20,7 +20,7 @@
 //! edge_monitor_run_tokens_per_sec{model="phi3-mini",pid="12345"} 37.4
 //! edge_monitor_run_vram_bytes{model="phi3-mini",pid="12345"} 4101296128
 //! edge_monitor_run_gpu_watts{model="phi3-mini",pid="12345"} 142.3
-//! edge_monitor_governor_kills_total{reason="dry_run"} 12
+//! edge_monitor_governor_kills_total{reason="sigterm"} 12
 //! edge_monitor_regressions_total{model="phi3-mini",metric="tokens_per_sec_avg"} 1
 //! edge_monitor_tick_count 4321
 //! ```
@@ -439,7 +439,7 @@ mod tests {
             cpu_watts: Some(35.0),
             gpu_temp_celsius: Some(67.0),
         });
-        snap.kills_by_reason.insert("dry_run".into(), 12);
+        snap.kills_by_reason.insert("sigterm".into(), 12);
         snap.regressions
             .insert(("phi3-mini".into(), "tokens_per_sec_avg".into()), 1);
         snap.cold_load_seconds.insert("phi3-mini".into(), 1.75);
@@ -460,7 +460,7 @@ mod tests {
             "edge_monitor_gpu_temp_celsius{pid=\"12345\"} 67.0000",
             "edge_monitor_ai_processes_active 3",
             "edge_monitor_cold_load_seconds{model=\"phi3-mini\"} 1.7500",
-            "edge_monitor_governor_kills_total{reason=\"dry_run\"} 12",
+            "edge_monitor_governor_kills_total{reason=\"sigterm\"} 12",
             "edge_monitor_regressions_total{model=\"phi3-mini\",metric=\"tokens_per_sec_avg\"} 1",
             "edge_monitor_tick_count_total 4321",
         ] {

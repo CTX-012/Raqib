@@ -2,9 +2,9 @@
 //! correctness matters most. Two invariants we can't afford to break:
 //!
 //!   1. Allowlisted processes are never marked for kill, regardless of
-//!      category, rate-limit state, or enforce flag.
-//!   2. With enforce=true and max_kills=N, no snapshot produces more than
-//!      N SignalTermSent decisions in one evaluate() call.
+//!      category or rate-limit state.
+//!   2. With max_kills=N, no snapshot produces more than N
+//!      SignalTermSent decisions in one evaluate() call.
 
 use std::collections::HashMap;
 
@@ -39,9 +39,8 @@ proptest! {
     fn allowlisted_processes_never_killed(n_procs in 1usize..30, cats in proptest::collection::vec(any::<bool>(), 1..30)) {
         // Random set of processes, all named "sshd" (an allowlisted name in
         // the default policy). Regardless of AI category flipping, none of
-        // them may receive a SignalTermSent or DryRunTermWould action.
-        let mut policy = GovernorPolicy::safe_default();
-        policy.enforce = true;
+        // them may receive a SignalTermSent action.
+        let policy = GovernorPolicy::safe_default();
         let mut executor = GovernorExecutor::new(policy);
 
         let entries: Vec<(u32, &str, Option<AICategory>)> = cats
@@ -60,10 +59,7 @@ proptest! {
             prop_assert!(
                 !matches!(
                     action,
-                    KillAction::SignalTermSent
-                        | KillAction::DryRunTermWould
-                        | KillAction::SignalKillSent
-                        | KillAction::DryRunKillWould
+                    KillAction::SignalTermSent | KillAction::SignalKillSent,
                 ),
                 "allowlisted process must never be killed, got {:?}",
                 action
@@ -77,7 +73,6 @@ proptest! {
         n_candidates in 0usize..20
     ) {
         let mut policy = GovernorPolicy::safe_default();
-        policy.enforce = true;
         policy.rate_limit_max_kills = max;
         policy.rate_limit_window_secs = 60;
         let mut executor = GovernorExecutor::new(policy);

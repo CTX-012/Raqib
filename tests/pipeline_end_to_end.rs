@@ -41,8 +41,7 @@ fn ai_process_with_model_path_is_tracked_and_killed_in_enforce_mode() {
     let snapshot = tracker.update(&[ai, shell]).unwrap();
     assert_eq!(snapshot.active_count(), 2);
 
-    let mut policy = GovernorPolicy::safe_default();
-    policy.enforce = true;
+    let policy = GovernorPolicy::safe_default();
     let mut governor = GovernorExecutor::new(policy);
     let decisions = governor.evaluate(&snapshot);
 

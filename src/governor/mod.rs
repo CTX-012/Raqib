@@ -39,10 +39,6 @@ pub enum KillAction {
     SignalTermSent,
     /// Process did not exit after SIGTERM; SIGKILL sent.
     SignalKillSent,
-    /// Dry-run mode; would send SIGTERM if enabled.
-    DryRunTermWould,
-    /// Dry-run mode; would send SIGKILL if enabled.
-    DryRunKillWould,
     /// The per-window kill budget has been exhausted; no action taken.
     /// Protects against kill-storm misfires (CLAUDE.md safety rule 5).
     RateLimited,

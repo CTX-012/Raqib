@@ -35,7 +35,6 @@ const RENDER_CALL_PATTERNS: &[&str] = &[
 /// from this list as part of the row's diff.
 const DEFERRED_FILES: &[&str] = &[
     "src/ui/panels/mod.rs",          // L25 (header) + L25 (footer keymap)
-    "src/ui/panels/armed_banner.rs", // L7 ack + L24 Esc cascade (CAR-4 resolved in v0.3.2 batch)
     "src/ui/panels/help.rs",         // CAR-1 resolved in v0.3.2 (help::* module)
     "src/ui/panels/history_overlay.rs", // CAR-6: overlay header + column labels not in v0.3
     "src/ui/panels/postmortem.rs",   // L16 split + CAR-2 resolved in v0.3.2 (postmortem_labels::*)
@@ -156,7 +155,7 @@ fn parser_recognises_violations_and_allowlist() {
     assert!(literal_is_allowed("{pid}"));
     assert!(literal_is_allowed("{:.0}"));
     assert!(!literal_is_allowed("hello world"));
-    assert!(!literal_is_allowed("Armed kill on {name} (PID {pid})"));
+    assert!(!literal_is_allowed("Kill this process? (PID {pid})"));
 }
 
 fn walk_rs(dir: &Path, root: &Path, visit: &mut dyn FnMut(&Path, &str)) {

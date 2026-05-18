@@ -58,7 +58,7 @@ pub(crate) enum EventTone {
     /// Healthy / successful operation — clean exit, successful kill.
     Healthy,
     /// Attention-band — non-failure but worth noting (manual kill
-    /// success, sub-critical regression, dry-run signal).
+    /// success, sub-critical regression).
     Attention,
     /// Critical — failed kill, signal-terminated workload, Critical
     /// regression severity.

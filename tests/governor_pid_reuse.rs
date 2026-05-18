@@ -26,7 +26,6 @@ use edge_monitor::model::AICategory;
 
 fn enforcing_executor(grace_secs: u64) -> GovernorExecutor {
     let mut policy = GovernorPolicy::safe_default();
-    policy.enforce = true;
     policy.sigterm_grace_period_secs = grace_secs;
     GovernorExecutor::new(policy)
 }

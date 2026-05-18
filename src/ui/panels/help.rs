@@ -8,10 +8,10 @@ use crate::ui::theme::UiTheme;
 
 /// Modal help overlay. Centered, dimmed background. Toggled with `?`.
 ///
-/// L21 / §14 — overlay title bar uses `theme.accent`; warnings inside
-/// the overlay (manual-kill caveat, dry-run reminder) use
-/// `theme.attention` so they read as advisories but track the active
-/// palette. Body text is plain foreground.
+/// L21 / §14 — overlay title bar uses `theme.accent`; the manual-kill
+/// confirmation advisory uses `theme.attention` so it reads as a
+/// non-numeric caution but tracks the active palette. Body text is
+/// plain foreground.
 pub fn render(f: &mut Frame, area: Rect, theme: &UiTheme) {
     let popup = centered(60, 60, area);
     f.render_widget(Clear, popup);
@@ -29,24 +29,21 @@ pub fn render(f: &mut Frame, area: Rect, theme: &UiTheme) {
     let body = Style::default().fg(theme.foreground);
     let lines = vec![
         Line::styled("Navigation", body),
-        Line::styled("  Tab / Shift-Tab     cycle panel focus", body),
         Line::styled("  j / Down            move cursor down", body),
-        Line::styled("  k / Up              move cursor up", body),
+        Line::styled("  K / Up              move cursor up", body),
         Line::from(""),
         Line::styled("Actions", body),
-        Line::styled("  /                   start filter (Esc cancel · Enter commit)", body),
-        Line::styled("  d                   toggle dry-run / enforce mode", body),
-        Line::styled("  k                   ARM manual kill on selected PID", body),
-        Line::styled("  k (again)           CONFIRM kill on armed PID", body),
+        Line::styled("  k                   open Kill Confirmation card on selected PID", body),
+        Line::styled("  Enter               confirm kill (kill_confirm) · open detail · dismiss", body),
+        Line::styled("  Esc                 cancel kill_confirm · dismiss card · ack alerts · quit", body),
         Line::styled("  h                   show run history for selected model", body),
+        Line::styled("  a                   acknowledge all visible alerts", body),
+        Line::styled("  t                   cycle Top processes sort (RAM → CPU → VRAM)", body),
+        Line::styled("  g                   open Grafana for selected workload", body),
         Line::styled("  q / Ctrl-C          quit", body),
         Line::from(""),
         Line::from(Span::styled(
-            "Manual kill is a two-step: arm then confirm.",
-            Style::default().fg(theme.attention),
-        )),
-        Line::from(Span::styled(
-            "In dry-run, kills are logged only. No signals sent.",
+            "Manual kill is real on confirm. Esc cancels without firing.",
             Style::default().fg(theme.attention),
         )),
         Line::from(""),

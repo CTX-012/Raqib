@@ -23,10 +23,26 @@ use edge_monitor::config::Config;
 use edge_monitor::runtime::{ExitAlertEvent, Runtime, StderrBuffer};
 use edge_monitor::storage::run_store::ExitReason;
 use edge_monitor::ui::app::App;
-use edge_monitor::ui::panels::armed_banner::ArmedKill;
+use edge_monitor::ui::panels::kill_confirm::KillConfirmCard;
 use edge_monitor::ui::panels::postmortem::{
     BaselineStatus, PostMortem, PostMortemCard,
 };
+
+/// Build a fixture `KillConfirmCard` for cascade tests. Fields chosen
+/// to mirror the v0.3.x `ArmedKill` fixtures these tests replaced.
+fn fixture_kill_confirm(pid: u32, name: &str) -> KillConfirmCard {
+    KillConfirmCard::new(
+        name.into(),
+        pid,
+        "LLM".into(),
+        "Running".into(),
+        42,
+        12.0,
+        256,
+        None,
+        false,
+    )
+}
 use ux_contract::AlertId;
 
 /// Fire an instant exit-driven alert (`OomDetected`) so the test sees
@@ -107,24 +123,28 @@ fn show_postmortem_replaces_existing_card_latest_wins() {
 }
 
 #[test]
-fn cascading_escape_clears_card_before_armed_kill() {
+fn cascading_escape_clears_kill_confirm_before_postmortem() {
+    // CAR-17 cascade order: the destructive prompt (kill_confirm card)
+    // sits at the top of the §6 cascade — the first Esc cancels the
+    // kill, and only after that does Esc reach the post-mortem card.
+    // Pre-CAR-17 the order was reversed (post-mortem first, armed kill
+    // second) because the v0.3.x banner had a 5s auto-disarm and
+    // couldn't accidentally swallow a kill on second press. With the
+    // card replacing the banner the priority flips: a sitting
+    // kill_confirm card is the most-destructive overlay and gets
+    // cancelled first.
     let mut app = App::new();
-    app.arm_kill(ArmedKill {
-        pid: 4242,
-        name: "ollama".into(),
-        allowlisted: false,
-        armed_at: std::time::Instant::now(),
-    });
+    app.open_kill_confirm(fixture_kill_confirm(4242, "ollama"));
     app.show_postmortem(fixture_card("phi3-mini"));
 
-    // First Esc dismisses the card; the armed kill survives.
+    // First Esc cancels the kill_confirm; the post-mortem survives.
+    assert!(app.handle_escape());
+    assert!(app.kill_confirm().is_none());
+    assert!(app.postmortem().is_some());
+
+    // Second Esc dismisses the post-mortem.
     assert!(app.handle_escape());
     assert!(app.postmortem().is_none());
-    assert!(app.armed_kill().is_some());
-
-    // Second Esc disarms the kill.
-    assert!(app.handle_escape());
-    assert!(app.armed_kill().is_none());
 }
 
 /// L24 / §6 step 3 > step 4 — when history is open AND alerts are
@@ -188,7 +208,7 @@ fn cascading_escape_acks_alerts_before_quit_when_no_overlay_is_open() {
     let mut app = App::new();
     fire_active_alert(&mut app);
     assert!(app.postmortem().is_none());
-    assert!(app.armed_kill().is_none());
+    assert!(app.kill_confirm().is_none());
     assert!(!app.is_history_open());
     assert!(!app.show_help());
 
@@ -294,40 +314,34 @@ fn freshly_constructed_app_has_no_postmortem() {
     );
 }
 
-// ── Row 1 — CAR-14 Enter-confirm cross-state precedence ──────────
+// ── CAR-17 — Enter-confirm cross-state precedence ──────────
 //
 // These integration tests pin the priority contract from outside the
-// crate: with both an armed kill AND a postmortem card visible,
+// crate: with both a kill_confirm card AND a postmortem card visible,
 // Enter must confirm the kill, NOT dismiss the postmortem. The
-// inverse — Enter with no armed kill but a postmortem — must dismiss
-// the card. Both invariants are exercised at the App / take_armed_*
-// surface because the dispatch routing in `ui::mod.rs::apply_action`
-// is private.
+// inverse — Enter with no kill_confirm but a postmortem — must
+// dismiss the card. Both invariants are exercised at the App /
+// take_kill_confirm surface because the dispatch routing in
+// `ui::mod.rs::apply_action` is private.
 
 #[test]
-fn enter_with_armed_kill_takes_precedence_over_postmortem_dismiss() {
-    // Row 1 INV-2 — when both `armed_kill` and `postmortem` are
-    // present, the dispatcher consumes the armed kill first. The
-    // postmortem card stays put (it's dismissed on its own Enter
-    // press once the arm is cleared).
+fn enter_with_kill_confirm_takes_precedence_over_postmortem_dismiss() {
+    // CAR-17 — when both kill_confirm and postmortem are present, the
+    // dispatcher consumes the kill_confirm first (kill is real; this
+    // is the prompt the operator just chose to fire). The postmortem
+    // card stays put.
     let mut app = App::new();
     app.show_postmortem(fixture_card("phi3-mini"));
-    app.arm_kill(edge_monitor::ui::panels::armed_banner::ArmedKill {
-        pid: 4242,
-        name: "ollama".into(),
-        allowlisted: false,
-        armed_at: std::time::Instant::now(),
-    });
+    app.open_kill_confirm(fixture_kill_confirm(4242, "ollama"));
 
-    // Simulate the post-Row-1 Enter handler: take_armed_* first;
-    // only when it returns None does the dispatch fall to the
-    // postmortem-dismiss path.
-    let taken = app.take_armed_kill_if_active();
-    assert!(taken.is_some(), "armed kill must be taken first on Enter");
+    // Simulate the post-CAR-17 Enter handler: take_kill_confirm
+    // first; only when it returns None does the dispatch fall to
+    // the postmortem-dismiss path.
+    let taken = app.take_kill_confirm();
+    assert!(taken.is_some(), "kill_confirm card must be taken first on Enter");
     assert_eq!(taken.unwrap().pid, 4242);
     // Card untouched — the operator still has it on screen and
-    // can dismiss with a second Enter (which now falls through to
-    // the existing handle_open_detail dismiss-branch).
+    // can dismiss with a second Enter.
     assert!(
         app.postmortem().is_some(),
         "postmortem card must survive an Enter that confirmed a kill"
@@ -335,43 +349,20 @@ fn enter_with_armed_kill_takes_precedence_over_postmortem_dismiss() {
 }
 
 #[test]
-fn enter_with_no_armed_kill_falls_through_to_postmortem_path() {
-    // Row 1 INV-3 — no armed kill (or armed-and-expired) means
-    // Enter routes to handle_open_detail, which is what
-    // dismisses an already-open postmortem.
+fn enter_with_no_kill_confirm_falls_through_to_postmortem_path() {
+    // CAR-17 — no open kill_confirm means Enter routes to
+    // handle_open_detail, which dismisses an already-open postmortem.
     let mut app = App::new();
     app.show_postmortem(fixture_card("phi3-mini"));
-    let taken = app.take_armed_kill_if_active();
+    let taken = app.take_kill_confirm();
     assert!(
         taken.is_none(),
-        "no armed kill → take_* returns None and Enter falls through"
+        "no kill_confirm card → take_* returns None and Enter falls through"
     );
-    // Caller (apply_action::OpenDetail) would call
-    // dismiss_postmortem() on the fall-through; pin that the slot
-    // still has the card so the dispatch has work to do.
+    // Caller (apply_action::OpenDetail) would call dismiss_postmortem
+    // on the fall-through; pin that the slot still has the card so
+    // the dispatch has work to do.
     assert!(app.postmortem().is_some());
-}
-
-#[test]
-fn expired_armed_kill_does_not_fire_on_enter() {
-    // Row 1 INV-3 — armed-but-expired routes the same as unarmed.
-    // The arm is dropped silently rather than firing a stale kill.
-    let mut app = App::new();
-    app.arm_kill(edge_monitor::ui::panels::armed_banner::ArmedKill {
-        pid: 4242,
-        name: "ollama".into(),
-        allowlisted: false,
-        // 6 seconds ago — past the 5-second WINDOW.
-        armed_at: std::time::Instant::now() - std::time::Duration::from_secs(6),
-    });
-    assert!(
-        app.take_armed_kill_if_active().is_none(),
-        "expired arm must not be returned for dispatch"
-    );
-    assert!(
-        app.armed_kill().is_none(),
-        "expired arm must also be cleared so the banner doesn't linger"
-    );
 }
 
 // ----------------------------------------------------------------------------

@@ -182,14 +182,12 @@ impl AuditLog {
 /// Manual kills bypass automated policy thresholds but still respect the allowlist.
 pub struct ManualKiller {
     audit_log: AuditLog,
-    dry_run: bool,
 }
 
 impl ManualKiller {
-    pub fn new(dry_run: bool) -> Self {
+    pub fn new() -> Self {
         Self {
             audit_log: AuditLog::new(),
-            dry_run,
         }
     }
 
@@ -231,7 +229,7 @@ impl ManualKiller {
         )
     }
 
-    /// Send SIGTERM to process (graceful shutdown). Dry-run mode logs only.
+    /// Send SIGTERM to process (graceful shutdown).
     pub fn kill_sigterm(
         &mut self,
         pid: u32,
@@ -239,18 +237,6 @@ impl ManualKiller {
         category: Option<AICategory>,
         reason: String,
     ) -> ManualKillResult<()> {
-        if self.dry_run {
-            tracing::info!("DRY-RUN: SIGTERM would be sent to PID {}: {}", pid, name);
-            self.audit_log.log(AuditLogEntry::success(
-                ManualKillAction::SendSigterm,
-                pid,
-                name,
-                category,
-                format!("{} (dry-run)", reason),
-            ));
-            return Ok(());
-        }
-
         tracing::info!("Sending SIGTERM to PID {}: {}", pid, name);
 
         // SAFETY: libc::kill is always safe to call with a valid signal number.
@@ -278,7 +264,7 @@ impl ManualKiller {
         Ok(())
     }
 
-    /// Send SIGKILL to process (forceful termination). Dry-run mode logs only.
+    /// Send SIGKILL to process (forceful termination).
     pub fn kill_sigkill(
         &mut self,
         pid: u32,
@@ -286,18 +272,6 @@ impl ManualKiller {
         category: Option<AICategory>,
         reason: String,
     ) -> ManualKillResult<()> {
-        if self.dry_run {
-            tracing::info!("DRY-RUN: SIGKILL would be sent to PID {}: {}", pid, name);
-            self.audit_log.log(AuditLogEntry::success(
-                ManualKillAction::SendSigkill,
-                pid,
-                name,
-                category,
-                format!("{} (dry-run)", reason),
-            ));
-            return Ok(());
-        }
-
         tracing::info!("Sending SIGKILL to PID {}: {}", pid, name);
 
         // SAFETY: libc::kill is always safe to call with a valid signal number.
@@ -329,17 +303,14 @@ impl ManualKiller {
         &self.audit_log
     }
 
-    pub fn is_dry_run(&self) -> bool {
-        self.dry_run
-    }
-
-    /// Toggle dry-run mode at runtime (UI keybinding).
-    pub fn set_dry_run(&mut self, dry_run: bool) {
-        self.dry_run = dry_run;
-    }
-
     pub fn audit_report(&self) -> String {
         self.audit_log.to_report()
+    }
+}
+
+impl Default for ManualKiller {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -367,8 +338,7 @@ mod tests {
 
     #[test]
     fn manual_killer_new() {
-        let killer = ManualKiller::new(true);
-        assert!(killer.is_dry_run());
+        let killer = ManualKiller::new();
         assert_eq!(killer.audit_log().entries().len(), 0);
     }
 
@@ -414,65 +384,22 @@ mod tests {
         assert!(ManualKiller::find_by_index(0, &snapshot).is_err());
     }
 
-    #[test]
-    fn dry_run_sigterm_logs_not_kills() {
-        let mut killer = ManualKiller::new(true);
-        killer
-            .kill_sigterm(
-                100,
-                "proc".to_string(),
-                Some(AICategory::Inference),
-                "test".to_string(),
-            )
-            .unwrap();
-        assert_eq!(killer.audit_log().entries().len(), 1);
-        assert_eq!(killer.audit_log().successful_kills(), 1);
-    }
-
-    #[test]
-    fn dry_run_sigkill_logs_not_kills() {
-        let mut killer = ManualKiller::new(true);
-        killer
-            .kill_sigkill(100, "proc".to_string(), None, "test".to_string())
-            .unwrap();
-        assert_eq!(killer.audit_log().entries().len(), 1);
-    }
-
-    #[test]
-    fn audit_tracks_multiple_entries() {
-        let mut killer = ManualKiller::new(true);
-        killer
-            .kill_sigterm(
-                100,
-                "p1".to_string(),
-                Some(AICategory::Inference),
-                "r1".to_string(),
-            )
-            .ok();
-        killer
-            .kill_sigkill(
-                101,
-                "p2".to_string(),
-                Some(AICategory::Training),
-                "r2".to_string(),
-            )
-            .ok();
-        assert_eq!(killer.audit_log().entries().len(), 2);
-        assert_eq!(killer.audit_log().successful_kills(), 2);
-    }
-
+    /// Audit-log surface test. Constructs entries directly through the
+    /// `AuditLogEntry::success` constructor (the path `kill_sigterm`
+    /// takes when the kernel signal returns 0) so the assertion doesn't
+    /// depend on whether PID 100 happens to be alive on the test host —
+    /// post-CAR-17 there is no dry-run mode to stub the signal out.
     #[test]
     fn audit_report_contains_expected_fields() {
-        let mut killer = ManualKiller::new(true);
-        killer
-            .kill_sigterm(
-                100,
-                "proc".to_string(),
-                Some(AICategory::Inference),
-                "manual".to_string(),
-            )
-            .ok();
-        let report = killer.audit_report();
+        let mut log = AuditLog::new();
+        log.log(AuditLogEntry::success(
+            ManualKillAction::SendSigterm,
+            100,
+            "proc".to_string(),
+            Some(AICategory::Inference),
+            "manual".to_string(),
+        ));
+        let report = log.to_report();
         assert!(report.contains("AUDIT LOG"));
         assert!(report.contains("SIGTERM"));
         assert!(report.contains("manual"));
@@ -480,10 +407,13 @@ mod tests {
 
     #[test]
     fn audit_entry_source_is_manual() {
-        let mut killer = ManualKiller::new(true);
-        killer
-            .kill_sigterm(100, "proc".to_string(), None, "r".to_string())
-            .ok();
-        assert_eq!(killer.audit_log().entries()[0].source, KillSource::Manual);
+        let entry = AuditLogEntry::success(
+            ManualKillAction::SendSigterm,
+            100,
+            "proc".to_string(),
+            None,
+            "r".to_string(),
+        );
+        assert_eq!(entry.source, KillSource::Manual);
     }
 }

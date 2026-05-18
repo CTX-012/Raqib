@@ -36,10 +36,6 @@ struct Cli {
     #[arg(long, value_name = "PATH")]
     config: Option<PathBuf>,
 
-    /// Force dry-run regardless of config (overrides policy.enforce).
-    #[arg(long)]
-    dry_run: bool,
-
     /// Run without TUI; tick once per interval and log to stderr.
     #[arg(long)]
     no_ui: bool,
@@ -130,7 +126,7 @@ fn main() -> anyhow::Result<()> {
     let log_to_file = !cli.no_ui && cli.command.is_none() && !cli.log_stderr;
     init_tracing(&cli.log_level, &cli.log_format, log_to_file)?;
 
-    let config = load_config(cli.config.as_deref(), cli.dry_run)?;
+    let config = load_config(cli.config.as_deref())?;
     config.validate().context("config validation failed")?;
 
     // Subcommand path: query-only, no signal handler / runtime needed.
@@ -154,14 +150,11 @@ fn main() -> anyhow::Result<()> {
         };
     }
 
-    if config.policy.enforce {
-        tracing::warn!(
-            "ENFORCE mode active — automated policy will send real signals. \
-             Allowlist + rate limit + grace period still apply."
-        );
-    } else {
-        tracing::info!("DRY-RUN mode — no signals will be sent.");
-    }
+    tracing::warn!(
+        "Governor will send real signals. Allowlist + rate limit + \
+         grace period still apply. Manual kills require kill_confirm \
+         card confirmation per UX_CONTRACT §6 (CAR-17)."
+    );
 
     let shutdown = install_shutdown_handler()?;
 
@@ -425,8 +418,8 @@ fn init_tracing(level: &str, format: &str, log_to_file: bool) -> anyhow::Result<
     Ok(())
 }
 
-fn load_config(path: Option<&std::path::Path>, force_dry_run: bool) -> anyhow::Result<Config> {
-    let mut cfg = match path {
+fn load_config(path: Option<&std::path::Path>) -> anyhow::Result<Config> {
+    let cfg = match path {
         Some(p) => {
             tracing::info!(path = %p.display(), "loading config");
             Config::from_file(p).with_context(|| format!("loading {}", p.display()))?
@@ -438,28 +431,17 @@ fn load_config(path: Option<&std::path::Path>, force_dry_run: bool) -> anyhow::R
                 tracing::info!(path = %default_path.display(), "loading config");
                 Config::from_file(&default_path)?
             } else {
-                // DESIGN_HANDOFF Principle 6 — first-time launch
-                // with no config used to print "no config file; using
-                // built-in defaults" which technically informed and
-                // practically taught nothing. The new line names
-                // exactly what defaults are in play, where the
-                // example config lives, and how to learn more — at
-                // the cost of one extra line on every default-config
-                // run, which is the right trade for first-run UX.
                 tracing::info!(
                     "Running with built-in defaults (no edge_monitor.toml \
-                     found). Governor is in dry-run mode, run history \
-                     persists at ~/.local/share/edge_monitor. \
-                     See edge_monitor.toml.example for tunables, or \
-                     run with --config <path> to load one."
+                     found). Run history persists at \
+                     ~/.local/share/edge_monitor. See \
+                     edge_monitor.toml.example for tunables, or run with \
+                     --config <path> to load one."
                 );
                 Config::default()
             }
         }
     };
-    if force_dry_run {
-        cfg.force_dry_run();
-    }
     Ok(cfg)
 }
 

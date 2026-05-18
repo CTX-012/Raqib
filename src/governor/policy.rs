@@ -22,8 +22,6 @@ pub struct GovernorPolicy {
     pub default_ai_action: PolicyAction,
     /// Grace period (seconds) between SIGTERM and SIGKILL.
     pub sigterm_grace_period_secs: u64,
-    /// Whether to actually send signals (false = dry-run).
-    pub enforce: bool,
     /// Maximum number of automated kills the governor may issue in any
     /// `rate_limit_window_secs` span. Safety rule 5 in CLAUDE.md; guards
     /// against runaway kill storms when a policy misfires.
@@ -33,7 +31,7 @@ pub struct GovernorPolicy {
 }
 
 impl GovernorPolicy {
-    /// Create a safe default policy (dry-run, whitelist-first).
+    /// Create a safe default policy (whitelist-first).
     pub fn safe_default() -> Self {
         Self {
             whitelist_names: HashSet::from([
@@ -49,7 +47,6 @@ impl GovernorPolicy {
             blacklist_names: HashSet::new(),
             default_ai_action: PolicyAction::Kill,
             sigterm_grace_period_secs: 5,
-            enforce: false, // Dry-run by default
             // CLAUDE.md safety rule 5: max 3 automated kills per 60s window.
             rate_limit_max_kills: 3,
             rate_limit_window_secs: 60,
@@ -83,16 +80,6 @@ impl GovernorPolicy {
         }
     }
 
-    /// Enable real enforcement (send actual signals).
-    pub fn enable_enforcement(&mut self) {
-        self.enforce = true;
-    }
-
-    /// Stay in dry-run mode (log actions but don't send signals).
-    pub fn stay_dry_run(&mut self) {
-        self.enforce = false;
-    }
-
     /// Add process name to whitelist.
     pub fn whitelist(&mut self, name: impl Into<String>) {
         self.whitelist_names.insert(name.into());
@@ -111,7 +98,6 @@ mod tests {
     #[test]
     fn policy_safe_default() {
         let policy = GovernorPolicy::safe_default();
-        assert!(!policy.enforce);
         assert!(policy.whitelist_names.contains("bash"));
         assert!(policy.whitelist_names.contains("sshd"));
         assert_eq!(policy.default_ai_action, PolicyAction::Kill);
@@ -145,14 +131,6 @@ mod tests {
         let policy = GovernorPolicy::safe_default();
         let action = policy.evaluate("random_process", None);
         assert_eq!(action, PolicyAction::Allow);
-    }
-
-    #[test]
-    fn policy_enable_enforcement() {
-        let mut policy = GovernorPolicy::safe_default();
-        assert!(!policy.enforce);
-        policy.enable_enforcement();
-        assert!(policy.enforce);
     }
 
     #[test]

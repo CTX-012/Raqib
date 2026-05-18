@@ -96,7 +96,6 @@ pub struct RuntimeState {
     /// `App::observe_exit`. Cleared between drains so unbounded
     /// growth is impossible if the UI loop keeps up.
     pub pending_exit_alerts: Vec<ExitAlertEvent>,
-    pub dry_run: bool,
     pub tick_count: u64,
     pub last_tick: Option<Instant>,
 }
@@ -330,13 +329,9 @@ pub struct Runtime {
 impl Runtime {
     pub fn new(config: Config) -> Self {
         let policy = config.build_policy();
-        let dry_run = !policy.enforce;
         let governor = GovernorExecutor::new(policy);
-        let manual_killer = ManualKiller::new(dry_run);
-        let state = RuntimeState {
-            dry_run,
-            ..Default::default()
-        };
+        let manual_killer = ManualKiller::new();
+        let state = RuntimeState::default();
         let audit_writer = config.runtime.audit_log().and_then(|p| {
             AuditWriter::open(&p)
                 .inspect_err(|e| tracing::error!(error = %e, "failed to open audit log; continuing without persistence"))
@@ -403,10 +398,6 @@ impl Runtime {
         &self.state
     }
 
-    pub fn dry_run(&self) -> bool {
-        self.state.dry_run
-    }
-
     /// L8 — drain queued exit-driven alert events accumulated by
     /// the lifecycle exit hook since the last call. The UI loop
     /// dispatches each event to `App::observe_exit` and discards
@@ -427,12 +418,10 @@ impl Runtime {
         }
     }
 
-    /// Toggle the `enforce` bit in the live policy. The next tick will use
-    /// the new mode. Manual kills follow the same flag.
     /// Is the named process on the governor's allowlist? Surface for
-    /// the TUI's armed-kill banner so it can show the override-variant
-    /// copy without re-deriving allowlist state from the policy. Pure
-    /// read; doesn't touch governor state.
+    /// the TUI's kill_confirm card so it can route an explicit allowlist
+    /// override without re-deriving allowlist state from the policy.
+    /// Pure read; doesn't touch governor state.
     pub fn is_allowlisted(&self, name: &str) -> bool {
         crate::governor::manual::ManualKiller::is_allowlisted(name, &self.governor)
     }
@@ -476,14 +465,6 @@ impl Runtime {
             stderr_tail,
         );
         Some((post_mortem, exited_pid))
-    }
-
-    pub fn toggle_dry_run(&mut self) {
-        let policy = self.governor.policy_mut();
-        policy.enforce = !policy.enforce;
-        self.state.dry_run = !policy.enforce;
-        self.manual_killer.set_dry_run(self.state.dry_run);
-        tracing::info!(dry_run = self.state.dry_run, "dry-run mode toggled");
     }
 
     /// Run one full tick: sample → classify → lifecycle → governor.
@@ -742,7 +723,6 @@ impl Runtime {
             let key = match action {
                 KillAction::SignalTermSent => "sigterm".to_string(),
                 KillAction::SignalKillSent => "sigkill".to_string(),
-                KillAction::DryRunTermWould | KillAction::DryRunKillWould => "dry_run".to_string(),
                 KillAction::Whitelisted => "whitelisted".to_string(),
                 KillAction::AlreadyExited => "already_exited".to_string(),
                 KillAction::RateLimited => "rate_limited".to_string(),
@@ -897,12 +877,8 @@ impl Runtime {
     pub fn record_governor_audit(&mut self) {
         for (pid, action, reason) in &self.state.decisions {
             let kill_action = match action {
-                KillAction::SignalTermSent | KillAction::DryRunTermWould => {
-                    Some(ManualKillAction::SendSigterm)
-                }
-                KillAction::SignalKillSent | KillAction::DryRunKillWould => {
-                    Some(ManualKillAction::SendSigkill)
-                }
+                KillAction::SignalTermSent => Some(ManualKillAction::SendSigterm),
+                KillAction::SignalKillSent => Some(ManualKillAction::SendSigkill),
                 _ => None,
             };
             let Some(kill_action) = kill_action else {
@@ -910,10 +886,9 @@ impl Runtime {
             };
 
             // Tier 3.5 — remember governor-driven kills so the exit
-            // classifier can attribute them. Both real and dry-run
-            // signals get tracked: in dry-run the process exits on
-            // its own and we still want correct attribution if it
-            // happens to die during the same window.
+            // classifier can attribute them. Post-CAR-17 the governor
+            // only fires real signals; there is no longer a dry-run
+            // false-exit path to compensate for.
             self.governor_killed_pids.insert(*pid, reason.clone());
 
             let name = self
@@ -1316,29 +1291,6 @@ fn parse_used_gpu_memory_debug(s: &str) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn runtime_starts_in_configured_dry_run() {
-        let cfg = Config::default();
-        let rt = Runtime::new(cfg);
-        assert!(
-            rt.dry_run(),
-            "default config must initialize runtime in dry-run"
-        );
-    }
-
-    #[test]
-    fn toggle_dry_run_flips_state_and_manual_killer() {
-        let cfg = Config::default();
-        let mut rt = Runtime::new(cfg);
-        assert!(rt.dry_run());
-        rt.toggle_dry_run();
-        assert!(!rt.dry_run());
-        assert!(!rt.manual_killer.is_dry_run());
-        rt.toggle_dry_run();
-        assert!(rt.dry_run());
-        assert!(rt.manual_killer.is_dry_run());
-    }
 
     #[test]
     fn tick_populates_state() {

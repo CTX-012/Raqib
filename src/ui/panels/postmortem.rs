@@ -228,7 +228,9 @@ const STDERR_LINES_VISIBLE: usize = 3;
 
 /// Render the centered post-mortem card. Called last in the panels
 /// render path so the card sits above every other panel (history /
-/// help / armed banner).
+/// help). CAR-17 — the kill_confirm card sits at the same z-slot
+/// with higher priority; dispatch ensures the two are never both
+/// rendered.
 ///
 /// L21 / §14 — title bar uses `theme.accent`; baseline headline
 /// resolves through the semantic palette

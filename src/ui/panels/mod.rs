@@ -4,10 +4,10 @@
 
 mod activity;
 pub mod alerts;
-pub mod armed_banner;
 pub mod header;
 mod help;
 mod history_overlay;
+pub mod kill_confirm;
 pub mod live_detail;
 pub mod postmortem;
 mod top_processes;
@@ -57,27 +57,16 @@ pub fn render(
         return;
     }
 
-    // [UX-1] — reserve the top row for the armed-kill banner ONLY when
-    // a kill is armed. Allocating an empty row otherwise would leave
-    // a stale red strip on screen between arms.
-    let banner_height = if app.armed_kill().is_some() { 1 } else { 0 };
-    // L6 / §1 region 1 — alert region sits between the armed-kill
-    // banner and the System panel. Height shrinks to 0 when no
-    // alerts are active so the workload area takes the full body.
+    // CAR-17 — the kill_confirm card replaces the top-of-screen ARMED
+    // banner pattern. The card renders as a centered overlay below
+    // (alongside live_detail / post_mortem), not as a row at the top
+    // of the frame, so the layout no longer reserves a banner row.
     let alerts_height = alerts::region_height(app);
     let split = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(banner_height),
-            Constraint::Length(alerts_height),
-            Constraint::Min(0),
-        ])
+        .constraints([Constraint::Length(alerts_height), Constraint::Min(0)])
         .split(full);
-    let (banner_area, alerts_area, body_area) = (split[0], split[1], split[2]);
-
-    if let Some(armed) = app.armed_kill() {
-        armed_banner::render(f, banner_area, armed, state.dry_run, theme);
-    }
+    let (alerts_area, body_area) = (split[0], split[1]);
 
     if alerts_height > 0 {
         alerts::render(f, alerts_area, app, state, theme);
@@ -98,14 +87,19 @@ pub fn render(
     // being open simultaneously.
     history_overlay::render(f, body_area, app, theme);
 
-    // L16 / §5 — detail card renders LAST so it floats above every
-    // other panel. The two card kinds are mutually exclusive at the
-    // dispatch level (`handle_open_detail` in `ui::mod.rs` picks one
-    // based on whether the focused workload is running or exited);
-    // when both happen to be set the live card wins because it was
-    // necessarily opened after any pre-existing post-mortem — same
-    // "latest wins" rule that governs same-kind card replacement.
-    if let Some(card) = live_detail {
+    // CAR-17 / §5 — detail-card layer floats above every other panel.
+    // Three cards, one z-slot. Priority (highest first):
+    //   1. kill_confirm — the destructive prompt sits above everything
+    //      else; an Enter on the focused row must reach the confirm
+    //      handler, not a stale live-detail dismiss.
+    //   2. live_detail — the running-workload card.
+    //   3. post_mortem — the retrospective card.
+    // The dispatcher in `ui::mod.rs` enforces the same priority so
+    // the input layer and the render layer agree on which card is
+    // "in focus."
+    if let Some(card) = app.kill_confirm() {
+        kill_confirm::render(f, full, card, theme);
+    } else if let Some(card) = live_detail {
         live_detail::render(f, full, card, theme, live_buffers);
     } else if let Some(card) = app.postmortem() {
         postmortem::render(f, full, card, theme);
@@ -296,7 +290,7 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App, theme: &UiTheme) {
     let groups: [(&str, &str); 5] = [
         ("q", "quit"),
         ("j/k", "select"),
-        ("k", "kill (×2)"),
+        ("k", "kill (confirm)"),
         ("h", "history"),
         ("?", "help"),
     ];

@@ -29,7 +29,7 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 
 use crate::runtime::Runtime;
-use crate::ui::panels::armed_banner::ArmedKill;
+use crate::ui::panels::kill_confirm::KillConfirmCard;
 use crate::ui::panels::live_detail::{LiveDetail, LiveDetailBuffers, LiveDetailCard};
 use crate::ui::theme::UiTheme;
 
@@ -140,7 +140,7 @@ fn run_loop(
             runtime.record_governor_audit();
             // L6 / §4 — observe alert breach conditions for this
             // tick. AlertState lives on `App`; the metric inputs
-            // come from `runtime.state()` plus `app.armed_kill_pid`.
+            // come from `runtime.state()` plus `app.kill_confirm_pid`.
             let now = Instant::now();
             app.observe_alerts(now, runtime.state());
             // L8 / §4 — drain exit-driven alerts queued by the
@@ -163,11 +163,11 @@ fn run_loop(
         }
 
         if last_render.elapsed() >= render {
-            // Drop expired armed-kill / post-mortem snapshots before
-            // drawing so the banner doesn't render with `0s` remaining
-            // for one extra frame. The live-detail card's 30s window
-            // gets the same treatment here so both detail-card kinds
-            // share dismissal timing.
+            // Drop expired post-mortem snapshots / status footers
+            // before drawing. The kill_confirm card has no auto-
+            // dismiss (CAR-17) and is not swept here. The live-detail
+            // card's 30s window is handled below at this same render
+            // boundary.
             app.tick_overlays();
             if let Some(card) = &live_detail
                 && card.is_expired()
@@ -216,36 +216,22 @@ fn apply_action(
         Action::SelectUp => app.select_prev(runtime.state()),
         Action::SelectDown => app.select_next(runtime.state()),
         Action::KillOrConfirm => {
-            // CAR-14 / Row 1 — `k` is arm-only. Confirm fires on
-            // Enter (see Action::OpenDetail below). Pre-CAR-14 the
-            // second `k` press fired the kill; the contract changed
-            // after smoke testing surfaced "did I press k once or
-            // twice?" ambiguity.
+            // CAR-17 — `k` opens the kill_confirm card on the focused
+            // workload. Confirm fires on Enter (Action::OpenDetail
+            // below). The card replaces the v0.3.x ARMED banner: kill
+            // is always real, the card IS the safety surface.
             //
-            // INV-6 — pressing `k` while a kill is already armed:
-            //   * Same focused PID → refresh armed_at (extends the
-            //     5s window from now).
-            //   * Different focused PID → switch armed to the new
-            //     PID with armed_at = Instant::now() (treats the
-            //     second press as an explicit retarget).
-            // Both cases are covered uniformly by ARMING fresh on
-            // every `k` press: the new ArmedKill replaces the
-            // prior one, and its `armed_at` is the new now.
+            // Pressing `k` again while a card is already open replaces
+            // the card with a fresh snapshot — covers both the
+            // same-PID refresh case and the retarget case uniformly.
             //
-            // No-focus case: leave any prior armed_kill in place
-            // and do nothing — operator can still press Enter to
-            // confirm if a focus blip is transient.
-            if let Some(pid) = app.selected_pid(runtime.state()) {
-                let state = runtime.state();
-                let proc = state.annotated.iter().find(|p| p.pid == pid);
-                let name = proc.map(|p| p.name.clone()).unwrap_or_default();
-                let allowlisted = runtime.config().policy.allowlist.contains(&name);
-                app.arm_kill(ArmedKill {
-                    pid,
-                    name,
-                    allowlisted,
-                    armed_at: Instant::now(),
-                });
+            // No-focus case: leave any open card alone and do nothing
+            // — operator can still press Enter to confirm if a focus
+            // blip is transient.
+            if let Some(pid) = app.selected_pid(runtime.state())
+                && let Some(card) = build_kill_confirm_card(runtime, app, pid)
+            {
+                app.open_kill_confirm(card);
             }
         }
         Action::ToggleHistory => {
@@ -275,36 +261,37 @@ fn apply_action(
         }
         Action::OpenGrafana => handle_open_dashboard(runtime, app),
         Action::OpenDetail => {
-            // CAR-14 / Row 1 INV-2 — armed kill takes priority over
-            // the detail-card open path. Dispatching on `armed.pid`
-            // (PINNED at arm time, snapshotted into the `ArmedKill`
-            // struct) is what protects INV-1: the dispatched PID is
-            // whatever the user armed, NOT whatever
-            // `selected_pid(state)` returns now (which is volatile
-            // across vitals refreshes because the workloads panel
-            // sorts by status priority, and a workload transitioning
-            // Healthy → Attention shifts row order).
+            // CAR-17 Enter-priority cascade. The kill_confirm card has
+            // the highest priority — its PID was pinned at card-open
+            // time, so an Enter while the card is up dispatches the
+            // kill on the pinned PID regardless of whether
+            // `selected_pid(state)` has drifted since (workload panel
+            // sort order is volatile across vitals refreshes).
             //
-            // INV-3 + INV-4 — when no kill is armed (or armed-and-
-            // expired), Enter falls through to the pre-CAR-14
-            // `handle_open_detail` path: open live-detail if focused
-            // PID is running, open post-mortem if exited+history
-            // exists, otherwise no-op (logged).
-            if let Some(armed) = app.take_armed_kill_if_active() {
-                confirm_armed_kill(runtime, app, armed);
+            //   1. kill_confirm open → Enter = confirm kill
+            //   2. live_detail open  → Enter = dismiss
+            //   3. post_mortem open  → Enter = dismiss
+            //   4. focused running   → Enter = open live_detail
+            //   5. fallback          → Enter = open post_mortem
+            //
+            // Steps 2/3 land in `handle_open_detail`, which detects
+            // an already-open card and treats Enter as dismiss.
+            // Steps 4/5 also land in the same handler.
+            if let Some(card) = app.take_kill_confirm() {
+                confirm_kill_from_card(runtime, app, card);
             } else {
                 handle_open_detail(runtime, app, live_detail, live_buffers);
             }
         }
         Action::EscapeCascade => {
             // L16 — live-detail card sits at the front of the dismiss
-            // queue; only when nothing live is up do we delegate to
-            // `App::handle_escape` (which owns the post-mortem /
-            // armed-kill / history / help / quit cascade). Keeping the
-            // live branch local avoids reaching into app.rs for L16,
-            // which is L24's edit territory. L17 — drop the sparkline
-            // buffers alongside the card so a re-open with a different
-            // PID doesn't reuse the previous workload's samples.
+            // queue (after kill_confirm); only when nothing live is up
+            // do we delegate to `App::handle_escape` (which owns the
+            // kill_confirm / post-mortem / history / help / quit
+            // cascade — see `App::handle_escape` for the order).
+            // L17 — drop the sparkline buffers alongside the card so
+            // a re-open with a different PID doesn't reuse the
+            // previous workload's samples.
             if live_detail.is_some() {
                 *live_detail = None;
                 *live_buffers = None;
@@ -334,32 +321,69 @@ fn apply_action(
     }
 }
 
-/// CAR-14 / Row 1 — Enter-confirm dispatch for the armed kill.
+/// CAR-17 — Enter-confirm dispatch for the kill_confirm card.
 ///
-/// Receives the armed record by value (already taken out of `App`
-/// by `take_armed_kill_if_active`) so the field is guaranteed
-/// cleared by the time this function runs — no second mutable
-/// borrow of `app` for `disarm_kill` is needed. Calls
-/// `runtime.manual_kill(armed.pid, …)` on the PINNED PID
-/// (INV-1 / INV-2): even if `selected_pid(state)` has drifted to
-/// a different workload between arm and confirm, the kill fires
-/// on whatever the operator armed.
+/// Receives the card by value (already taken out of `App` by
+/// `take_kill_confirm`) so the slot is guaranteed cleared by the
+/// time this function runs. Calls `runtime.manual_kill(card.pid, …)`
+/// on the PINNED PID: even if `selected_pid(state)` has drifted to
+/// a different workload between card-open and confirm, the kill
+/// fires on the operator-chosen target.
 ///
-/// Dry-run mode surfaces the same status-footer hint the pre-
-/// CAR-14 FIRE branch used so the operator gets explicit
-/// feedback that the press was received and the signal was
-/// suppressed by policy, not lost.
-fn confirm_armed_kill(runtime: &mut Runtime, app: &mut App, armed: ArmedKill) {
-    let was_dry_run = runtime.dry_run();
-    let reason = "manual kill via TUI (Enter confirm)".to_string();
-    if let Err(e) = runtime.manual_kill(armed.pid, reason) {
-        tracing::warn!(pid = armed.pid, error = %e, "manual kill failed");
-    } else if was_dry_run {
-        app.set_status(format!(
-            "DRY-RUN: would have sent SIGTERM to PID {} ({}) — press d to enforce",
-            armed.pid, armed.name,
-        ));
+/// Kill is always real post-CAR-17 — no dry-run mode means no
+/// "would have sent" status footer; the manual_kill call either
+/// succeeds (audit entry tells the rest of the story) or logs an
+/// error.
+fn confirm_kill_from_card(runtime: &mut Runtime, _app: &mut App, card: KillConfirmCard) {
+    let reason = "manual kill via TUI (kill_confirm Enter)".to_string();
+    if let Err(e) = runtime.manual_kill(card.pid, reason) {
+        tracing::warn!(pid = card.pid, error = %e, "manual kill failed");
     }
+}
+
+/// CAR-17 — build a `KillConfirmCard` snapshot for the focused PID.
+/// Returns `None` when the PID isn't currently in `state.annotated`
+/// (focus blip between key press and snapshot read) — the dispatch
+/// site treats that as "leave any existing card alone."
+///
+/// Snapshots all renderable fields at open time so the card is pure
+/// data the renderer can paint without re-walking the runtime state
+/// every frame. Same approach as `LiveDetail::from_focused`.
+fn build_kill_confirm_card(
+    runtime: &Runtime,
+    app: &App,
+    pid: u32,
+) -> Option<KillConfirmCard> {
+    use crate::ui::panels::workloads;
+
+    let state = runtime.state();
+    let proc = state.annotated.iter().find(|p| p.pid == pid)?;
+
+    let display_name = proc
+        .model_name
+        .clone()
+        .unwrap_or_else(|| proc.name.clone());
+    let category = format!("{:?}", proc.workload_category);
+    let status = format!("{:?}", workloads::status_for(proc, state, app));
+    let runtime_secs = proc.first_observed_at.elapsed().as_secs();
+    let rss_mb = proc.rss_mb;
+    let vram_mb = proc
+        .vram_bytes
+        .map(|b| b / (1024 * 1024))
+        .filter(|&v| v > 0);
+    let allowlisted = runtime.is_allowlisted(&proc.name);
+
+    Some(KillConfirmCard::new(
+        display_name,
+        proc.pid,
+        category,
+        status,
+        runtime_secs,
+        proc.cpu_pct,
+        rss_mb,
+        vram_mb,
+        allowlisted,
+    ))
 }
 
 /// Row 1 INV-5 — `true` when a `KeyEventKind` should drive

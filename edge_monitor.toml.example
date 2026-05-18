@@ -1,8 +1,10 @@
 # edge_monitor configuration
 #
-# Defaults bias toward safety: dry-run is on, the allowlist covers shells
-# and init, the SIGTERM grace period is 5s. Uncomment and edit only the
-# fields you want to override.
+# Defaults bias toward safety: the allowlist covers shells and init, the
+# SIGTERM grace period is 5s, and the rate limiter caps automated kills.
+# Manual kills require explicit kill_confirm card confirmation in the
+# TUI (UX_CONTRACT §6 / CAR-17). Uncomment and edit only the fields you
+# want to override.
 
 [runtime]
 # How often to sample /proc, classify, and let the governor decide.
@@ -31,16 +33,12 @@ allowlist = [
 blocklist = []
 
 # Default action for AI-classified processes that match neither list.
-# "Allow" or "Kill". Kill is recommended; the dry-run flag below is the
-# real safety knob.
+# "Allow" or "Kill". Kill is recommended; the rate limiter + allowlist
+# are the safety knobs that keep an automated misfire from cascading.
 default_ai_action = "Kill"
 
 # Seconds between SIGTERM and SIGKILL for any single process. Minimum 1s.
 sigterm_grace_secs = 5
-
-# false = dry-run (log only). true = actually send signals. Override at the
-# command line with --dry-run for an extra safety belt.
-enforce = false
 
 [storage]
 # Directory holding per-day RunRecord JSONL plus a tiny index file.

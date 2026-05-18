@@ -44,6 +44,7 @@ use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
 
 use ux_contract::postmortem_labels;
 
+use crate::model::{WorkloadCategory, workload_category_from_model_path};
 use crate::storage::RunRecord;
 use crate::storage::run_store::ExitReason;
 use crate::ui::theme::UiTheme;
@@ -67,6 +68,13 @@ pub struct PostMortem {
     pub peak_vram_mb: u64,
     /// `None` means "omit the row entirely" per UI Contract v2.
     pub tokens_per_sec: Option<f32>,
+    /// B6 — workload taxonomy used to gate category-specific metric
+    /// rows (Throughput is LLM-only; FPS would be Vision-only, etc.).
+    /// `None` means "no taxonomy resolved" and category-gated rows
+    /// stay hidden — safer default than rendering an LLM metric over
+    /// a YOLO/ROS2 workload. Derived from `summary.model_name` via
+    /// [`workload_category_from_model_path`] in `from_run_record_*`.
+    pub workload_category: Option<WorkloadCategory>,
     pub exit_reason: ExitReason,
     /// Last lines of stderr captured by the runtime / exec wrapper.
     /// Empty for headless-monitored exits (the runtime can't read
@@ -112,6 +120,14 @@ impl PostMortem {
             .model_name
             .clone()
             .unwrap_or_else(|| summary.name.clone());
+        // B6 — taxonomy lookup uses the model name (path-style) so
+        // `phi3-mini.gguf` resolves to LLM, `yolov8n.pt` to Vision,
+        // etc. When the classifier never extracted a model name we
+        // stay `None` and the LLM-only Throughput row is suppressed.
+        let workload_category = summary
+            .model_name
+            .as_deref()
+            .map(|m| workload_category_from_model_path(std::path::Path::new(m)));
         Self {
             display_name,
             duration_secs: summary.uptime_secs.max(0) as u64,
@@ -119,6 +135,7 @@ impl PostMortem {
             peak_rss_mb: summary.peak_rss_mb,
             peak_vram_mb: summary.peak_vram_mb,
             tokens_per_sec: record.metrics.tokens_per_sec_avg,
+            workload_category,
             exit_reason: record.exit_reason.clone(),
             stderr_tail,
             baseline_status,
@@ -301,8 +318,14 @@ fn build_lines_with(card: &PostMortemCard, theme: Option<&UiTheme>) -> Vec<Line<
             &format_megabytes(pm.peak_vram_mb),
         ));
     }
-    // 5. Throughput: (omit when no tokens/sec data)
-    if let Some(tps) = pm.tokens_per_sec {
+    // 5. Throughput: (LLM-only per B6; also omit when no tokens/sec
+    // data). Non-LLM exits never had a tokens-per-sec sampler firing
+    // so the value is normally `None` already — the category gate is
+    // a defence-in-depth check for the case where a future sampler
+    // misclassifies and populates the field for a Vision/ROS2 run.
+    if pm.workload_category == Some(WorkloadCategory::LLM)
+        && let Some(tps) = pm.tokens_per_sec
+    {
         lines.push(labeled("Throughput:", &format!("{tps:.1} tokens/sec")));
     }
     // 6. Exited:
@@ -527,6 +550,7 @@ mod tests {
             peak_rss_mb: 1024,
             peak_vram_mb: 4096,
             tokens_per_sec: Some(38.4),
+            workload_category: Some(WorkloadCategory::LLM),
             exit_reason: ExitReason::CleanExit,
             stderr_tail: if with_stderr {
                 vec![
@@ -662,6 +686,109 @@ mod tests {
             !rendered.contains("Throughput:"),
             "tokens_per_sec=None must omit the row entirely:\n{rendered}",
         );
+    }
+
+    fn rendered_lines(pm: PostMortem) -> String {
+        let lines = build_lines(&freshly_shown(pm));
+        lines
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// B6 — LLM workloads with tokens/sec data render the Throughput
+    /// row (the existing happy path stays green after the category
+    /// gate landed).
+    #[test]
+    fn postmortem_llm_shows_tokens_per_sec() {
+        let pm = fixture_post_mortem(false, BaselineStatus::NotAvailable);
+        assert_eq!(pm.workload_category, Some(WorkloadCategory::LLM));
+        let rendered = rendered_lines(pm);
+        assert!(
+            rendered.contains("Throughput:"),
+            "LLM postmortem with tokens_per_sec=Some must show Throughput:\n{rendered}",
+        );
+    }
+
+    /// B6 — Vision workloads suppress the Throughput row even if a
+    /// stale tokens_per_sec value leaked in from a misclassified
+    /// sampler. The metric is meaningless for YOLO/diffusion runs.
+    #[test]
+    fn postmortem_vision_hides_tokens_per_sec() {
+        let mut pm = fixture_post_mortem(false, BaselineStatus::NotAvailable);
+        pm.workload_category = Some(WorkloadCategory::Vision);
+        let rendered = rendered_lines(pm);
+        assert!(
+            !rendered.contains("Throughput:"),
+            "Vision postmortem must not render Throughput row:\n{rendered}",
+        );
+    }
+
+    /// B6 — ROS2 workloads suppress the Throughput row for the same
+    /// reason as Vision; the metric doesn't apply to ROS2 nodes.
+    #[test]
+    fn postmortem_ros2_hides_tokens_per_sec() {
+        let mut pm = fixture_post_mortem(false, BaselineStatus::NotAvailable);
+        pm.workload_category = Some(WorkloadCategory::ROS2);
+        let rendered = rendered_lines(pm);
+        assert!(
+            !rendered.contains("Throughput:"),
+            "ROS2 postmortem must not render Throughput row:\n{rendered}",
+        );
+    }
+
+    /// B6 — Unknown / not-yet-classified workloads also suppress
+    /// the Throughput row. Safer to under-report than render an
+    /// LLM metric over a non-LLM workload.
+    #[test]
+    fn postmortem_unknown_category_hides_tokens_per_sec() {
+        let mut pm = fixture_post_mortem(false, BaselineStatus::NotAvailable);
+        pm.workload_category = None;
+        let rendered = rendered_lines(pm);
+        assert!(
+            !rendered.contains("Throughput:"),
+            "Unknown-category postmortem must not render Throughput row:\n{rendered}",
+        );
+    }
+
+    /// B6 — derivation from model name: `phi3-mini.gguf` → LLM,
+    /// `yolov8n.pt` → Vision. Confirms `from_run_record_with_stderr`
+    /// uses [`workload_category_from_model_path`] on the model name.
+    #[test]
+    fn workload_category_derives_from_model_name() {
+        use crate::lifecycle::LifecycleSummary;
+        use chrono::Utc;
+
+        let mk = |model_name: Option<&str>| -> RunRecord {
+            let now = Utc::now();
+            let summary = LifecycleSummary {
+                pid: 1,
+                name: "proc".into(),
+                category: None,
+                model_name: model_name.map(str::to_owned),
+                spawn_time: now,
+                exit_time: now,
+                uptime_secs: 0,
+                exit_code: Some(0),
+                signal: None,
+                avg_cpu_pct: 0.0,
+                peak_cpu_pct: 0.0,
+                peak_rss_mb: 0,
+                peak_vram_mb: 0,
+                samples: 0,
+            };
+            RunRecord::from_summary(summary)
+        };
+
+        let llm = PostMortem::from_run_record(&mk(Some("phi3-mini.gguf")), BaselineStatus::NotAvailable);
+        assert_eq!(llm.workload_category, Some(WorkloadCategory::LLM));
+
+        let vision = PostMortem::from_run_record(&mk(Some("yolov8n.pt")), BaselineStatus::NotAvailable);
+        assert_eq!(vision.workload_category, Some(WorkloadCategory::Vision));
+
+        let none = PostMortem::from_run_record(&mk(None), BaselineStatus::NotAvailable);
+        assert_eq!(none.workload_category, None);
     }
 
     /// Stderr block renders only when `stderr_tail` is non-empty,

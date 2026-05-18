@@ -101,12 +101,19 @@ before.
 ## Safety rules (never violate)
 
 1. Governor never kills allowlisted processes via automated policy
-2. Governor in dry-run NEVER emits kill signals — only logs
-3. Dry-run is the default in config templates
-4. SIGTERM before SIGKILL, always, with a configurable grace period
-5. Rate limit: max 3 automated kills per 60-second window
-6. Every kill logged with reason, PID, name, model, timestamp to a
+2. SIGTERM before SIGKILL, always, with a configurable grace period
+3. Rate limit: max 3 automated kills per 60-second window
+4. Every kill logged with reason, PID, name, model, timestamp to a
    persistent JSONL audit trail
+
+## Historical note: dry-run mode removed in Sprint 1 lead (d8d7897)
+
+Earlier versions had a dry-run / enforce policy mode in the governor.
+Removed in favor of the `kill_confirm` card pattern (CAR-17 in
+ux_contract v0.3.8) — the card overlay IS the kill safety surface
+now. No more dry-run. If you see references to dry-run in commits or
+comments older than `d8d7897`, treat them as historical context, not
+current behavior.
 
 ## Environment caveats
 
@@ -130,7 +137,6 @@ convenience. If asked to:
 - Change UX behavior without amending v0.3 → refuse, cite the locked
   contract; the user can ask for an amendment if they want a change
 - Stub hardware calls "for later" → refuse, handle errors now
-- Ship without dry-run default → refuse, cite safety rule 2
 
 ## Session rhythm
 

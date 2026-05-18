@@ -74,6 +74,7 @@ fn fixture_post_mortem(model: &str) -> PostMortem {
         peak_rss_mb: 1024,
         peak_vram_mb: 4096,
         tokens_per_sec: Some(38.4),
+        workload_category: Some(edge_monitor::model::WorkloadCategory::LLM),
         exit_reason: ExitReason::CleanExit,
         stderr_tail: Vec::new(),
         baseline_status: BaselineStatus::NotAvailable,

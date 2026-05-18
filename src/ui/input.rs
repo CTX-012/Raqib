@@ -189,6 +189,7 @@ mod tests {
                 peak_rss_mb: 0,
                 peak_vram_mb: 0,
                 tokens_per_sec: None,
+                workload_category: None,
                 exit_reason: ExitReason::CleanExit,
                 stderr_tail: Vec::new(),
                 baseline_status: BaselineStatus::NotAvailable,

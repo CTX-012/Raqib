@@ -39,6 +39,127 @@ static MODEL_FLAGS: &[&str] = &[
     "--load",
 ];
 
+/// F3 — extract a human-readable model name from an LLM-runtime
+/// cmdline when the strong-extension path detector at
+/// [`find_model_in_cmdline`] didn't fire. Three runtimes covered:
+///
+/// 1. **Ollama** — `ollama run <model>` (also `ollama pull`, `ollama
+///    show`) → the model token. The bare `ollama serve` daemon has
+///    no model in cmdline and returns `None`.
+/// 2. **vLLM** — `python -m vllm.entrypoints.* --model <X>` where X
+///    can be a HuggingFace repo ID (`meta-llama/Llama-3-8B`) or a
+///    local directory. The repo basename is returned (no extension
+///    stripping — HF IDs don't have extensions).
+/// 3. **llama.cpp** — `llama-server / llama-cli -m <X>.gguf`. Path
+///    basename + extension stripped. Strong-extension cmdlines also
+///    get caught by [`find_model_in_cmdline`] earlier in the
+///    classifier pipeline; this branch covers the rest.
+///
+/// Returns `None` when none of the runtimes' patterns match — the
+/// caller treats that as "model name unknown, render empty column."
+pub fn extract_model_name(cmdline: &[String]) -> Option<String> {
+    if let Some(model) = extract_ollama_run_model(cmdline) {
+        return Some(model);
+    }
+    if let Some(model) = extract_flag_model(cmdline) {
+        return Some(model);
+    }
+    None
+}
+
+/// Match `ollama run <model>` / `ollama pull <model>` /
+/// `ollama show <model>`. Returns the model token verbatim.
+///
+/// `ollama serve` and bare `ollama` (no subcommand) return `None` —
+/// the daemon doesn't know which model is loaded from cmdline alone
+/// (the dispatcher's `/api/ps` sampler covers that case at runtime).
+fn extract_ollama_run_model(cmdline: &[String]) -> Option<String> {
+    // Find the basename of argv[0] — accept `ollama`, `/usr/local/bin/ollama`,
+    // etc. Reject containers / wrappers that happen to have "ollama" as a
+    // non-argv0 token (e.g. `bash -c 'ollama run ...'`).
+    let argv0 = cmdline.first()?;
+    let basename = argv0.rsplit('/').next().unwrap_or(argv0);
+    if basename != "ollama" {
+        return None;
+    }
+    let subcommand = cmdline.get(1)?;
+    if !matches!(subcommand.as_str(), "run" | "pull" | "show") {
+        return None;
+    }
+    let model = cmdline.get(2)?;
+    if model.is_empty() || model.starts_with('-') {
+        return None;
+    }
+    Some(model.clone())
+}
+
+/// Generic `--model <X>` / `--model=X` extractor for vLLM-style
+/// cmdlines. The value can be:
+/// - HuggingFace repo ID (`meta-llama/Llama-3-8B`) → returns basename
+///   (`Llama-3-8B`).
+/// - Local path with no strong extension (`/m/llama3.safetensors` IS
+///   handled by [`find_model_in_cmdline`] before this function runs;
+///   `.pt` / `.pth` / `.bin` weak extensions fall through here) →
+///   returns the file stem (extension stripped).
+/// - Bare token (`tinyllama:1.5b`) → returned verbatim.
+///
+/// The short `-m` flag is intentionally excluded when argv[0] is a
+/// Python interpreter, because `python -m <module>` collides with our
+/// MODEL_FLAGS table on `-m`. For llama.cpp's `llama-server -m
+/// path.gguf` we still honour `-m` (argv[0] isn't python). The
+/// strong-extension path of `find_model_in_cmdline` covers the .gguf
+/// case independently anyway.
+fn extract_flag_model(cmdline: &[String]) -> Option<String> {
+    let argv0_is_python = cmdline
+        .first()
+        .map(|s| s.rsplit('/').next().unwrap_or(s.as_str()))
+        .map(|basename| basename.starts_with("python"))
+        .unwrap_or(false);
+    for (i, token) in cmdline.iter().enumerate() {
+        if let Some(value) = extract_flag_eq_value(token) {
+            return Some(strip_path_and_extension(value));
+        }
+        // Skip `-m` for python interpreters — that's the module flag,
+        // not a model path.
+        if token == "-m" && argv0_is_python {
+            continue;
+        }
+        if MODEL_FLAGS.contains(&token.as_str())
+            && let Some(next) = cmdline.get(i + 1)
+            && !next.is_empty()
+            && !next.starts_with('-')
+        {
+            return Some(strip_path_and_extension(next));
+        }
+    }
+    None
+}
+
+/// Strip directory components and a single file extension. HuggingFace
+/// IDs (`meta-llama/Llama-3-8B`) get their publisher prefix removed
+/// (returns `Llama-3-8B`); paths (`/m/llama3.safetensors`) get both
+/// directory and extension dropped (returns `llama3`); bare tokens
+/// (`tinyllama:1.5b`) round-trip unchanged.
+fn strip_path_and_extension(s: &str) -> String {
+    let basename = s.rsplit('/').next().unwrap_or(s);
+    let basename = basename.rsplit('\\').next().unwrap_or(basename);
+    // Strip only the FINAL extension — model names like
+    // "qwen2.5-0.5b-instruct-q8_0.gguf" must become
+    // "qwen2.5-0.5b-instruct-q8_0", not "qwen2".
+    if let Some(idx) = basename.rfind('.') {
+        // Skip ext-strip when the dotted segment looks like part of a
+        // version tag (e.g. `tinyllama:1.5b` shouldn't lose `5b`). A
+        // pragmatic check: only strip when the post-dot suffix is
+        // wholly alphabetic (txt-style extensions). This keeps
+        // `Llama-3.1-8B` intact too.
+        let suffix = &basename[idx + 1..];
+        if !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_alphabetic()) {
+            return basename[..idx].to_string();
+        }
+    }
+    basename.to_string()
+}
+
 /// Environment variables whose presence (with a non-empty value) indicates that
 /// a model path is explicitly configured for this process.
 static STRONG_MODEL_ENV_VARS: &[&str] = &[
@@ -377,6 +498,133 @@ mod tests {
             ..Default::default()
         };
         assert!(classify(&sample).is_none());
+    }
+
+    // ── F3 — extract_model_name (Sprint-3 model column) ─────────────
+
+    #[test]
+    fn extract_model_from_ollama_run_simple() {
+        let cmdline = args(&["ollama", "run", "tinyllama"]);
+        assert_eq!(
+            extract_model_name(&cmdline),
+            Some("tinyllama".to_string()),
+        );
+    }
+
+    #[test]
+    fn extract_model_from_ollama_run_with_version() {
+        // Ollama tags are colon-separated; must not be misread as a
+        // file extension to strip.
+        let cmdline = args(&["ollama", "run", "llama3:8b-instruct-q4_0"]);
+        assert_eq!(
+            extract_model_name(&cmdline),
+            Some("llama3:8b-instruct-q4_0".to_string()),
+        );
+    }
+
+    #[test]
+    fn extract_model_from_ollama_run_with_absolute_argv0() {
+        // Real-world cmdline often has argv[0] as the full binary
+        // path (e.g. from `which ollama`).
+        let cmdline = args(&["/usr/local/bin/ollama", "run", "phi3"]);
+        assert_eq!(extract_model_name(&cmdline), Some("phi3".to_string()));
+    }
+
+    #[test]
+    fn extract_model_returns_none_for_ollama_serve_daemon() {
+        // The daemon holds the loaded-model info in memory; cmdline
+        // alone can't tell us which model is hot.
+        let cmdline = args(&["ollama", "serve"]);
+        assert_eq!(extract_model_name(&cmdline), None);
+        // Bare `ollama` (no subcommand) also returns None.
+        let cmdline = args(&["ollama"]);
+        assert_eq!(extract_model_name(&cmdline), None);
+    }
+
+    #[test]
+    fn extract_model_from_vllm_model_flag() {
+        // HuggingFace repo ID — strip publisher prefix, keep the
+        // model name verbatim (no extension to strip).
+        let cmdline = args(&[
+            "python3",
+            "-m",
+            "vllm.entrypoints.openai.api_server",
+            "--model",
+            "meta-llama/Llama-3-8B",
+        ]);
+        assert_eq!(
+            extract_model_name(&cmdline),
+            Some("Llama-3-8B".to_string()),
+        );
+    }
+
+    #[test]
+    fn extract_model_from_vllm_with_full_path() {
+        // Local path with a weak extension (.bin) — drop the dir and
+        // the extension. (Strong-extension paths like .safetensors
+        // are handled by find_model_in_cmdline earlier in the
+        // classifier pipeline and never reach this extractor.)
+        let cmdline = args(&[
+            "python3",
+            "-m",
+            "vllm.entrypoints.api_server",
+            "--model",
+            "/models/qwen2-7b-instruct",
+        ]);
+        assert_eq!(
+            extract_model_name(&cmdline),
+            Some("qwen2-7b-instruct".to_string()),
+        );
+    }
+
+    #[test]
+    fn extract_model_from_llama_cpp_gguf() {
+        // `-m models/X.gguf` — strip dir AND extension. The full
+        // model name preserves internal dots (qwen2.5-0.5b — see the
+        // existing `classify_extracts_model_name_from_dotted_filename`
+        // test); only the final ascii-alphabetic extension is
+        // dropped.
+        let cmdline = args(&[
+            "llama-server",
+            "-m",
+            "/home/f/models/qwen2.5-0.5b-instruct-q8_0.gguf",
+        ]);
+        assert_eq!(
+            extract_model_name(&cmdline),
+            Some("qwen2.5-0.5b-instruct-q8_0".to_string()),
+        );
+    }
+
+    #[test]
+    fn extract_model_from_model_eq_value_form() {
+        // `--model=value` form must work identically to `--model value`.
+        let cmdline = args(&[
+            "python3",
+            "vllm_serve.py",
+            "--model=meta-llama/Llama-3-8B",
+        ]);
+        assert_eq!(
+            extract_model_name(&cmdline),
+            Some("Llama-3-8B".to_string()),
+        );
+    }
+
+    #[test]
+    fn extract_model_skips_flag_value_that_looks_like_another_flag() {
+        // Defensive: `--model --foo` shouldn't accept `--foo` as the
+        // model name. (clap would reject this cmdline at the user's
+        // process; we should match clap's strictness.)
+        let cmdline = args(&[
+            "python3",
+            "vllm_serve.py",
+            "--model",
+            "--foo",
+            "Llama-3-8B",
+        ]);
+        // The first --model is followed by --foo (rejected); the
+        // extractor falls through with None rather than skipping to
+        // the bare Llama-3-8B token (positional args aren't models).
+        assert_eq!(extract_model_name(&cmdline), None);
     }
 
     // ── helpers ───────────────────────────────────────────────────────────────

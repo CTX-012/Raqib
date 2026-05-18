@@ -36,15 +36,34 @@ pub fn classify_process(sample: &ProcessSample) -> ClassificationResult {
         return result;
     }
     if let Some(result) = keyword_match::classify_by_name(&sample.name) {
-        return result;
+        return augment_with_model_name(result, sample);
     }
     if let Some(result) = keyword_match::classify_by_cmdline(&sample.cmdline) {
-        return result;
+        return augment_with_model_name(result, sample);
     }
     if let Some(result) = script_sniff::classify(sample) {
         return result;
     }
     ClassificationResult::not_ai()
+}
+
+/// F3 — when a keyword-based classification fires for an LLM workload
+/// (ollama, vLLM, llama-server, …) but no `model_name` was populated
+/// (because the cmdline didn't carry a strong-extension file path),
+/// run the dedicated runtime extractors at
+/// [`model_extract::extract_model_name`]. They know about
+/// `ollama run <model>` and `--model <HF-id-or-path>` shapes that the
+/// strong-extension path detector doesn't catch. Non-LLM workloads
+/// pass through unchanged.
+fn augment_with_model_name(
+    mut result: ClassificationResult,
+    sample: &ProcessSample,
+) -> ClassificationResult {
+    use crate::model::WorkloadCategory;
+    if result.workload_category == WorkloadCategory::LLM && result.model_name.is_none() {
+        result.model_name = model_extract::extract_model_name(&sample.cmdline);
+    }
+    result
 }
 
 #[cfg(test)]

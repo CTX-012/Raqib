@@ -5,6 +5,13 @@
 //! the product name, the live workload count, the degraded count, and
 //! the help hint — all separated by `·` (or `-` in ASCII fallback).
 //!
+//! F1 (Sprint-3) — when there's room, the line also carries a
+//! right-aligned wall clock (HH:MM:SS). These tests assert on the
+//! mission-text substring rather than full byte-exact rows so the
+//! clock's time-of-day variability doesn't make the assertions
+//! flake. The mission-line composition logic itself is unit-tested in
+//! `src/ui/panels/header.rs::tests`.
+//!
 //! These tests render the header into a `TestBackend` and read the
 //! resulting buffer back to cells, so they catch regressions in:
 //!   - exact wording / separator choice
@@ -22,6 +29,21 @@ use edge_monitor::ui::app::App;
 use edge_monitor::ui::panels::header;
 use edge_monitor::ui::symbols::SymbolSet;
 use edge_monitor::ui::theme::{UiTheme, current_theme};
+
+/// F1 — does the trailing 8 chars of the trimmed row look like a wall
+/// clock (HH:MM:SS)? Used by the golden-image tests to assert the
+/// clock is present without depending on the exact time-of-day.
+fn ends_with_hms(row: &str) -> bool {
+    let bytes = row.as_bytes();
+    if bytes.len() < 8 {
+        return false;
+    }
+    let tail = &bytes[bytes.len() - 8..];
+    tail.iter().enumerate().all(|(i, b)| match i {
+        2 | 5 => *b == b':',
+        _ => b.is_ascii_digit(),
+    })
+}
 
 /// Read row 0 of the rendered buffer back into a String. Strips the
 /// trailing padding so assertions don't have to count spaces.
@@ -47,11 +69,18 @@ fn render_row0(n_workloads: usize, n_degraded: usize, theme: &UiTheme) -> String
 
 #[test]
 fn header_renders_full_mission_line_with_counts() {
+    // F1 — the row ends with the wall clock, not the help hint, when
+    // the terminal is wide enough. Assert the mission substring +
+    // clock-tail shape rather than full byte-exact equality.
     let theme = current_theme("dark");
     let row = render_row0(3, 1, &theme);
-    assert_eq!(
-        row,
-        " edge_monitor · 3 workloads · 1 degraded · press ? for help"
+    assert!(
+        row.contains(" edge_monitor · 3 workloads · 1 degraded · press ? for help"),
+        "missing mission substring in row: {row:?}"
+    );
+    assert!(
+        ends_with_hms(&row),
+        "row must end with right-aligned HH:MM:SS clock: {row:?}"
     );
 }
 
@@ -68,8 +97,12 @@ fn header_renders_zero_counts_cleanly() {
         "expected '0 degraded' in {row:?}"
     );
     assert!(
-        row.ends_with("press ? for help"),
-        "expected trailing help hint in {row:?}"
+        row.contains("press ? for help"),
+        "expected help hint somewhere in {row:?}"
+    );
+    assert!(
+        ends_with_hms(&row),
+        "row must end with HH:MM:SS clock: {row:?}"
     );
 }
 
@@ -89,11 +122,15 @@ fn header_substitutes_multi_digit_counts() {
 
 #[test]
 fn header_trailing_help_hint_is_always_present() {
+    // F1 — the help hint is no longer the literal tail of the row
+    // (the wall clock is). But it MUST still appear somewhere in the
+    // mission text; it's the only discoverability hook for the help
+    // overlay on a fresh launch.
     let theme = current_theme("dark");
     for (n, m) in [(0, 0), (1, 0), (1, 1), (5, 2), (99, 99)] {
         let row = render_row0(n, m, &theme);
         assert!(
-            row.ends_with("press ? for help"),
+            row.contains("press ? for help"),
             "missing help hint for ({n}, {m}): {row:?}"
         );
     }
@@ -145,12 +182,18 @@ fn header_uses_ascii_separator_when_symbol_set_is_ascii() {
     }
     let row = row.trim_end().to_string();
 
-    assert_eq!(
-        row,
-        " edge_monitor - 2 workloads - 1 degraded - press ? for help"
+    assert!(
+        row.contains(" edge_monitor - 2 workloads - 1 degraded - press ? for help"),
+        "missing ASCII-separator mission substring in {row:?}"
     );
     assert!(
         !row.contains('·'),
         "ASCII-only session must not render U+00B7 middle dot: {row:?}"
+    );
+    // F1 — clock still renders even under ASCII separator (the clock
+    // itself uses `:` natively, no separator-set swap needed).
+    assert!(
+        ends_with_hms(&row),
+        "row must end with HH:MM:SS clock: {row:?}"
     );
 }

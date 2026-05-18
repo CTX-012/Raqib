@@ -25,6 +25,7 @@
 
 use std::time::Instant;
 
+use chrono::{DateTime, Local, Utc};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
@@ -167,6 +168,20 @@ pub(crate) struct Row {
     /// `tokens_per_sec_avg`; populated for Vision workloads when the
     /// vision-probe socket or stdout-parser path has observed frames.
     pub fps_avg: Option<f32>,
+    /// F2 (Sprint-3) — wall-clock spawn time pulled from the
+    /// `ProcessLifecycle` for this PID (the moment edge_monitor first
+    /// observed the process, NOT the OS-level spawn time — see the
+    /// comment on `AnnotatedProcess::first_observed_at`). `None` when
+    /// the runtime has no lifecycle snapshot yet (first tick); the
+    /// row's start-time column renders empty in that case.
+    pub spawn_time: Option<DateTime<Utc>>,
+    /// F3 (Sprint-3) — detected LLM model name (`ollama run <X>`,
+    /// `vllm --model <X>`, `llama-server -m <X>.gguf`). Populated by
+    /// the classifier; `None` for non-LLM workloads, daemon-style
+    /// `ollama serve`, and any cmdline that doesn't surface a model
+    /// name. Panel auto-hides the column when every visible row's
+    /// model is `None`.
+    pub model: Option<String>,
 }
 
 /// CAR-17 — compute the §3 `WorkloadStatus` for a single annotated
@@ -197,6 +212,13 @@ pub(crate) fn ordered_rows(state: &RuntimeState, app: &App) -> Vec<Row> {
             let kv_cache_pct = lt.and_then(|t| t.kv_cache_peak_pct);
             let tokens_per_sec_avg = lt.and_then(|t| t.tokens_per_sec_avg);
             let fps_avg = lt.and_then(|t| t.fps_avg);
+            // F2 — pull spawn_time from the lifecycle snapshot. None
+            // on the first tick before the tracker has populated.
+            let spawn_time = state
+                .last_lifecycle
+                .as_ref()
+                .and_then(|snap| snap.processes.get(&p.pid))
+                .map(|lc| lc.spawn_time);
             Row {
                 pid: p.pid,
                 name: p.name.clone(),
@@ -211,6 +233,10 @@ pub(crate) fn ordered_rows(state: &RuntimeState, app: &App) -> Vec<Row> {
                 governor_armed: inputs.governor_armed,
                 tokens_per_sec_avg,
                 fps_avg,
+                spawn_time,
+                // F3 — classifier already populated AnnotatedProcess
+                // .model_name via augment_with_model_name; copy across.
+                model: p.model_name.clone(),
             }
         })
         .collect();
@@ -322,9 +348,26 @@ fn primary_metric(row: &Row) -> String {
 
 /// Render the whole panel: group headers (skipped when empty) + one
 /// row per workload, in `ordered_rows` order.
+///
+/// F2 + F3 (Sprint-3) — the row layout grew two new columns:
+/// `model` (LLM-only, auto-hidden when no row in the panel has a
+/// model name) and `start` (every row, shown compactly on narrow
+/// panels). The narrow vs wide gate uses the panel `area.width`
+/// rather than the terminal-wide `SizeTier` because the panel can be
+/// rendered in half-width under the §12 two-column Wide layout.
 pub fn render(f: &mut Frame, area: Rect, state: &RuntimeState, app: &App, theme: &UiTheme) {
     let rows = ordered_rows(state, app);
     let block = panel_block("AI Workloads", true, theme);
+    // F2/F3 — narrow threshold mirrors `SizeTier::Narrow`'s
+    // `STANDARD_COLS` floor so a panel that's half of a Wide
+    // terminal still gets the compact row layout.
+    let narrow = area.width < ux_contract::sizing::STANDARD_COLS;
+    // F3 — auto-hide the model column when every row's `model` is
+    // None. Saves screen real estate on hosts running only daemon
+    // workloads (bare `ollama serve` etc.) without forcing the
+    // operator to interpret a perpetually-empty column.
+    let show_model = rows.iter().any(|r| r.model.is_some());
+    let now_for_relative = Utc::now();
 
     if rows.is_empty() {
         // Total empty — render the contract's locked empty-state
@@ -374,6 +417,22 @@ pub fn render(f: &mut Frame, area: Rect, state: &RuntimeState, app: &App, theme:
                 Some(b) if b > 0 => format!("{:>4}M", b / (1024 * 1024)),
                 _ => "    ".into(),
             };
+            // F3 — model column, fixed-width and truncated. Skipped
+            // entirely when no row in the panel surfaced a model name.
+            let model_label = if show_model {
+                let m = row.model.as_deref().unwrap_or("");
+                format!(" {:<width$}", truncate(m, MODEL_COL_WIDTH), width = MODEL_COL_WIDTH)
+            } else {
+                String::new()
+            };
+            // F2 — start-time column. "HH:MM (Nm ago)" wide, "Nm ago"
+            // narrow. Rendered as a fixed-width slot so the trailing
+            // cpu/rss/vram columns align. Empty when the lifecycle
+            // tracker hasn't surfaced spawn_time yet (first tick).
+            let start_label = match row.spawn_time {
+                Some(spawn) => format_start_time(spawn, now_for_relative, narrow),
+                None => String::new(),
+            };
             // L21 / §14 — "Status dot (●⚠✕○): ONLY place colors
             // appear on workload rows." Split the primary line into
             // a colored dot span + a neutral-foreground rest so the
@@ -381,14 +440,32 @@ pub fn render(f: &mut Frame, area: Rect, state: &RuntimeState, app: &App, theme:
             // up `theme.status_color(status)`. Joining them into a
             // single string (pre-L21 shape) would force the whole
             // row into one Color and violate the contract.
-            let rest = format!(
-                " {:<24} {:<14} cpu {:>5.1}% rss {:>5}M {}",
-                truncate(&row.name, 24),
-                primary_metric(row),
-                row.cpu_pct,
-                row.rss_mb,
-                vram_label,
-            );
+            //
+            // F2 + F3 — narrow rows drop the primary-metric column to
+            // fit the new model + start columns inside the 80-col
+            // narrow-tier floor. Wide rows keep the primary metric.
+            let rest = if narrow {
+                format!(
+                    " {:<16}{} {:<8} cpu {:>4.0}% rss {:>4}M {}",
+                    truncate(&row.name, 16),
+                    model_label,
+                    start_label,
+                    row.cpu_pct,
+                    row.rss_mb,
+                    vram_label,
+                )
+            } else {
+                format!(
+                    " {:<22}{} {:<14} {:<14} cpu {:>5.1}% rss {:>5}M {}",
+                    truncate(&row.name, 22),
+                    model_label,
+                    primary_metric(row),
+                    start_label,
+                    row.cpu_pct,
+                    row.rss_mb,
+                    vram_label,
+                )
+            };
             let primary_line = Line::from(vec![
                 Span::styled(
                     dot.to_string(),
@@ -446,6 +523,55 @@ fn truncate(s: &str, max: usize) -> String {
     }
 }
 
+/// F2 — compact "X{unit} ago" relative-duration formatter. Sub-second
+/// elapsed renders as "0s ago"; days dominate hours, hours dominate
+/// minutes, minutes dominate seconds. Returns "?" for negative
+/// durations (clock skew between `spawn_time` and `now`) so the
+/// column doesn't render a misleading "1234567890s ago."
+pub(crate) fn format_relative_short(elapsed: chrono::Duration) -> String {
+    let secs = elapsed.num_seconds();
+    if secs < 0 {
+        return "?".to_string();
+    }
+    if secs < 60 {
+        return format!("{secs}s ago");
+    }
+    let mins = secs / 60;
+    if mins < 60 {
+        return format!("{mins}m ago");
+    }
+    let hours = mins / 60;
+    if hours < 24 {
+        return format!("{hours}h ago");
+    }
+    let days = hours / 24;
+    format!("{days}d ago")
+}
+
+/// F2 — start-time column formatter. Wide rows show "HH:MM (Nm ago)"
+/// so the operator sees both the absolute wall-clock and the elapsed.
+/// Narrow rows show only the relative form to fit the §12 80-col
+/// floor. Uses `now` and the local timezone via the caller's choice
+/// (typically `Utc::now()` + `Local` conversion); pure so tests can
+/// pin the format without depending on system time.
+pub(crate) fn format_start_time(
+    spawn_time: DateTime<Utc>,
+    now: DateTime<Utc>,
+    narrow: bool,
+) -> String {
+    let relative = format_relative_short(now - spawn_time);
+    if narrow {
+        return relative;
+    }
+    let absolute = spawn_time.with_timezone(&Local).format("%H:%M").to_string();
+    format!("{absolute} ({relative})")
+}
+
+/// F3 — max width for the model column. Model names like
+/// `qwen2.5-0.5b-instruct-q8_0` are routinely 20+ chars; truncating
+/// at 14 keeps the row inside the §12 narrow-tier 80-col floor.
+const MODEL_COL_WIDTH: usize = 14;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -491,6 +617,8 @@ mod tests {
             governor_armed: false,
             tokens_per_sec_avg: None,
             fps_avg: None,
+            spawn_time: None,
+            model: None,
         }
     }
 
@@ -640,6 +768,153 @@ mod tests {
         // And Vision parallel — fps absent → fall back.
         let v = make_row(WorkloadCategory::Vision, WorkloadStatus::Healthy);
         assert_eq!(primary_metric(&v), RUNNING_ACTIVELY);
+    }
+
+    // ── F2 — start-time formatter (Sprint-3 per-row spawn column) ──
+
+    #[test]
+    fn format_relative_short_under_60s_returns_seconds() {
+        assert_eq!(format_relative_short(chrono::Duration::seconds(0)), "0s ago");
+        assert_eq!(format_relative_short(chrono::Duration::seconds(12)), "12s ago");
+        assert_eq!(format_relative_short(chrono::Duration::seconds(59)), "59s ago");
+    }
+
+    #[test]
+    fn format_relative_short_minutes() {
+        // Boundary: 60s rolls to 1m, not "60s".
+        assert_eq!(format_relative_short(chrono::Duration::seconds(60)), "1m ago");
+        assert_eq!(format_relative_short(chrono::Duration::seconds(12 * 60)), "12m ago");
+        assert_eq!(format_relative_short(chrono::Duration::seconds(59 * 60)), "59m ago");
+    }
+
+    #[test]
+    fn format_relative_short_hours() {
+        // Boundary: 3600s rolls to 1h.
+        assert_eq!(format_relative_short(chrono::Duration::seconds(3600)), "1h ago");
+        assert_eq!(format_relative_short(chrono::Duration::seconds(2 * 3600)), "2h ago");
+        assert_eq!(format_relative_short(chrono::Duration::seconds(23 * 3600)), "23h ago");
+    }
+
+    #[test]
+    fn format_relative_short_days() {
+        // Boundary: 24h rolls to 1d.
+        assert_eq!(format_relative_short(chrono::Duration::seconds(24 * 3600)), "1d ago");
+        assert_eq!(format_relative_short(chrono::Duration::seconds(3 * 24 * 3600)), "3d ago");
+    }
+
+    #[test]
+    fn format_start_time_wide_uses_absolute_plus_relative() {
+        let spawn = chrono::DateTime::parse_from_rfc3339("2026-05-18T06:48:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let now = spawn + chrono::Duration::seconds(12 * 60);
+        let s = format_start_time(spawn, now, /*narrow=*/ false);
+        assert!(s.contains("12m ago"), "expected 12m ago; got {s:?}");
+        // The exact HH:MM depends on the test host's local timezone,
+        // so assert on shape (4 digits + colon + parens) rather than
+        // a fixed string.
+        assert!(
+            s.matches(':').count() >= 1 && s.contains('('),
+            "wide form must include HH:MM (… ago); got {s:?}"
+        );
+    }
+
+    #[test]
+    fn format_start_time_narrow_uses_relative_only() {
+        let spawn = chrono::DateTime::parse_from_rfc3339("2026-05-18T06:48:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let now = spawn + chrono::Duration::seconds(12 * 60);
+        let s = format_start_time(spawn, now, /*narrow=*/ true);
+        assert_eq!(s, "12m ago");
+        assert!(
+            !s.contains('('),
+            "narrow form must NOT include the absolute HH:MM; got {s:?}"
+        );
+    }
+
+    #[test]
+    fn workload_row_displays_spawn_time() {
+        // ordered_rows must pull spawn_time off the lifecycle snapshot
+        // so the render path can format it into the start-time
+        // column.
+        use crate::lifecycle::{LifecycleSnapshot, ProcessLifecycle};
+        let proc = make_proc(
+            42,
+            "llama-server",
+            WorkloadCategory::LLM,
+            Duration::from_secs(60),
+        );
+        let sample = crate::model::ProcessSample {
+            pid: 42,
+            ppid: Some(1),
+            name: "llama-server".into(),
+            ..Default::default()
+        };
+        let mut snap = LifecycleSnapshot::new();
+        snap.processes.insert(42, ProcessLifecycle::new(&sample, None));
+        let mut s = state_with(vec![proc]);
+        s.last_lifecycle = Some(snap);
+        let rows = ordered_rows(&s, &App::new());
+        assert_eq!(rows.len(), 1);
+        assert!(
+            rows[0].spawn_time.is_some(),
+            "row must surface lifecycle spawn_time when the tracker has the PID"
+        );
+    }
+
+    // ── F3 — model column on the workloads panel (Sprint-3) ─────────
+
+    #[test]
+    fn workload_row_displays_model_when_present() {
+        let mut proc = make_proc(
+            42,
+            "ollama",
+            WorkloadCategory::LLM,
+            Duration::from_secs(60),
+        );
+        proc.model_name = Some("tinyllama".to_string());
+        let s = state_with(vec![proc]);
+        let rows = ordered_rows(&s, &App::new());
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].model.as_deref(), Some("tinyllama"));
+    }
+
+    #[test]
+    fn workload_row_renders_empty_when_model_none() {
+        // Bare `ollama serve` daemon: classifier produces no
+        // model_name; row.model stays None and the renderer
+        // either hides the column entirely (when ALL rows are None)
+        // or pads it blank.
+        let proc = make_proc(
+            42,
+            "ollama",
+            WorkloadCategory::LLM,
+            Duration::from_secs(60),
+        );
+        let s = state_with(vec![proc]);
+        let rows = ordered_rows(&s, &App::new());
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].model, None);
+    }
+
+    #[test]
+    fn workload_row_truncates_long_model_names() {
+        // Render width caps the model column at MODEL_COL_WIDTH; the
+        // panel renderer's `truncate` helper inserts a trailing
+        // ellipsis when the model name exceeds the cap. This test
+        // exercises the truncation primitive directly so a future
+        // change to MODEL_COL_WIDTH retains the cap behaviour.
+        let long = "qwen2.5-0.5b-instruct-q8_0";
+        let truncated = truncate(long, MODEL_COL_WIDTH);
+        assert!(
+            truncated.chars().count() <= MODEL_COL_WIDTH,
+            "truncated length must fit MODEL_COL_WIDTH; got {truncated:?}"
+        );
+        assert!(
+            truncated.ends_with('…'),
+            "over-long model names must show ellipsis; got {truncated:?}"
+        );
     }
 
     #[test]

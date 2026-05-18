@@ -214,6 +214,12 @@ impl WorkloadCategory {
 /// Decision rules (first match wins, on the lower-cased basename):
 /// - extension `.gguf` or `.ggml` → `LLM` (these formats are
 ///   llama.cpp-specific and effectively LLM-only in practice)
+/// - basename contains a well-known LLM family marker → `LLM`. This
+///   pass sits **above** the Vision pass so a path like
+///   `stable-beluga-13b.safetensors` (a real LLM whose filename
+///   carries the "stable" Vision marker as a model-name token) does
+///   not silently misclassify as Vision when a passive vLLM/llama.cpp
+///   cmdline is the actual workload. B5 in the Sprint-2 investigation.
 /// - basename contains "yolo" / "diffusion" / "sdxl" / "stable" /
 ///   "comfyui" → `Vision`
 /// - basename contains "bge" / "minilm" / "embedding" / "sentence-"
@@ -232,6 +238,20 @@ pub fn workload_category_from_model_path(path: &std::path::Path) -> WorkloadCate
         .unwrap_or_default();
 
     if ext_lower == "gguf" || ext_lower == "ggml" {
+        return WorkloadCategory::LLM;
+    }
+
+    // B5 — LLM family markers run BEFORE the Vision pass so that LLM
+    // model files whose names happen to contain a Vision-marker
+    // substring (Stable Beluga → "stable", Mixtral → none, Phi-3 →
+    // none, etc.) classify correctly. Family list is conservative;
+    // every entry is an unambiguous LLM family (no overlap with the
+    // Vision / Embeddings marker sets).
+    let llm_markers = [
+        "llama", "qwen", "mistral", "phi", "gemma",
+        "mixtral", "deepseek", "beluga", "tulu", "vicuna",
+    ];
+    if llm_markers.iter().any(|m| basename_lower.contains(m)) {
         return WorkloadCategory::LLM;
     }
 

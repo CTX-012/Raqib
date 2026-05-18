@@ -47,6 +47,20 @@ pub fn render(f: &mut Frame, area: Rect, theme: &UiTheme) {
             Style::default().fg(theme.attention),
         )),
         Line::from(""),
+        Line::styled("Limitations", body),
+        Line::styled(
+            "  Ollama tokens/sec: requires `edge_monitor exec -- ollama …`",
+            body,
+        ),
+        Line::styled(
+            "  Passive ollama monitoring cannot read tokens/sec",
+            body,
+        ),
+        Line::styled(
+            "  (Ollama embeds metrics in per-request JSON, no Prom endpoint).",
+            body,
+        ),
+        Line::from(""),
         Line::styled("Press ? to close this help.", body),
     ];
 

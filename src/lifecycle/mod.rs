@@ -32,6 +32,16 @@ impl ResourceStats {
         if cpu_pct > self.cpu_peak_pct {
             self.cpu_peak_pct = cpu_pct;
         }
+        self.record_peaks(rss_bytes, vram_bytes);
+        self.sample_count = self.sample_count.saturating_add(1);
+    }
+
+    /// B9 — peak-only update: refreshes RSS / VRAM peaks WITHOUT
+    /// touching `cpu_sum_pct` / `cpu_peak_pct` / `sample_count`. Used
+    /// on the cold-start tick where the runtime has no honest CPU
+    /// reading yet but the memory readings are absolute and worth
+    /// retaining for peak tracking.
+    pub fn record_peaks(&mut self, rss_bytes: u64, vram_bytes: Option<u64>) {
         if rss_bytes > self.rss_peak_bytes {
             self.rss_peak_bytes = rss_bytes;
         }
@@ -40,7 +50,6 @@ impl ResourceStats {
         {
             self.vram_peak_bytes = vram;
         }
-        self.sample_count = self.sample_count.saturating_add(1);
     }
 
     pub fn avg_cpu_pct(&self) -> f32 {
@@ -98,6 +107,13 @@ impl ProcessLifecycle {
         self.resources.record(cpu_pct, rss_bytes, vram_bytes);
     }
 
+    /// B9 — cold-start variant: refresh RSS / VRAM peaks only, without
+    /// touching the CPU rolling-average or the sample counter. See
+    /// `ResourceStats::record_peaks` for the rationale.
+    pub fn record_resource_peaks(&mut self, rss_bytes: u64, vram_bytes: Option<u64>) {
+        self.resources.record_peaks(rss_bytes, vram_bytes);
+    }
+
     pub fn set_model_name(&mut self, name: Option<String>) {
         // Only overwrite when we have new information. Once a process's model
         // has been resolved we trust it; subsequent ticks that lose the signal
@@ -112,10 +128,21 @@ impl ProcessLifecycle {
         self.exit_time.is_some()
     }
 
-    /// Get uptime in seconds (from spawn to now or exit time).
-    pub fn uptime_secs(&self) -> i64 {
-        let end_time = self.exit_time.unwrap_or_else(Utc::now);
-        (end_time - self.spawn_time).num_seconds()
+    /// Get uptime in seconds — `Some(secs)` only for exited
+    /// lifecycles, `None` while the process is still running.
+    ///
+    /// B3 (Sprint-2 investigation) — pre-fix this returned a live
+    /// `now() - spawn_time` value for non-exited lifecycles via
+    /// `unwrap_or_else(Utc::now)`. The single in-tree caller
+    /// (`LifecycleSummary::from_lifecycle`) always pre-checked
+    /// `is_exited()` so the live branch was technically dead code,
+    /// but a future caller that forgot the gate would silently get a
+    /// live-incrementing duration leaking onto the post-mortem card.
+    /// Returning `Option` makes the "must be exited" contract a
+    /// type-level invariant rather than a documentation invariant.
+    pub fn uptime_secs(&self) -> Option<i64> {
+        let end_time = self.exit_time?;
+        Some((end_time - self.spawn_time).num_seconds())
     }
 }
 
@@ -149,18 +176,22 @@ pub struct LifecycleSummary {
 impl LifecycleSummary {
     /// Create summary from a lifecycle record.
     pub fn from_lifecycle(lifecycle: &ProcessLifecycle) -> Option<Self> {
-        if !lifecycle.is_exited() {
-            return None;
-        }
-
-        lifecycle.exit_time.map(|exit_time| Self {
+        // B3 — uptime_secs() now returns Option<i64> and is the
+        // gating signal for "process has exited." The pre-fix code
+        // separately checked `is_exited()` + `exit_time.map(...)` +
+        // `lifecycle.uptime_secs()` (which had its own `unwrap_or_else
+        // (Utc::now)` fallback that could leak live time). Collapsing
+        // all three to one `?` makes the not-exited fast-path explicit.
+        let uptime_secs = lifecycle.uptime_secs()?;
+        let exit_time = lifecycle.exit_time?;
+        Some(Self {
             pid: lifecycle.pid,
             name: lifecycle.name.clone(),
             category: lifecycle.category,
             model_name: lifecycle.model_name.clone(),
             spawn_time: lifecycle.spawn_time,
             exit_time,
-            uptime_secs: lifecycle.uptime_secs(),
+            uptime_secs,
             exit_code: lifecycle.exit_code,
             signal: lifecycle.signal,
             avg_cpu_pct: lifecycle.resources.avg_cpu_pct(),
@@ -289,7 +320,13 @@ mod tests {
     }
 
     #[test]
-    fn process_lifecycle_uptime() {
+    fn uptime_secs_returns_none_for_non_exited_lifecycle() {
+        // B3 defensive narrowing: a process that hasn't exited yet
+        // must NOT report a live-incrementing duration. Returning
+        // None forces every caller to handle the "not done yet" case
+        // explicitly, eliminating the silent live-time leak that the
+        // pre-fix `unwrap_or_else(Utc::now)` had as dead-but-loaded
+        // code.
         let sample = ProcessSample {
             pid: 1234,
             ppid: Some(1),
@@ -299,14 +336,19 @@ mod tests {
             cwd: None,
             ..Default::default()
         };
-
         let mut lc = ProcessLifecycle::new(&sample, None);
-        let uptime_before = lc.uptime_secs();
-        assert!(uptime_before >= 0);
-
+        assert_eq!(
+            lc.uptime_secs(),
+            None,
+            "non-exited lifecycle must return None, never a live duration"
+        );
         lc.mark_exit(Some(0), None);
         let uptime_after = lc.uptime_secs();
-        assert!(uptime_after >= uptime_before);
+        assert!(
+            uptime_after.is_some(),
+            "post-exit lifecycle must return Some(secs)"
+        );
+        assert!(uptime_after.unwrap() >= 0);
     }
 
     #[test]

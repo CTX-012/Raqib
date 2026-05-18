@@ -94,6 +94,27 @@ impl LifecycleTracker {
         }
     }
 
+    /// B9 — cold-start variant of [`Self::record_sample`]: update RSS /
+    /// VRAM peaks but DO NOT push a CPU sample into the rolling average.
+    /// Called on the first tick a PID is observed, when
+    /// `compute_cpu_pct` has no previous reading to delta against. The
+    /// memory readings are absolute (not deltas) so the first-tick
+    /// values are honest and contribute to peak tracking; the CPU
+    /// reading is fabricated (0.0) and would otherwise pollute the
+    /// per-run avg_cpu_pct, especially for short-lived AI processes.
+    pub fn record_resource_peaks(
+        &mut self,
+        pid: u32,
+        rss_bytes: u64,
+        vram_bytes: Option<u64>,
+    ) {
+        if let Some(lc) = self.previous.get_mut(&pid)
+            && !lc.is_exited()
+        {
+            lc.record_resource_peaks(rss_bytes, vram_bytes);
+        }
+    }
+
     /// Publish a known model-name for the process. Later calls with `None`
     /// do not clear it — the classifier can lose the signal mid-run (e.g.
     /// the script closed the file it loaded from), but the run summary
@@ -245,6 +266,62 @@ mod tests {
         assert!((summary.avg_cpu_pct - 26.0).abs() < 1e-6);
         assert_eq!(summary.peak_rss_mb, 400);
         assert_eq!(summary.peak_vram_mb, 1024);
+    }
+
+    // ── B9 (Sprint-2 investigation) — cold-start sample skip ───────
+    //
+    // The pre-fix runtime called `record_sample(pid, 0.0, …)` on the
+    // first tick a PID was observed (compute_cpu_pct returned 0.0 for
+    // cold start). For short-lived processes that 0.0 dominated
+    // avg_cpu_pct — on-disk records routinely had `samples=1,
+    // avg_cpu_pct=0.0`. The fix introduces `record_resource_peaks` so
+    // the cold-start tick still updates RSS/VRAM peaks but does NOT
+    // push a CPU sample.
+
+    #[test]
+    fn cold_start_tick_does_not_record_cpu_sample() {
+        // Simulate a process where ONLY a cold-start "peaks-only"
+        // update fires — no honest CPU sample. The resulting summary
+        // must report `samples=0` and `avg_cpu_pct=0.0` from the
+        // default branch, NOT samples=1 / avg=0 driven by a recorded
+        // 0.0.
+        let mut tracker = LifecycleTracker::new();
+        tracker.update(&[make_sample(700, "shortlived")]).unwrap();
+        tracker.record_resource_peaks(700, 50 * 1024 * 1024, Some(128 * 1024 * 1024));
+        let snapshot = tracker.update(&[]).unwrap();
+        let summary = &snapshot.recent_exits[0];
+        assert_eq!(
+            summary.samples, 0,
+            "cold-start peaks-only update must not increment sample_count"
+        );
+        assert_eq!(summary.avg_cpu_pct, 0.0);
+        // But peaks DID update — memory readings are absolute, not deltas.
+        assert_eq!(summary.peak_rss_mb, 50);
+        assert_eq!(summary.peak_vram_mb, 128);
+    }
+
+    #[test]
+    fn two_tick_process_records_one_sample_at_real_value() {
+        // Tick 1: cold start → record_resource_peaks (peaks-only).
+        // Tick 2: real CPU reading → record_sample at the real value.
+        // Pre-fix: avg_cpu_pct = (0.0 + 100.0) / 2 = 50.0 (half-truth).
+        // Post-fix: avg_cpu_pct = 100.0 (just the honest sample).
+        let mut tracker = LifecycleTracker::new();
+        tracker.update(&[make_sample(701, "burner")]).unwrap();
+        tracker.record_resource_peaks(701, 10 * 1024 * 1024, None);
+        tracker.record_sample(701, 100.0, 20 * 1024 * 1024, None);
+        let snapshot = tracker.update(&[]).unwrap();
+        let summary = &snapshot.recent_exits[0];
+        assert_eq!(summary.samples, 1);
+        assert!(
+            (summary.avg_cpu_pct - 100.0).abs() < 1e-6,
+            "two-tick process must report the honest avg, not half of it; got {}",
+            summary.avg_cpu_pct,
+        );
+        assert!((summary.peak_cpu_pct - 100.0).abs() < 1e-6);
+        // Peaks across both ticks (tick-1 update bumped RSS to 10MB
+        // before tick-2's 20MB beat it).
+        assert_eq!(summary.peak_rss_mb, 20);
     }
 
     #[test]

@@ -158,6 +158,15 @@ pub(crate) struct Row {
     /// operator can see why a Critical dot fired even when no
     /// numeric metric is breaching.
     pub governor_armed: bool,
+    /// B4 — live rolling-average tokens-per-second from
+    /// [`crate::runtime::LiveTelemetry`]. `None` when no Prometheus
+    /// sampler has fed a reading for this PID this run (Ollama-passive
+    /// case per B4-3 docs, cold start, non-LLM workloads).
+    pub tokens_per_sec_avg: Option<f32>,
+    /// B4 — live rolling-average frames-per-second. Same lifecycle as
+    /// `tokens_per_sec_avg`; populated for Vision workloads when the
+    /// vision-probe socket or stdout-parser path has observed frames.
+    pub fps_avg: Option<f32>,
 }
 
 /// CAR-17 — compute the §3 `WorkloadStatus` for a single annotated
@@ -184,10 +193,10 @@ pub(crate) fn ordered_rows(state: &RuntimeState, app: &App) -> Vec<Row> {
         .map(|p| {
             let inputs = build_status_inputs(p, state, armed, now);
             let status = compute_workload_status(&inputs);
-            let kv_cache_pct = state
-                .live_telemetry
-                .get(&p.pid)
-                .and_then(|lt| lt.kv_cache_peak_pct);
+            let lt = state.live_telemetry.get(&p.pid);
+            let kv_cache_pct = lt.and_then(|t| t.kv_cache_peak_pct);
+            let tokens_per_sec_avg = lt.and_then(|t| t.tokens_per_sec_avg);
+            let fps_avg = lt.and_then(|t| t.fps_avg);
             Row {
                 pid: p.pid,
                 name: p.name.clone(),
@@ -200,6 +209,8 @@ pub(crate) fn ordered_rows(state: &RuntimeState, app: &App) -> Vec<Row> {
                 vram_pct: inputs.vram_pct,
                 ram_pct: inputs.ram_pct,
                 governor_armed: inputs.governor_armed,
+                tokens_per_sec_avg,
+                fps_avg,
             }
         })
         .collect();
@@ -282,21 +293,28 @@ pub(crate) fn degraded_line(row: &Row) -> Option<String> {
 /// otherwise category-specific (or `"running actively"` when the
 /// process is alive but the type-specific sampler hasn't reported
 /// a value this tick).
+///
+/// B4 (Sprint-2 investigation) — LLM rows prefer live tokens/sec
+/// over KV-cache occupancy, falling back to `running actively` only
+/// when neither signal is present. Vision rows now render fps when
+/// the dispatcher has observed frames. Ollama under passive
+/// monitoring stays on `running actively` because Ollama exposes
+/// tokens/sec only via per-request JSON (see B4-3 in help overlay).
 fn primary_metric(row: &Row) -> String {
     if matches!(row.status, WorkloadStatus::Loading) {
         return COLD_LOADING.to_string();
     }
     match row.category {
-        // L11b doesn't yet wire live tok/s / fps / emb/s — those
-        // come from `live_telemetry` once the samplers expose them
-        // per category. Until then non-LLM categories report
-        // `running actively` and LLM reports KV cache when available.
-        WorkloadCategory::LLM => match row.kv_cache_pct {
-            Some(kv) => format!("KV {kv:>4.0}%"),
+        WorkloadCategory::LLM => match (row.tokens_per_sec_avg, row.kv_cache_pct) {
+            (Some(tps), _) => format!("{tps:>4.0} tok/s"),
+            (None, Some(kv)) => format!("KV {kv:>4.0}%"),
+            (None, None) => RUNNING_ACTIVELY.to_string(),
+        },
+        WorkloadCategory::Vision => match row.fps_avg {
+            Some(fps) => format!("{fps:>4.0} fps"),
             None => RUNNING_ACTIVELY.to_string(),
         },
-        WorkloadCategory::Vision
-        | WorkloadCategory::ROS2
+        WorkloadCategory::ROS2
         | WorkloadCategory::Embeddings
         | WorkloadCategory::Unknown => RUNNING_ACTIVELY.to_string(),
     }
@@ -471,6 +489,8 @@ mod tests {
             vram_pct: None,
             ram_pct: None,
             governor_armed: false,
+            tokens_per_sec_avg: None,
+            fps_avg: None,
         }
     }
 
@@ -569,6 +589,85 @@ mod tests {
             ..row.clone()
         };
         assert_eq!(primary_metric(&vision), COLD_LOADING);
+    }
+
+    // ── B4 (Sprint-2 investigation) — primary_metric live wiring ────
+    //
+    // Pre-fix: LLM rows showed "KV NN%" if KV-cache occupancy was
+    // present and "running actively" otherwise, regardless of whether
+    // tokens/sec was available. Vision rows had no fps path at all.
+    // After fix: tokens/sec wins for LLM; fps wins for Vision; the
+    // old fallbacks remain for the "no signal yet" case.
+
+    #[test]
+    fn workloads_panel_renders_tokens_per_sec_when_present() {
+        let mut row = make_row(WorkloadCategory::LLM, WorkloadStatus::Healthy);
+        row.tokens_per_sec_avg = Some(42.7);
+        // KV present too — tokens/sec must win.
+        row.kv_cache_pct = Some(67.0);
+        let s = primary_metric(&row);
+        assert!(s.contains("tok/s"), "expected tok/s; got {s:?}");
+        assert!(s.contains("43"), "expected rounded 43 in {s:?}");
+        assert!(!s.contains("KV"), "tokens/sec must override KV; got {s:?}");
+    }
+
+    #[test]
+    fn workloads_panel_falls_back_to_kv_cache_when_no_tokens() {
+        let mut row = make_row(WorkloadCategory::LLM, WorkloadStatus::Healthy);
+        row.tokens_per_sec_avg = None;
+        row.kv_cache_pct = Some(45.0);
+        let s = primary_metric(&row);
+        assert!(s.contains("KV"), "expected KV fallback; got {s:?}");
+        assert!(s.contains("45"));
+    }
+
+    #[test]
+    fn workloads_panel_renders_fps_for_vision() {
+        let mut row = make_row(WorkloadCategory::Vision, WorkloadStatus::Healthy);
+        row.fps_avg = Some(28.0);
+        let s = primary_metric(&row);
+        assert!(s.contains("fps"), "expected fps; got {s:?}");
+        assert!(s.contains("28"));
+    }
+
+    #[test]
+    fn workloads_panel_falls_back_to_running_actively_when_both_none() {
+        // Healthy LLM with no live telemetry: still must say
+        // "running actively" rather than print "tok/s" or "KV" with
+        // empty placeholders.
+        let row = make_row(WorkloadCategory::LLM, WorkloadStatus::Healthy);
+        assert_eq!(primary_metric(&row), RUNNING_ACTIVELY);
+        // And Vision parallel — fps absent → fall back.
+        let v = make_row(WorkloadCategory::Vision, WorkloadStatus::Healthy);
+        assert_eq!(primary_metric(&v), RUNNING_ACTIVELY);
+    }
+
+    #[test]
+    fn live_telemetry_round_trips_tokens_per_sec_into_row() {
+        // End-to-end: a `LiveTelemetry` entry with tokens_per_sec_avg
+        // populated must land on the row produced by `ordered_rows`,
+        // so the renderer can read it. Catches a future regression
+        // where the runtime stops copying the field across.
+        use crate::runtime::LiveTelemetry;
+        let proc = make_proc(
+            42,
+            "llama-server",
+            WorkloadCategory::LLM,
+            Duration::from_secs(60),
+        );
+        let mut s = state_with(vec![proc]);
+        s.live_telemetry.insert(
+            42,
+            LiveTelemetry {
+                tokens_per_sec_avg: Some(38.4),
+                fps_avg: None,
+                kv_cache_peak_pct: None,
+                kv_cache_evictions_total: None,
+            },
+        );
+        let rows = ordered_rows(&s, &App::new());
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].tokens_per_sec_avg, Some(38.4));
     }
 
     #[test]

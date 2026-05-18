@@ -124,6 +124,20 @@ current behavior.
 - NVML may fail to initialize on WSL. Code must handle
   `Option<GpuSnapshot>` everywhere. Never panic on missing NVML.
 
+## Known limitations
+
+- **Ollama tokens/sec only available via `edge_monitor exec`**, not via
+  passive monitoring. Ollama embeds tokens/sec in the per-request JSON
+  response with no exposed Prometheus endpoint or log file — the only
+  capture path is the exec wrapper's stdout parser (Tier 1.2d). A user
+  who starts `ollama run …` independently and then watches it with
+  edge_monitor will see "running actively" on the workload row,
+  forever. Documented in the `?` help overlay and confirmed by the B4
+  Sprint-2 investigation.
+- vLLM and llama.cpp expose Prometheus and ARE scraped passively;
+  tokens/sec for those flows through `LiveTelemetry` to the workloads
+  panel within a tick or two of first sample.
+
 ## When the user pushes for shortcuts
 
 The user's system prompt asks for mentor-style pushback, not

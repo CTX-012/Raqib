@@ -164,12 +164,29 @@ pub fn classify_for_alert(
 /// telemetry. Computed each tick from the dispatcher; not persisted.
 /// Kept narrow on purpose — full `RunMetrics` is ~20 fields and most
 /// of them aren't useful in a live panel.
+///
+/// B4 (Sprint-2 investigation) — `tokens_per_sec_avg` and `fps_avg`
+/// land here so the workloads panel can render live throughput. The
+/// dispatcher's accumulator already collects them from the vLLM /
+/// llama.cpp Prometheus samplers; pre-fix they were stored but
+/// never surfaced into `state.live_telemetry`, leaving every LLM /
+/// Vision row stuck on "running actively" forever.
 #[derive(Debug, Clone, Default)]
 pub struct LiveTelemetry {
     /// Peak KV-cache occupancy seen so far this run, percent (0..=100).
     pub kv_cache_peak_pct: Option<f32>,
     /// Eviction-counter delta so far this run.
     pub kv_cache_evictions_total: Option<u64>,
+    /// Rolling average tokens-per-second from the dispatcher's
+    /// accumulator. `None` when no sampler has fed a tokens reading
+    /// for this PID yet (cold start, or a workload class that has no
+    /// throughput signal — Ollama-passive case per B4-3, Vision rows
+    /// that should fall through to `fps_avg`).
+    pub tokens_per_sec_avg: Option<f32>,
+    /// Rolling average frames-per-second. Same lifecycle as
+    /// `tokens_per_sec_avg`; populated for Vision workloads when the
+    /// vision-probe socket or the stdout parser has observed frames.
+    pub fps_avg: Option<f32>,
 }
 
 impl RuntimeState {
@@ -477,6 +494,12 @@ impl Runtime {
 
         let mut next_cpu: HashMap<u32, (u64, Instant)> =
             HashMap::with_capacity(snapshot.processes.len());
+        // B9 — track which PIDs got a real CPU reading this tick so the
+        // tracker can SKIP recording a sample for cold-start ticks
+        // (where compute_cpu_pct returns None). Parallel to `annotated`
+        // by index. `None` entries mean "do not feed into the rolling
+        // average."
+        let mut cpu_for_avg: Vec<Option<f32>> = Vec::with_capacity(snapshot.processes.len());
         let annotated: Vec<AnnotatedProcess> = snapshot
             .processes
             .iter()
@@ -493,7 +516,8 @@ impl Runtime {
                     // is using so we can fingerprint it on exit.
                     self.pid_to_model_path.insert(p.pid, path);
                 }
-                let cpu_pct = self.compute_cpu_pct(p.pid, p.cpu_time_ticks, now);
+                let cpu_pct_opt = self.compute_cpu_pct(p.pid, p.cpu_time_ticks, now);
+                cpu_for_avg.push(cpu_pct_opt);
                 next_cpu.insert(p.pid, (p.cpu_time_ticks, now));
                 let first_observed_at =
                     *self.pid_first_seen_at.entry(p.pid).or_insert(now);
@@ -504,7 +528,11 @@ impl Runtime {
                     workload_category,
                     evidence,
                     model_name,
-                    cpu_pct,
+                    // Display 0.0 on the cold-start tick (UI shows "no
+                    // reading yet") — matches pre-B9 behavior at the
+                    // render layer; only the averaging buffer gets the
+                    // sample skip.
+                    cpu_pct: cpu_pct_opt.unwrap_or(0.0),
                     rss_mb: p.rss_bytes / (1024 * 1024),
                     vram_bytes: vram_by_pid.get(&p.pid).copied(),
                     first_observed_at,
@@ -525,9 +553,27 @@ impl Runtime {
         // dumb about these and accepts them here. Stats persist across ticks
         // in `tracker.previous` so the run summary on the exit tick carries
         // the peak/avg computed over the process's entire life.
-        for p in &annotated {
-            self.tracker
-                .record_sample(p.pid, p.cpu_pct, p.rss_mb * 1024 * 1024, p.vram_bytes);
+        for (idx, p) in annotated.iter().enumerate() {
+            // B9 — skip the rolling-average push on the cold-start tick
+            // (cpu_for_avg[idx] == None). The display field on
+            // AnnotatedProcess still carries 0.0 so live panels render
+            // sanely; only `lifecycle.resources.cpu_sum_pct /
+            // sample_count` is protected from the first-tick zero.
+            // RSS / VRAM peaks DO update — those are absolute readings
+            // (not deltas) and the first tick's value is honest.
+            if let Some(cpu_pct) = cpu_for_avg[idx] {
+                self.tracker
+                    .record_sample(p.pid, cpu_pct, p.rss_mb * 1024 * 1024, p.vram_bytes);
+            } else {
+                // Cold-start tick: still update RSS/VRAM peaks even
+                // though the CPU sample is skipped. Use 0.0 for cpu
+                // (excluded from sum_pct by sample_count logic? no —
+                // ResourceStats.record always increments sample_count).
+                // To avoid skewing the sample_count we update peaks
+                // directly via a dedicated helper.
+                self.tracker
+                    .record_resource_peaks(p.pid, p.rss_mb * 1024 * 1024, p.vram_bytes);
+            }
             self.tracker.record_model_name(p.pid, p.model_name.clone());
         }
 
@@ -748,6 +794,13 @@ impl Runtime {
                         LiveTelemetry {
                             kv_cache_peak_pct: m.kv_cache_peak_pct,
                             kv_cache_evictions_total: m.kv_cache_evictions_total,
+                            // B4-1 — flow tokens/sec and fps through to the
+                            // UI. The accumulator already aggregates these
+                            // from the vLLM / llama.cpp Prometheus samplers
+                            // (vision-probe / stdout-parser feed fps); pre-
+                            // fix the workloads panel had no read path.
+                            tokens_per_sec_avg: m.tokens_per_sec_avg,
+                            fps_avg: m.fps_avg,
                         },
                     );
                 }
@@ -932,19 +985,30 @@ impl Runtime {
 
 impl Runtime {
     /// Converts a fresh (pid, cumulative_ticks, now) reading into a CPU
-    /// percentage by looking up the previous tick's value. Returns 0.0 when
-    /// no previous sample exists (first appearance of this PID) or when the
-    /// ticks counter went backwards (PID reuse).
-    fn compute_cpu_pct(&self, pid: u32, ticks_now: u64, now: Instant) -> f32 {
-        let Some(&(ticks_prev, prev_at)) = self.prev_cpu.get(&pid) else {
-            return 0.0;
-        };
+    /// percentage by looking up the previous tick's value.
+    ///
+    /// Returns `None` for the **cold-start** tick — the first time a PID
+    /// is observed there is no previous reading to delta against, so any
+    /// number we'd compute is fabricated. Callers use the `None` arm to
+    /// SKIP averaging-buffer pushes (B9 in the Sprint-2 investigation:
+    /// pre-fix the first tick recorded 0.0 into the rolling average,
+    /// which dominated short-lived process avg_cpu_pct numbers and
+    /// caused `samples=1, avg_cpu_pct=0.0` records on the disk for
+    /// processes that genuinely had no time to register CPU activity).
+    /// UI display still uses 0.0 in this case (operator sees "no
+    /// reading yet"); the change is purely about which samples enter
+    /// the rolling sum.
+    ///
+    /// Also returns `None` when the ticks counter went backwards (PID
+    /// reuse / collision), since a negative delta would lie.
+    fn compute_cpu_pct(&self, pid: u32, ticks_now: u64, now: Instant) -> Option<f32> {
+        let &(ticks_prev, prev_at) = self.prev_cpu.get(&pid)?;
         let dt = now.saturating_duration_since(prev_at).as_secs_f32();
         if dt <= 0.0 || ticks_now < ticks_prev {
-            return 0.0;
+            return None;
         }
         let delta_ticks = (ticks_now - ticks_prev) as f32;
-        (delta_ticks / self.clk_tck as f32 / dt) * 100.0
+        Some((delta_ticks / self.clk_tck as f32 / dt) * 100.0)
     }
 }
 

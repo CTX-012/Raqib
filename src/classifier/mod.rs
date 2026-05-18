@@ -223,6 +223,86 @@ mod tests {
         );
     }
 
+    // ── B5 — vLLM + path-marker collision (Sprint-2 investigation) ──
+    //
+    // model_extract::classify runs before cmdline keyword matching, so
+    // when a vLLM cmdline passes a strong-extension model path the
+    // workload_category is derived from the basename. Pre-fix the
+    // basename markers ran [Vision, Embeddings, else Unknown]; an LLM
+    // family marker now runs first so `stable-beluga-13b.safetensors`
+    // (a real LLM that contains the "stable" Vision substring) stays
+    // LLM instead of misclassifying as Vision.
+
+    #[test]
+    fn vllm_safetensors_no_marker_classifies_correctly() {
+        // Plain LLM filename + no path marker → LLM via the family
+        // pass. Pre-fix the basename had no marker and returned
+        // Unknown; the new "llama" / "qwen" / etc. pre-check resolves
+        // it to LLM directly.
+        let s = sample(
+            "python3",
+            &[
+                "python3",
+                "-m",
+                "vllm.entrypoints.openai.api_server",
+                "--model",
+                "/m/llama-3-8b.safetensors",
+            ],
+        );
+        assert_eq!(
+            classify_process(&s).workload_category,
+            WorkloadCategory::LLM,
+        );
+    }
+
+    #[test]
+    fn vllm_safetensors_with_stable_in_path_does_not_classify_vision() {
+        // The original B5 failure case: Stable Beluga is an LLM but
+        // the basename contains "stable" (a Vision marker). The
+        // LLM-family marker "beluga" runs before the Vision check
+        // and pins this to LLM.
+        let s = sample(
+            "python3",
+            &[
+                "python3",
+                "-m",
+                "vllm.entrypoints.openai.api_server",
+                "--model",
+                "/m/stable-beluga-13b.safetensors",
+            ],
+        );
+        let wc = classify_process(&s).workload_category;
+        assert_ne!(
+            wc,
+            WorkloadCategory::Vision,
+            "Stable Beluga is an LLM; the 'stable' Vision marker must \
+             not win against the 'beluga' LLM marker"
+        );
+        assert_eq!(wc, WorkloadCategory::LLM);
+    }
+
+    #[test]
+    fn vllm_safetensors_with_llama_basename_classifies_llm() {
+        // Sanity check for the family-marker pass: a bare "llama"
+        // basename (no Vision-marker interference) still routes to
+        // LLM through the new pre-check, NOT through the .gguf shortcut
+        // or the keyword pass.
+        let s = sample(
+            "python3",
+            &[
+                "python3",
+                "-m",
+                "vllm.entrypoints.openai.api_server",
+                "--model",
+                "/models/llama3-instruct.safetensors",
+            ],
+        );
+        assert_eq!(
+            classify_process(&s).workload_category,
+            WorkloadCategory::LLM,
+        );
+    }
+
     #[test]
     fn yolo_via_cmdline_is_vision() {
         let s = sample(

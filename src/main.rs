@@ -69,16 +69,22 @@ struct Cli {
     theme: Option<String>,
 
     /// Sprint-6 — disable the embedded web UI. Default is to bind
-    /// `127.0.0.1:7070` and serve the Svelte dashboard alongside the
-    /// TUI; pass `--no-web` for headless / CI runs where the HTTP
-    /// listener would be noise.
+    /// the Svelte dashboard on port 7070 (see `--bind`) alongside
+    /// the TUI; pass `--no-web` for headless / CI runs where the
+    /// HTTP listener would be noise.
     #[arg(long)]
     no_web: bool,
 
-    /// Sprint-6 — web UI listen port. Default 7070, localhost-only.
-    /// The binding always uses `127.0.0.1`; there is no flag to
-    /// expose the server on a real network interface in v1.0
-    /// (the CORS / auth posture isn't ready for that).
+    /// Sprint-7 — web UI listen address. Defaults to `0.0.0.0` so
+    /// the dashboard is reachable from any host on the same LAN.
+    /// **There is NO authentication in v1.0** — pass
+    /// `--bind 127.0.0.1` to restrict the listener to localhost if
+    /// the host is on an untrusted network. See README "Web UI
+    /// security" for the trusted-LAN assumption.
+    #[arg(long, default_value = "0.0.0.0")]
+    bind: std::net::IpAddr,
+
+    /// Sprint-6 — web UI listen port. Default 7070.
     #[arg(long, default_value_t = 7070)]
     port: u16,
 
@@ -183,7 +189,7 @@ fn main() -> anyhow::Result<()> {
         tracing::info!("--no-web set; web UI disabled");
         None
     } else {
-        match spawn_web_server(cli.port, shutdown.clone()) {
+        match spawn_web_server(cli.bind, cli.port, shutdown.clone()) {
             Ok(tx) => Some(tx),
             Err(e) => {
                 // Don't fail the whole binary if the web companion
@@ -220,12 +226,18 @@ fn main() -> anyhow::Result<()> {
 /// runtime. Returns the `watch::Sender` so the TUI / headless loop
 /// can publish snapshots into it on every tick.
 ///
-/// The server binds to `127.0.0.1:<port>` (localhost-only — never a
-/// wildcard interface in v1.0). The `shutdown` flag plumbed in here
-/// is the same `Arc<AtomicBool>` the rest of the binary watches; a
-/// background task polls it and resolves the axum graceful-
-/// shutdown future when the operator quits the TUI.
+/// Sprint-7 Item 4 — `bind` is the listen address. Defaults to
+/// `0.0.0.0` (any interface, accessible from the LAN); restrict
+/// with `--bind 127.0.0.1` for localhost-only. **There is no auth
+/// in v1.0** — the wider bind explicitly assumes a trusted LAN per
+/// the README "Web UI security" section.
+///
+/// The `shutdown` flag plumbed in here is the same `Arc<AtomicBool>`
+/// the rest of the binary watches; a background task polls it and
+/// resolves the axum graceful-shutdown future when the operator
+/// quits the TUI.
 fn spawn_web_server(
+    bind: std::net::IpAddr,
     port: u16,
     shutdown: Arc<AtomicBool>,
 ) -> anyhow::Result<tokio::sync::watch::Sender<edge_monitor::web::WireSnapshot>> {
@@ -233,7 +245,21 @@ fn spawn_web_server(
 
     let (tx, rx) = tokio::sync::watch::channel(WireSnapshot::empty());
     let state = WebState { rx };
-    let addr: std::net::SocketAddr = ([127, 0, 0, 1], port).into();
+    let addr: std::net::SocketAddr = (bind, port).into();
+
+    // Sprint-7 Item 4 — surface the no-auth + LAN-exposure tradeoff
+    // at startup so the operator can't claim they weren't warned.
+    // The warning fires unconditionally (whether bind is 0.0.0.0 or
+    // localhost) because even a localhost bind is auth-less; the
+    // line just helps the operator notice the wider-than-expected
+    // listener address when one is set.
+    if !bind.is_loopback() {
+        tracing::warn!(
+            addr = %addr,
+            "web UI on {addr} — NO AUTH, trusted LAN only. \
+             Restrict with --bind 127.0.0.1 on untrusted networks."
+        );
+    }
 
     // Dedicated tokio runtime on a background OS thread so the TUI
     // tick loop (sync) and the web server (async) don't fight for

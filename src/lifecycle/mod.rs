@@ -80,11 +80,20 @@ pub struct ProcessLifecycle {
 
 impl ProcessLifecycle {
     /// Create a new lifecycle record when a process is first observed.
+    ///
+    /// Sprint-7 Item 3 — prefer `sample.os_start_time` (true OS
+    /// spawn time from `/proc/<pid>/stat` field 22 + `btime`) when
+    /// the platform layer surfaced it; fall back to `Utc::now()`
+    /// only when the /proc parse failed. This resolves the Sprint-3
+    /// F2 known limitation: pre-Sprint-7 every process that was
+    /// already running when edge_monitor launched displayed
+    /// "first observed" time (i.e. "(1m ago)") rather than the
+    /// real spawn time hours earlier.
     pub fn new(sample: &ProcessSample, category: Option<AICategory>) -> Self {
         Self {
             pid: sample.pid,
             name: sample.name.clone(),
-            spawn_time: Utc::now(),
+            spawn_time: sample.os_start_time.unwrap_or_else(Utc::now),
             exit_time: None,
             exit_code: None,
             signal: None,

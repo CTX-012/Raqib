@@ -1,6 +1,9 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+
+use chrono::{DateTime, Utc};
 
 use crate::model::ProcessSample;
 use crate::platform::{PlatformError, PlatformResult};
@@ -8,6 +11,35 @@ use crate::platform::{PlatformError, PlatformResult};
 /// Collects process information from /proc on Linux.
 /// Handles parsing of cmdline, environ, status, and cwd entries.
 pub struct ProcessCollector;
+
+/// Sprint-7 Item 3 — `/proc/stat`'s `btime` field, cached for the
+/// process lifetime. `btime` is the epoch second the kernel booted;
+/// it doesn't change while we run, so reading it once is enough.
+/// `None` when the parse fails (alien `/proc`, fakeproc, etc.) — the
+/// caller falls back to `first_observed_at` in that case.
+fn boot_time_epoch_secs() -> Option<u64> {
+    static BOOT_TIME: OnceLock<Option<u64>> = OnceLock::new();
+    *BOOT_TIME.get_or_init(|| {
+        let content = fs::read_to_string("/proc/stat").ok()?;
+        for line in content.lines() {
+            if let Some(rest) = line.strip_prefix("btime ") {
+                return rest.trim().parse::<u64>().ok();
+            }
+        }
+        None
+    })
+}
+
+/// `sysconf(_SC_CLK_TCK)` cached for the process lifetime. Returns
+/// 100 on failure — that's the Linux kernel default and the value
+/// every distro we target ships with.
+fn clk_tck_hz() -> u64 {
+    static CLK_TCK: OnceLock<u64> = OnceLock::new();
+    *CLK_TCK.get_or_init(|| {
+        let raw = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+        if raw <= 0 { 100 } else { raw as u64 }
+    })
+}
 
 impl ProcessCollector {
     /// Creates a new process collector.
@@ -65,6 +97,10 @@ impl ProcessCollector {
         // can fail transiently when the process is exiting. Fall back to 0.
         let rss_bytes = self.read_rss_bytes(&pid_path).unwrap_or(0);
         let cpu_time_ticks = self.read_cpu_ticks(&pid_path).unwrap_or(0);
+        // Sprint-7 Item 3 — true OS spawn time from
+        // /proc/<pid>/stat field 22. `None` falls back at the
+        // runtime layer to L11b's `first_observed_at`.
+        let os_start_time = self.read_os_start_time(&pid_path);
 
         Ok(ProcessSample {
             pid,
@@ -75,7 +111,28 @@ impl ProcessCollector {
             cwd,
             rss_bytes,
             cpu_time_ticks,
+            os_start_time,
         })
+    }
+
+    /// Sprint-7 Item 3 — derive the OS spawn timestamp from
+    /// `/proc/<pid>/stat`. Reads field 22 (`starttime`, clock ticks
+    /// since boot), then composes:
+    ///
+    /// `epoch_secs = boot_time_epoch + (starttime / clk_tck)`
+    ///
+    /// `chrono::DateTime<Utc>` is the wire type; `None` flows
+    /// through when any of the inputs fails (stat unreadable,
+    /// btime missing, parse failure) — the runtime falls back to
+    /// `first_observed_at`.
+    fn read_os_start_time(&self, pid_path: &Path) -> Option<DateTime<Utc>> {
+        let stat_path = pid_path.join("stat");
+        let content = fs::read_to_string(&stat_path).ok()?;
+        let starttime_ticks = parse_starttime_from_stat(&content)?;
+        let btime = boot_time_epoch_secs()?;
+        let secs_since_boot = starttime_ticks / clk_tck_hz();
+        let epoch_secs = btime.checked_add(secs_since_boot)?;
+        chrono::DateTime::from_timestamp(epoch_secs as i64, 0)
     }
 
     /// Parses the VmRSS line from /proc/<pid>/status. VmRSS is reported in kB.
@@ -238,6 +295,21 @@ pub(crate) fn parse_cpu_ticks_from_stat(stat: &str) -> Option<u64> {
     Some(utime + stime)
 }
 
+/// Sprint-7 Item 3 — parse field 22 (`starttime`, clock ticks since
+/// boot) from a `/proc/<pid>/stat` line.
+///
+/// Same `rfind(')')` strategy as the cpu-ticks parser: comm (field
+/// 2) can carry parens / spaces, so we anchor on the LAST `)` and
+/// tokenize after. Field 22 maps to index 19 of the post-comm tail
+/// because `tail` starts at field 3.
+pub(crate) fn parse_starttime_from_stat(stat: &str) -> Option<u64> {
+    let rparen = stat.rfind(')')?;
+    let tail = &stat[rparen + 1..];
+    let fields: Vec<&str> = tail.split_ascii_whitespace().collect();
+    // Field 22 = index 19 in the post-comm tail (22 − 3 = 19).
+    fields.get(19).and_then(|s| s.parse::<u64>().ok())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -347,6 +419,67 @@ mod tests {
                     500 250 0 0 20 0 1 0 0 0 0 18446744073709551615 \
                     0 0 0 0 0 0 0 0 0 0 0 0 17 0 0 0 0 0 0 0 0 0 0 0 0";
         assert_eq!(parse_cpu_ticks_from_stat(stat), Some(750));
+    }
+
+    // ── Sprint-7 Item 3 — starttime parsing + os_start_time ──────
+
+    #[test]
+    fn starttime_parsed_from_stat_field_22() {
+        // proc(5) field 22 is `starttime` in clock ticks since
+        // boot. In the synthetic line below the field after the
+        // 19th post-comm token (= overall field 22) is `999`.
+        // Counting from the cpu_ticks_parsed_from_stat fixture:
+        //   field 14 = utime = 100
+        //   field 15 = stime = 40
+        //   field 22 = starttime = 999
+        let stat = "1234 (bash) S 1 1234 1234 34816 1234 4194304 123 0 0 0 \
+                    100 40 0 0 20 0 1 0 999 123456789 321 18446744073709551615 \
+                    0 0 0 0 0 0 0 0 0 0 0 0 17 0 0 0 0 0 0 0 0 0 0 0 0";
+        assert_eq!(parse_starttime_from_stat(stat), Some(999));
+    }
+
+    #[test]
+    fn starttime_parses_comm_with_spaces_and_parens() {
+        // Same parens-in-comm robustness check as the cpu-ticks
+        // parser: field 22 must come out right even when the
+        // process name carries `)` characters.
+        let stat = "42 (llama cli (worker)) R 1 42 42 0 -1 4194304 0 0 0 0 \
+                    500 250 0 0 20 0 1 0 31337 0 0 18446744073709551615 \
+                    0 0 0 0 0 0 0 0 0 0 0 0 17 0 0 0 0 0 0 0 0 0 0 0 0";
+        assert_eq!(parse_starttime_from_stat(stat), Some(31337));
+    }
+
+    #[test]
+    fn starttime_returns_none_on_truncated_stat() {
+        // A stat line missing fields shouldn't panic — return None
+        // and let the runtime fall back to first_observed_at.
+        assert_eq!(parse_starttime_from_stat("1 (bash) S"), None);
+        assert_eq!(parse_starttime_from_stat(""), None);
+        assert_eq!(parse_starttime_from_stat("1 (bash"), None);
+    }
+
+    #[test]
+    fn collector_populates_os_start_time_for_self() {
+        // End-to-end smoke: the collector reads the current process
+        // via /proc/<self>/stat and produces a non-None
+        // os_start_time. The timestamp should be in the past
+        // (kernel boot was before now). Tolerates restricted /proc
+        // environments by short-circuiting on collector::new
+        // failure.
+        let collector = match ProcessCollector::new() {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        let pid_path = PathBuf::from(format!("/proc/{}", std::process::id()));
+        let start = collector.read_os_start_time(&pid_path);
+        if let Some(t) = start {
+            assert!(
+                t <= Utc::now(),
+                "os_start_time should be in the past, got {t:?}"
+            );
+        }
+        // None is acceptable when btime parse fails — defensive
+        // path for alien /proc filesystems.
     }
 
     #[test]

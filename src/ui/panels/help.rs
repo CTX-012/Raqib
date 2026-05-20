@@ -60,6 +60,18 @@ pub fn render(f: &mut Frame, area: Rect, theme: &UiTheme) {
             body,
         ),
         Line::from(""),
+        // Sprint-7 Item 4 — surface the no-auth posture on the help
+        // overlay so the operator who just SSH'd in to a shared box
+        // can see why the dashboard is reachable from their laptop.
+        Line::from(Span::styled(
+            "Web UI: 0.0.0.0:7070 by default · NO AUTH · trusted LAN only",
+            Style::default().fg(theme.attention),
+        )),
+        Line::styled(
+            "  Restrict with --bind 127.0.0.1 on untrusted networks.",
+            body,
+        ),
+        Line::from(""),
         Line::styled("Press ? to close this help.", body),
     ];
 

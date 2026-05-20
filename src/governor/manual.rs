@@ -221,12 +221,22 @@ impl ManualKiller {
     }
 
     /// Return true if the process is on the governor allowlist.
-    /// Allowlisted processes require explicit override confirm before killing.
+    /// Allowlisted processes surface the inline `(ALLOWLISTED)` tag
+    /// on the kill_confirm card so the operator can see the
+    /// allowlist hit before confirming.
+    ///
+    /// Sprint-7 Item 1 — pre-Sprint-7 this delegated to
+    /// `policy.evaluate(name, None)`, which falls through to the
+    /// "non-AI processes: allow by default" branch and returned
+    /// `PolicyAction::Allow` for EVERY process. Every kill_confirm
+    /// card flashed `(ALLOWLISTED)` regardless of whether the
+    /// process was on the actual allowlist. The fix is to check
+    /// `whitelist_names` directly; the rest of `evaluate`'s logic
+    /// (blacklist + default_ai_action) belongs to the automated
+    /// governor path and doesn't apply to "is this process on the
+    /// allowlist?".
     pub fn is_allowlisted(name: &str, governor: &GovernorExecutor) -> bool {
-        matches!(
-            governor.policy().evaluate(name, None),
-            crate::governor::policy::PolicyAction::Allow
-        )
+        governor.policy().whitelist_names.contains(name)
     }
 
     /// Send SIGTERM to process (graceful shutdown).
@@ -415,5 +425,64 @@ mod tests {
             "r".to_string(),
         );
         assert_eq!(entry.source, KillSource::Manual);
+    }
+
+    // ── Sprint-7 Item 1 — is_allowlisted scope regression guards ──
+
+    #[test]
+    fn is_allowlisted_only_matches_whitelist_entries() {
+        // Pre-Sprint-7 this delegated to `policy.evaluate(name, None)`
+        // which returned Allow for any process not on the blacklist
+        // — every kill_confirm card flashed (ALLOWLISTED) even for
+        // ollama, claude, vllm, etc. Pin the fix: only names in the
+        // explicit whitelist count as allowlisted.
+        let executor = crate::governor::executor::GovernorExecutor::new(
+            crate::governor::policy::GovernorPolicy::safe_default(),
+        );
+        assert!(ManualKiller::is_allowlisted("sshd", &executor));
+        assert!(ManualKiller::is_allowlisted("systemd", &executor));
+        assert!(ManualKiller::is_allowlisted("init", &executor));
+        // The user-reported smoke bug: ollama IS NOT on the default
+        // whitelist but pre-fix `is_allowlisted` returned true,
+        // surfacing the (ALLOWLISTED) tag on the kill_confirm card.
+        assert!(!ManualKiller::is_allowlisted("ollama", &executor));
+        assert!(!ManualKiller::is_allowlisted("claude", &executor));
+        assert!(!ManualKiller::is_allowlisted("node", &executor));
+        assert!(!ManualKiller::is_allowlisted("python3", &executor));
+        assert!(!ManualKiller::is_allowlisted("vllm", &executor));
+    }
+
+    #[test]
+    fn is_allowlisted_respects_runtime_added_entries() {
+        // The whitelist is a runtime-mutable set (operators add
+        // to it via the `[policy].allowlist` TOML field). A name
+        // added after the fact must register as allowlisted, and
+        // a name not added must NOT.
+        let mut policy = crate::governor::policy::GovernorPolicy::safe_default();
+        policy.whitelist("my_critical_app");
+        let executor = crate::governor::executor::GovernorExecutor::new(policy);
+        assert!(ManualKiller::is_allowlisted("my_critical_app", &executor));
+        assert!(!ManualKiller::is_allowlisted("nginx", &executor));
+    }
+
+    #[test]
+    fn default_whitelist_protects_only_system_processes() {
+        // Sprint-7 Item 1 invariant: the safe-default whitelist
+        // covers SHELLS + INIT + KERNEL THREADS only. No AI
+        // workload, browser, IDE, or daemon should land here by
+        // default. If a future commit accidentally adds e.g.
+        // "ollama" to safe_default, this test breaks loudly.
+        let policy = crate::governor::policy::GovernorPolicy::safe_default();
+        let expected: std::collections::HashSet<String> = [
+            "sshd", "bash", "zsh", "sh", "systemd", "init", "kworker", "kthreadd",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        assert_eq!(
+            policy.whitelist_names, expected,
+            "safe_default whitelist drifted from system-only scope; \
+             non-system additions must justify a CLAUDE.md update"
+        );
     }
 }

@@ -21,6 +21,20 @@ pub struct ProcessSample {
     /// Raw value; per-tick CPU% is computed by the runtime against the previous
     /// sample. 0 for permission-denied reads.
     pub cpu_time_ticks: u64,
+    /// Sprint-7 Item 3 — true OS spawn timestamp, derived from
+    /// `/proc/<pid>/stat` field 22 (starttime, clock ticks since
+    /// boot) plus `/proc/stat` `btime` (epoch seconds at boot) and
+    /// `sysconf(_SC_CLK_TCK)`. `None` when /proc parse fails — the
+    /// runtime falls back to `first_observed_at` (the L11b "first
+    /// tick we saw this PID" stamp) so a process the platform layer
+    /// can't introspect still gets a start-time column.
+    ///
+    /// Resolves the Sprint-3 F2 known limitation: pre-Sprint-7 the
+    /// "start time" column for a process that was already running
+    /// when edge_monitor launched read "(1m ago)" — the
+    /// first-observed-at stamp — instead of the real spawn time
+    /// hours earlier.
+    pub os_start_time: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// Coarse category assigned to a process by the classifier.
@@ -171,6 +185,41 @@ fn model_name_from_path(path: &std::path::Path) -> Option<String> {
         .map(|s| s.to_string())
 }
 
+/// Sprint-7 Item 2 — humanize a classifier-extracted model name for
+/// display.
+///
+/// Ollama stores model blobs in `~/.ollama/models/blobs/` with
+/// content-hash filenames like
+/// `sha256-2af3b81862c6be03c769683af18efdadb2c33f60ff32ab6f83e42c043d6c7816`.
+/// The classifier surfaces those raw hashes via the `--model` arg
+/// extractor; surfacing them as-is in the UI produces an unreadable
+/// 71-character workload identifier. The user-reported Sprint-7
+/// smoke test showed an ollama process whose kill_confirm card title
+/// was the full hash, with no other context.
+///
+/// This helper truncates `sha256-XXXXXXXX...` to `sha256-XXXXXX…`
+/// (the first 6 hex chars are enough for the operator to
+/// disambiguate concurrent ollama runs without crowding the row).
+/// Non-hash model names pass through unchanged — a real model name
+/// like `qwen2.5-0.5b-instruct-q8_0` is already a useful identity
+/// and shouldn't be truncated.
+///
+/// A future row could resolve the hash through ollama's manifest
+/// directory (`~/.ollama/models/manifests/`) to surface the human
+/// name (`llama3`, `tinyllama`, etc.). v1.0 keeps the truncation
+/// approach — the manifest lookup adds filesystem dependencies and
+/// fragile path assumptions that the smoke-fix scope doesn't merit.
+pub fn humanize_model_name(model: &str) -> String {
+    const SHORT_HASH_CHARS: usize = 6;
+    if let Some(rest) = model.strip_prefix("sha256-")
+        && rest.len() > SHORT_HASH_CHARS
+        && rest.chars().all(|c| c.is_ascii_hexdigit())
+    {
+        return format!("sha256-{}…", &rest[..SHORT_HASH_CHARS]);
+    }
+    model.to_string()
+}
+
 impl WorkloadCategory {
     /// Display order per UX_CONTRACT.md §1 region 4
     /// ("LLM → Vision → ROS2 → Embeddings → Unknown"). Lower = first.
@@ -272,4 +321,52 @@ pub fn workload_category_from_model_path(path: &std::path::Path) -> WorkloadCate
     }
 
     WorkloadCategory::Unknown
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn humanize_truncates_ollama_sha256_blob_names() {
+        // The user-reported smoke bug: ollama surfaced a 71-char
+        // hash as the workload name. Pin the fix.
+        let raw =
+            "sha256-2af3b81862c6be03c769683af18efdadb2c33f60ff32ab6f83e42c043d6c7816";
+        assert_eq!(humanize_model_name(raw), "sha256-2af3b8…");
+    }
+
+    #[test]
+    fn humanize_passes_through_real_model_names() {
+        // Real model names from the classifier's `file_stem` extractor
+        // are already human-readable and must not be truncated.
+        for name in [
+            "phi3-mini-q8_0",
+            "qwen2.5-0.5b-instruct-q8_0",
+            "Meta-Llama-3.1-8B-Instruct-Q4_K_M",
+            "yolov8n",
+            "bge-large-en-v1.5",
+        ] {
+            assert_eq!(humanize_model_name(name), name);
+        }
+    }
+
+    #[test]
+    fn humanize_passes_through_non_hex_sha_lookalikes() {
+        // Defensive — only truncate when the post-`sha256-` body is
+        // ALL hex. A model named `sha256-something-not-a-hash` (rare
+        // but possible) is left alone so we don't accidentally
+        // mangle a real name that happens to share the prefix.
+        let oddball = "sha256-tinyllama";
+        assert_eq!(humanize_model_name(oddball), oddball);
+    }
+
+    #[test]
+    fn humanize_passes_through_short_sha_prefix() {
+        // Defensive — if the hash is shorter than our truncation
+        // budget, just pass through (no value added by truncating
+        // an already-short string).
+        let short = "sha256-2af";
+        assert_eq!(humanize_model_name(short), short);
+    }
 }

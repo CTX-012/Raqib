@@ -152,14 +152,14 @@ context.
 - vLLM and llama.cpp expose Prometheus and ARE scraped passively;
   tokens/sec for those flows through `LiveTelemetry` to the workloads
   panel within a tick or two of first sample.
-- **Workload start-time column reads "first observed", not OS spawn
-  time** (Sprint 3 F2). The lifecycle tracker stamps `first_observed_at`
-  the first tick it sees a PID; for a workload already running when
-  edge_monitor launched, that means "now-ish", not the real spawn
-  time from `/proc/<pid>/stat`. Switching to the stat-derived
-  start_boottime is a v1.1 task — F2 chose "consistent across all
-  rows" over "accurate for pre-existing processes" because the
-  workloads panel needs one source of truth.
+- **(RESOLVED in Sprint 7 Item 3.)** ~~Workload start-time column
+  reads "first observed", not OS spawn time~~ — the platform layer
+  now reads `/proc/<pid>/stat` field 22 (`starttime`) plus
+  `/proc/stat`'s `btime` to compute the real OS spawn timestamp, and
+  the lifecycle tracker prefers that value when populated. The
+  `first_observed_at` stamp survives as a fallback for processes
+  whose `/proc` read fails (alien `/proc`, fakeproc, permission
+  denied).
 - **Grafana integration removed** (Sprint 5). The `g` keybinding is
   unbound and the v2 web companion (separate repo) handles the
   dashboard story. See "Historical note: Grafana integration removed
@@ -167,6 +167,14 @@ context.
 - **Windows binary on indefinite halt.** The sibling Windows repo (W1–
   W49 plan) is on hold pending operator-team scoping. Linux is the
   reference implementation; Windows parity catches up post-v1.0.
+- **Web UI binds `0.0.0.0:7070` by default with NO AUTH.** The
+  dashboard is reachable from any host on the same LAN; the v1.0
+  design assumes a trusted-LAN posture (workstation / lab / robot
+  dev fleet). On untrusted networks, pass `--bind 127.0.0.1` to
+  restrict to localhost. A future release will add auth so the
+  wider bind is safe by default. Documented in README "Web UI
+  security" and surfaced as a startup `tracing::warn!` when the
+  bind isn't a loopback address.
 
 ## When the user pushes for shortcuts
 

@@ -419,9 +419,15 @@ pub fn render(f: &mut Frame, area: Rect, state: &RuntimeState, app: &App, theme:
             };
             // F3 — model column, fixed-width and truncated. Skipped
             // entirely when no row in the panel surfaced a model name.
+            // Sprint-7 Item 2 — humanize ollama-style sha256 blob
+            // names so the column doesn't render a 71-char hash.
             let model_label = if show_model {
-                let m = row.model.as_deref().unwrap_or("");
-                format!(" {:<width$}", truncate(m, MODEL_COL_WIDTH), width = MODEL_COL_WIDTH)
+                let m = row
+                    .model
+                    .as_deref()
+                    .map(crate::model::humanize_model_name)
+                    .unwrap_or_default();
+                format!(" {:<width$}", truncate(&m, MODEL_COL_WIDTH), width = MODEL_COL_WIDTH)
             } else {
                 String::new()
             };

@@ -294,7 +294,13 @@ impl WireWorkload {
         Self {
             pid: p.pid,
             name: p.name.clone(),
-            model_name: p.model_name.clone(),
+            // Sprint-7 Item 2 — humanize ollama's sha256-XXX blob
+            // names before serializing; the wire mirror of the
+            // TUI's row-formatting decision.
+            model_name: p
+                .model_name
+                .as_deref()
+                .map(crate::model::humanize_model_name),
             category: category_to_str(p.category).to_string(),
             workload_category: workload_category_to_str(p.workload_category).to_string(),
             cpu_pct: p.cpu_pct,
@@ -345,7 +351,11 @@ impl WireRunRecord {
         Self {
             pid: summary.pid,
             name: summary.name.clone(),
-            model_name: summary.model_name.clone(),
+            // Sprint-7 Item 2 — same humanization as the live row.
+            model_name: summary
+                .model_name
+                .as_deref()
+                .map(crate::model::humanize_model_name),
             spawn_time: summary.spawn_time,
             exit_time: summary.exit_time,
             uptime_secs: summary.uptime_secs.max(0) as u64,

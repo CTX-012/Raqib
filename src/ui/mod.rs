@@ -396,10 +396,19 @@ fn build_kill_confirm_card(
     let state = runtime.state();
     let proc = state.annotated.iter().find(|p| p.pid == pid)?;
 
-    let display_name = proc
-        .model_name
-        .clone()
-        .unwrap_or_else(|| proc.name.clone());
+    // Sprint-7 Item 2 — kill_confirm card title preference:
+    //   * Real model name (e.g. `qwen2.5-0.5b-instruct-q8_0`) is
+    //     more identifying than the process name (`python3`) and
+    //     wins outright.
+    //   * Ollama's content-hash blob names (`sha256-XXX…`) are
+    //     unreadable as a workload identifier — fall back to the
+    //     process name in that case so the card title reads
+    //     `ollama` not a 71-character hex string.
+    //   * No model name → process name.
+    let display_name = match proc.model_name.as_deref() {
+        Some(m) if !m.starts_with("sha256-") => m.to_string(),
+        _ => proc.name.clone(),
+    };
     let category = format!("{:?}", proc.workload_category);
     let status = format!("{:?}", workloads::status_for(proc, state, app));
     let runtime_secs = proc.first_observed_at.elapsed().as_secs();

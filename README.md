@@ -44,7 +44,8 @@ cargo build --release
 # Headless smoke test — two ticks, logs to stderr
 ./target/release/edge_monitor --no-ui --ticks 2
 
-# Interactive TUI + web dashboard on http://localhost:7070
+# Interactive TUI + web dashboard on http://<host>:7070
+# (defaults to 0.0.0.0 bind — see "Web UI security" below)
 ./target/release/edge_monitor
 
 # Disable the web companion (TUI-only)
@@ -52,6 +53,9 @@ cargo build --release
 
 # Override the web port
 ./target/release/edge_monitor --port 8080
+
+# Restrict web to localhost-only (recommended on untrusted networks)
+./target/release/edge_monitor --bind 127.0.0.1
 
 # Point at a custom config
 ./target/release/edge_monitor --config ./edge_monitor.toml
@@ -61,6 +65,29 @@ The web UI is **read-only** for v1.0 — kill confirmation, theme
 selection, and navigation stay TUI-only. The TUI is the
 authoritative control surface; the web dashboard is for at-a-glance
 monitoring from a browser tab.
+
+### Web UI security
+
+**v1.0 has no authentication on the web companion.** The default
+bind address is `0.0.0.0:7070`, which means the dashboard is
+reachable from any host on the same LAN. The design assumes a
+**trusted LAN** — workstation, lab network, robot dev fleet on a
+private subnet. Do not expose the binary directly to the
+internet.
+
+If the host runs on an untrusted network (shared coworking, hotel
+Wi-Fi, cloud VM with a public IP), restrict the listener to
+localhost only:
+
+```bash
+edge_monitor --bind 127.0.0.1
+```
+
+A future release will add auth (token / mTLS) so the wider bind
+is safe by default; until then, treat the open listener like any
+other unauthenticated dashboard (Grafana on `:3000`, Prometheus
+on `:9090`, etc.) and put a reverse proxy in front of it if you
+need network access with auth.
 
 See [`edge_monitor.toml.example`](edge_monitor.toml.example) for a
 commented config file.
@@ -77,7 +104,8 @@ commented config file.
 | `--log-stderr`        | Force tracing to stderr while running the TUI (default: write to log file) |
 | `--theme <NAME>`      | `dark` (default), `light`, or `high-contrast` (UX_CONTRACT.md §13) |
 | `--no-web`            | Disable the embedded web companion                           |
-| `--port <N>`          | Web companion listen port (default `7070`, localhost-only)   |
+| `--port <N>`          | Web companion listen port (default `7070`)                   |
+| `--bind <IP>`         | Web companion listen address (default `0.0.0.0`, LAN-accessible — see "Web UI security") |
 
 Logs default to `~/.cache/edge_monitor/edge_monitor.log` when running
 the dashboard so tracing output cannot bleed into the alternate-screen

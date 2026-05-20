@@ -3,6 +3,59 @@
 Issues / improvements discovered during in-flight rows that don't fit the
 current row's scope. Each entry includes the row that surfaced it.
 
+## Open Sprint-7 follow-ups
+
+### Item 5 — new ollama spawn missing from AI Workloads panel
+
+**Surfaced by:** Sprint-7 user smoke test. Old ollama processes
+visible on the dashboard; a newly-spawned ollama runner subprocess
+(triggered by `ollama run <model>` from another terminal) did
+not appear in the AI Workloads panel.
+
+**Investigation in Sprint-7 ruled out:**
+
+- *Name-match miss.* `classify_by_name` substring-matches "ollama"
+  with no word-boundary requirement for keywords ≥4 chars, so
+  child comm strings like `ollama_llama_se` / `ollama_runner`
+  should still hit. The user's smoke also showed pre-existing
+  ollama daemons classified correctly — the same code path.
+- *Cap / filter.* The Workloads panel uses `Min(N)` constraints
+  and `state.ai_processes()` with no row cap (top_processes does
+  cap at 5 — different panel). No visibility filter would drop
+  the new row.
+- *Selection state.* Pressing `j` after the spawn would have
+  scrolled to it; the user reports the row wasn't there at all,
+  not "needed to scroll."
+
+**Hypotheses not yet tested (need live reproduction):**
+
+1. **/proc race on just-spawned PID.** The platform layer drops
+   a process when `/proc/<pid>/cmdline` or `/proc/<pid>/status`
+   read fails. For a PID created microseconds before the scrape,
+   one of those files might be empty / unreadable, dropping the
+   sample for that tick. The next tick should pick it up — but
+   if the user only checked once after the spawn, they'd miss it
+   for ~1s. Reproduce by counting "skipped process" debug logs
+   immediately after `ollama run`.
+2. **`first_observed_at` set on a previous run.** Lifecycle
+   tracker may retain an exited-PID entry briefly; if PID reuse
+   happens within the retention window, the new process gets
+   tagged with the old `first_observed_at`. Cross-check via
+   `LifecycleTracker::clean_exited` timing.
+3. **Workload category misclassification.** The new spawn might
+   hit a different classifier path (model_extract for `--model
+   /path/to/sha256-XXX`) than the daemon (NAME_KEYWORDS "ollama").
+   If model_extract puts it in `WorkloadCategory::Unknown`
+   instead of LLM, the row IS in `ai_processes()` but groups at
+   the bottom of the workloads panel (below LLM, Vision, ROS2,
+   Embeddings) — easy to miss if the panel scrolled or the
+   Unknown section header was off-screen.
+
+**Sprint-7 decision:** defer to next sprint. The fix needs live
+reproduction with `RUST_LOG=debug` to confirm which hypothesis
+holds. Filing here so the next sprint has the ruled-out work
+and the remaining hypotheses ready.
+
 ## v1.1 (post-v1.0)
 
 ### telemetry: query Triton `/v2/models` to refine WorkloadCategory for hosted models

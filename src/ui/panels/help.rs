@@ -39,7 +39,6 @@ pub fn render(f: &mut Frame, area: Rect, theme: &UiTheme) {
         Line::styled("  h                   show run history for selected model", body),
         Line::styled("  a                   acknowledge all visible alerts", body),
         Line::styled("  t                   cycle Top processes sort (RAM → CPU → VRAM)", body),
-        Line::styled("  g                   open Grafana for selected workload", body),
         Line::styled("  q / Ctrl-C          quit", body),
         Line::from(""),
         Line::from(Span::styled(

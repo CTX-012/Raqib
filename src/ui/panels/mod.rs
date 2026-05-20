@@ -1,6 +1,26 @@
 //! Render the full TUI frame. Panels are kept private because the layout
 //! is shared state — callers shouldn't be able to render a panel into the
 //! wrong region.
+//!
+//! The frame is structured as:
+//!
+//! ```text
+//! [alerts region — height = active alerts count, 0 when none]
+//! [body — laid out by `render_default(.., tier)`]
+//! [floating card overlay — kill_confirm > live_detail > post_mortem]
+//! ```
+//!
+//! `render_default` is tier-aware (L22 §12): TooSmall short-circuits
+//! to a centred TERMINAL_TOO_SMALL message; Narrow drops the Top
+//! processes panel; Standard renders the full §1 region map; Wide
+//! splits the workloads panel into two columns at 4+ workloads. Every
+//! panel takes `&UiTheme` (L21 §14 — colour is theme-driven; no
+//! hardcoded `Color::*` literals in the render path).
+//!
+//! CAR-17 replaced the previous top-of-screen armed-kill banner with a
+//! centred `kill_confirm` card that takes priority in the floating-
+//! card z-slot so a single Enter on the focused workload routes to
+//! confirm, not to live_detail.
 
 mod activity;
 pub mod alerts;

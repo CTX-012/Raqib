@@ -33,10 +33,6 @@ async-trait = "0.1"
 regex = "1"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "http2"] }
 sha2 = "0.10"
-# `g` keybinding cross-platform browser-open ([UX-3]). ~50 KB stripped;
-# binary was already over the 5 MB budget per CHANGELOG, so the marginal
-# cost is acceptable.
-webbrowser = { version = "1", default-features = false }
 
 # UX_CONTRACT.md v0.3 source of truth — copy strings, alert IDs, thresholds,
 # action enum, themes, sizing. Sibling crate, owned by Agent A. Do not edit
@@ -64,8 +60,9 @@ extended-description = """\
 edge_monitor is a model-aware resource monitor and governor for edge AI
 workloads on Linux. It sees which model each Python process is running
 and kills the offender before the kernel OOM-killer takes the whole
-robot stack down. Ships with a safe dry-run default, allowlist-first
-policy, and a 3-kills-per-60s rate limit."""
+robot stack down. Ships with an allowlist-first policy, the
+CAR-17 kill_confirm card as the only manual-kill path, and a
+3-kills-per-60s rate limit."""
 depends = "$auto"
 section = "utils"
 priority = "optional"

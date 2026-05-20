@@ -15,7 +15,12 @@ pub mod analysis;
 pub mod classifier;
 pub mod compare;
 pub mod config;
-pub mod dashboard_preflight;
+// Sprint 5 — `pub mod dashboard_preflight` removed. The Grafana
+// integration that owned the preflight TCP probe was hard-deleted
+// from v1.0; the v2 web companion (separate repo) handles the
+// dashboard story. The `ux_contract::Action::OpenGrafana` enum
+// variant and `ux_contract::status::GRAFANA_UNREACHABLE` template
+// remain in the contract as orphans pending Agent A cleanup.
 pub mod exec_wrapper;
 pub mod exit_classify;
 pub mod fingerprint;

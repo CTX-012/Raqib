@@ -335,7 +335,17 @@ The complete allowed-difference list. Anything not here is identical across plat
 | ROS2 detection | `ldd` for librcl.so + env scan | `tasklist /m librcl.dll` + env scan |
 | Symbol fallback | UTF-8 default | Detect ConHost, fall back to ASCII if needed |
 
-## §10 — Grafana integration (v1.0)
+## §10 — Grafana integration (v1.0) — REMOVED in Sprint 5
+
+> **STATUS (Sprint 5):** This clause is preserved as historical
+> context only. The Grafana integration was hard-deleted from v1.0;
+> the v2 web companion (separate repo) handles the dashboard story.
+> The `g` keybinding is unbound, the `[dashboard]` config section is
+> no longer parsed, and the WP5 TCP preflight probe / webbrowser
+> dependency are gone. The contract symbols
+> (`Action::OpenGrafana`, `status::GRAFANA_UNREACHABLE`,
+> `status::DASHBOARD_OPENED`, `status::DASHBOARD_FAILED`) remain in
+> `ux_contract` as orphans pending an Agent A cleanup amendment.
 
 `g` keypress on a focused workload:
 

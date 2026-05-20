@@ -47,8 +47,12 @@ pub fn translate(key: KeyEvent, app: &App) -> Option<Action> {
         // status footer) when no alerts are active; the dispatch
         // handler in `apply_action` decides.
         KeyCode::Char('a') => Some(Action::AcknowledgeAlerts),
-        // §6 — `g` opens Grafana for the focused workload.
-        KeyCode::Char('g') => Some(Action::OpenGrafana),
+        // Sprint 5 — `g` (open Grafana) is unbound now that the
+        // dashboard integration was hard-deleted from v1.0. The
+        // `ux_contract::Action::OpenGrafana` variant still exists
+        // in the contract and has a no-op arm in `apply_action`
+        // to keep the match exhaustive; a future contract
+        // amendment can drop the variant entirely.
         // §6 / §1 region 5 — `t` cycles the Top processes panel
         // sort (RAM → CPU → VRAM). Dispatch handler is
         // `App::cycle_top_sort`; help-overlay text is
@@ -119,7 +123,9 @@ mod tests {
     }
 
     /// L2b — `d`, `v`, Tab, Shift-Tab are not in §6 and are unbound.
-    /// L2c — `/` (filter) is not in §6 either. All five must return
+    /// L2c — `/` (filter) is not in §6 either.
+    /// Sprint 5 — `g` (open Grafana) is also unbound now that the
+    /// dashboard integration was hard-deleted. All six must return
     /// None so the dispatch loop skips silently.
     #[test]
     fn keys_outside_section_six_are_unbound() {
@@ -130,23 +136,15 @@ mod tests {
             KeyCode::Tab,
             KeyCode::BackTab,
             KeyCode::Char('/'),
+            KeyCode::Char('g'),
         ] {
             assert_eq!(
                 translate(key(code), &app),
                 None,
-                "{:?} must be unbound — not in v0.3 §6 keymap",
+                "{:?} must be unbound — not in v0.3 §6 keymap (or removed in Sprint 5)",
                 code
             );
         }
-    }
-
-    #[test]
-    fn g_emits_open_grafana() {
-        let app = App::new();
-        assert_eq!(
-            translate(key(KeyCode::Char('g')), &app),
-            Some(Action::OpenGrafana),
-        );
     }
 
     /// L14 — `t` cycles the Top processes panel sort. The input

@@ -1,12 +1,19 @@
 //! Module 7 — ratatui TUI.
 //!
 //! Three layers:
-//! * `app`     — pure state machine: panel focus, filter, help overlay.
-//! * `input`   — translates `crossterm` key events into `app::Action`s.
-//! * `panels/` — one render function per panel; pure (state in, frame out).
 //!
-//! `run` owns the terminal lifecycle. It returns ownership of the `Runtime`
-//! so callers can shut it down cleanly after the TUI exits.
+//! * `app` — pure state machine: workload selection, help overlay,
+//!   alerts, kill_confirm slot, postmortem slot, history. L2c removed
+//!   filter mode; L2b removed multi-panel focus (Workloads is the
+//!   only focusable element).
+//! * `input` — translates `crossterm` key events into
+//!   `ux_contract::Action`s. `KeyEventKind::Press` only;
+//!   `Repeat`/`Release` are filtered (Row 1 INV-5).
+//! * `panels/` — one render function per panel; pure (state in, frame
+//!   out). Themed end-to-end (L21). Tier-aware (L22 §12).
+//!
+//! `run` owns the terminal lifecycle. It returns ownership of the
+//! `Runtime` so callers can shut it down cleanly after the TUI exits.
 
 pub mod alerts;
 pub mod app;
@@ -259,7 +266,14 @@ fn apply_action(
                 app.open_history(key, records);
             }
         }
-        Action::OpenGrafana => handle_open_dashboard(runtime, app),
+        Action::OpenGrafana => {
+            // Sprint 5 — Grafana integration removed from v1.0. The
+            // dispatch arm survives because `ux_contract::Action` is
+            // exhaustive and the variant is still defined in the
+            // contract crate; the `g` keybinding is unbound in
+            // `input.rs` so this arm is unreachable in practice. A
+            // future contract amendment can drop the variant.
+        }
         Action::OpenDetail => {
             // CAR-17 Enter-priority cascade. The kill_confirm card has
             // the highest priority — its PID was pinned at card-open
@@ -397,75 +411,6 @@ pub(crate) fn should_dispatch_key(kind: KeyEventKind) -> bool {
     matches!(kind, KeyEventKind::Press)
 }
 
-/// `g` keybinding handler ([UX-3]) per UI Contract v2.
-///
-/// URL source priority (highest first):
-///   1. `[dashboard].url_template` from config, if set and non-empty
-///   2. `EDGE_MONITOR_GRAFANA_URL` environment variable, if set
-///   3. Hardcoded fallback `http://localhost:3000/d/edge_monitor`
-///
-/// Spawns `xdg-open <url>` directly rather than going through the
-/// `webbrowser` crate. The crate fans out across an opaque list of
-/// helpers (`xdg-open` / `wslview` / `gio open` / `gnome-open` /
-/// `kde-open`), which on a stripped distro silently picks the first
-/// that exists — and reports a generic "no successful command"
-/// error otherwise. `xdg-open` directly is the standard Linux
-/// contract, fails fast with a recognisable spawn error, and lets
-/// the operator install the missing piece in one step.
-///
-/// Surfaces a status-footer message for both outcomes so the
-/// operator gets inline confirmation the keypress was received,
-/// even when the spawn fails (the URL is shown so it can be
-/// copy-pasted into another browser). Refuses with a status hint
-/// when no row is focused.
-fn handle_open_dashboard(runtime: &Runtime, app: &mut App) {
-    let Some(pid) = app.selected_pid(runtime.state()) else {
-        let msg = "No workload focused — select a row first";
-        tracing::info!("{msg}");
-        app.set_status(msg);
-        return;
-    };
-    let template = resolve_dashboard_template(runtime.config());
-    let state = runtime.state();
-    let model = state
-        .annotated
-        .iter()
-        .find(|p| p.pid == pid)
-        .and_then(|p| p.model_name.clone());
-    let url = compute_dashboard_url(&template, model.as_deref(), pid);
-    // WP5 — TCP preflight gates the spawn. `xdg-open` against a dead
-    // Grafana surfaces a generic "couldn't open this page" via the
-    // browser, indistinguishable from "the keybinding is broken". The
-    // probe converts that into the contract-templated unreachable
-    // message instead. No `--no-preflight` escape hatch in v1.0; if the
-    // probe is wrong the operator can run `xdg-open <url>` themselves.
-    if let Err(e) = crate::dashboard_preflight::probe(&url) {
-        tracing::warn!(%url, error = %e, "Grafana preflight failed — skipping xdg-open");
-        app.set_status(format_grafana_unreachable(&url));
-        return;
-    }
-    match std::process::Command::new("xdg-open")
-        .arg(&url)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-    {
-        Ok(_) => {
-            tracing::info!(%url, "Opened {url}");
-            app.set_status(format!("Opening {url}"));
-        }
-        Err(e) => {
-            // Tracing keeps the underlying spawn error for devs (the
-            // most common cause on WSL is xdg-open / wslview not
-            // installed; ErrorKind::NotFound surfaces as "No such file
-            // or directory"). The status footer matches UI_CONTRACT
-            // verbatim — no `os error 2`-style jargon for the user.
-            tracing::warn!(%url, error = %e, "Could not open browser — URL: {url}");
-            app.set_status(format!("Could not open browser — URL: {url}"));
-        }
-    }
-}
-
 /// L16 / UX_CONTRACT.md §5 — `Enter`-on-focused-row dispatch.
 ///
 /// Routes to one of two cards based on the focused workload's
@@ -557,45 +502,14 @@ fn handle_open_detail(
     }
 }
 
-/// Resolve the dashboard URL template per UI Contract v2 priority
-/// order. Always returns *some* template — empty config + empty env
-/// fall through to the hardcoded `localhost:3000/d/edge_monitor`
-/// fallback. Pure aside from the env var read; exposed (`pub(crate)`)
-/// so integration tests can pin the priority order without spinning
-/// a browser.
-pub fn resolve_dashboard_template(config: &crate::config::Config) -> String {
-    if !config.dashboard.url_template.is_empty() {
-        return config.dashboard.url_template.clone();
-    }
-    if let Ok(env) = std::env::var("EDGE_MONITOR_GRAFANA_URL")
-        && !env.is_empty()
-    {
-        return env;
-    }
-    "http://localhost:3000/d/edge_monitor".to_string()
-}
-
-/// Pure substitution: applies `{model}` and `{pid}` against the
-/// template. `None` for `model` substitutes empty (per UI Contract —
-/// not a dash, not a placeholder; templates that include `{model}`
-/// can target a fallback dashboard with a literal `var-model=` query
-/// param when the value is empty). Exposed so the integration tests
-/// can pin the substitution rules without spinning a browser.
-pub fn compute_dashboard_url(template: &str, model: Option<&str>, pid: u32) -> String {
-    template
-        .replace("{model}", model.unwrap_or(""))
-        .replace("{pid}", &pid.to_string())
-}
-
-/// Substitutes `{url}` into the
-/// `ux_contract::status::GRAFANA_UNREACHABLE` template (WP5). Kept as a
-/// pure function so the substitution rule can be pinned by tests without
-/// running the preflight probe or the spawn. The template is owned by
-/// the contract crate — display strings stay byte-for-byte identical to
-/// the Windows side because both consume the same const.
-pub fn format_grafana_unreachable(url: &str) -> String {
-    ux_contract::status::GRAFANA_UNREACHABLE.replace("{url}", url)
-}
+// Sprint 5 — `resolve_dashboard_template`, `compute_dashboard_url`,
+// and `format_grafana_unreachable` removed alongside the Grafana
+// integration. The `EDGE_MONITOR_GRAFANA_URL` env var is no longer
+// read; the `[dashboard]` config section is no longer parsed (see
+// `Config` in `src/config.rs`). The contract templates
+// (`status::GRAFANA_UNREACHABLE`, `status::DASHBOARD_OPENED`,
+// `status::DASHBOARD_FAILED`) remain in `ux_contract` as orphans
+// pending Agent A cleanup.
 
 /// L22 / UX_CONTRACT.md §12 — terminal size class. The renderer picks
 /// a layout variant by tier so the same panel module can produce a

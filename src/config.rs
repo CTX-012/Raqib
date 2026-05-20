@@ -32,7 +32,11 @@ pub struct Config {
     pub storage: StorageConfig,
     pub regression: RegressionConfig,
     pub telemetry: TelemetryConfig,
-    pub dashboard: DashboardConfig,
+    // Sprint 5 — `pub dashboard: DashboardConfig` removed alongside
+    // the Grafana integration hard-delete. `[dashboard]` sections in
+    // existing user TOMLs are silently ignored by serde because
+    // `Config` is `#[serde(default)]` and doesn't deny unknown fields,
+    // so old configs continue to load without warnings.
     pub ui: UiConfig,
 }
 
@@ -58,21 +62,10 @@ impl Default for UiConfig {
     }
 }
 
-/// [UX-3] — what the `g` keybinding opens in the user's default
-/// browser. Empty `url_template` disables the keybinding (the TUI
-/// prints a status hint pointing at this section). Substitution
-/// tokens supported:
-///
-/// * `{model}` — focused workload's `model_name`, empty if unknown
-/// * `{pid}`   — focused workload's PID as a decimal integer
-///
-/// Static URLs (no tokens) are accepted — some operators just want a
-/// fixed dashboard link for the box.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(default)]
-pub struct DashboardConfig {
-    pub url_template: String,
-}
+// Sprint 5 — `DashboardConfig` struct removed alongside the Grafana
+// hard-delete. The `[UX-3]` `g` keybinding it controlled is no longer
+// wired (see `src/ui/input.rs`); the field was dropped from `Config`
+// just above this comment.
 
 /// Toggles for the optional [`telemetry::Dispatcher`] samplers
 /// (latest.md cross-cutting requirements + Tier 1.2). All on by

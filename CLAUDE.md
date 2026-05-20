@@ -115,6 +115,21 @@ now. No more dry-run. If you see references to dry-run in commits or
 comments older than `d8d7897`, treat them as historical context, not
 current behavior.
 
+## Historical note: Grafana integration removed in Sprint 5
+
+The `g` keybinding, `[dashboard]` config section, WP5 TCP preflight
+probe (`src/dashboard_preflight.rs`), and the `webbrowser` Cargo
+dependency were all hard-deleted from v1.0 in Sprint 5. Rationale: the
+integration was broken in practice and the v2 web companion (separate
+repo) handles the dashboard story. The contract symbols
+(`ux_contract::Action::OpenGrafana`, `ux_contract::status::
+GRAFANA_UNREACHABLE`, `DASHBOARD_OPENED`, `DASHBOARD_FAILED`) remain
+in the contract crate as orphans pending Agent A cleanup — the
+dispatch arm for `Action::OpenGrafana` is a documented no-op in
+`src/ui/mod.rs`. If you see code or commits referencing `handle_open
+_dashboard` or `dashboard_preflight::probe`, treat them as historical
+context.
+
 ## Environment caveats
 
 - Primary dev env: WSL Ubuntu. Limited — no real GPU, no thermal, fake
@@ -137,6 +152,21 @@ current behavior.
 - vLLM and llama.cpp expose Prometheus and ARE scraped passively;
   tokens/sec for those flows through `LiveTelemetry` to the workloads
   panel within a tick or two of first sample.
+- **Workload start-time column reads "first observed", not OS spawn
+  time** (Sprint 3 F2). The lifecycle tracker stamps `first_observed_at`
+  the first tick it sees a PID; for a workload already running when
+  edge_monitor launched, that means "now-ish", not the real spawn
+  time from `/proc/<pid>/stat`. Switching to the stat-derived
+  start_boottime is a v1.1 task — F2 chose "consistent across all
+  rows" over "accurate for pre-existing processes" because the
+  workloads panel needs one source of truth.
+- **Grafana integration removed** (Sprint 5). The `g` keybinding is
+  unbound and the v2 web companion (separate repo) handles the
+  dashboard story. See "Historical note: Grafana integration removed
+  in Sprint 5" above for the contract-orphan situation.
+- **Windows binary on indefinite halt.** The sibling Windows repo (W1–
+  W49 plan) is on hold pending operator-team scoping. Linux is the
+  reference implementation; Windows parity catches up post-v1.0.
 
 ## When the user pushes for shortcuts
 

@@ -14,11 +14,13 @@ use crate::ui::symbols::SymbolSet;
 pub(crate) const STATUS_TTL: Duration = Duration::from_secs(3);
 
 /// L2a / UX_CONTRACT.md §6 — input actions are owned by `ux_contract`.
-/// The 11 contract variants (Quit, ToggleHelp, SelectUp, SelectDown,
-/// KillOrConfirm, OpenDetail, OpenGrafana, ToggleHistory,
-/// AcknowledgeAlerts, CycleTopSort, EscapeCascade) are the locked
-/// surface. New keymaps go through Agent A via a contract amendment,
-/// not through this re-export.
+/// The contract variants (Quit, ToggleHelp, SelectUp, SelectDown,
+/// KillOrConfirm, OpenDetail, ToggleHistory, AcknowledgeAlerts,
+/// CycleTopSort, EscapeCascade) are the active surface. `OpenGrafana`
+/// also still exists in the contract enum but is unbound from any
+/// keypress and dispatches to a no-op arm since Sprint 5 hard-deleted
+/// the Grafana integration from v1.0. New keymaps go through Agent A
+/// via a contract amendment, not through this re-export.
 pub use ux_contract::Action;
 
 // L2a introduced a transitional `LegacyAction` enum and a `Dispatch`

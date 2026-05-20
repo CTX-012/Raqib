@@ -8,6 +8,28 @@ once `v1.0.0` is tagged. Until then, minor versions may include breaking changes
 
 ## [Unreleased]
 
+### Removed
+
+- **Grafana integration hard-deleted in v1.0** (Sprint 5). The
+  whole dashboard stack — `[dashboard]` config section,
+  `DashboardConfig` struct, `g` keybinding (`Action::OpenGrafana`),
+  `handle_open_dashboard` / `resolve_dashboard_template` /
+  `compute_dashboard_url` / `format_grafana_unreachable` helpers,
+  `src/dashboard_preflight.rs` (WP5 TCP probe),
+  `tests/dashboard_keybinding_e2e.rs`, the `webbrowser` Cargo
+  dependency, README + help-overlay mentions — is gone. The
+  contract symbols `ux_contract::Action::OpenGrafana`,
+  `ux_contract::status::GRAFANA_UNREACHABLE`,
+  `ux_contract::status::DASHBOARD_OPENED`, and
+  `ux_contract::status::DASHBOARD_FAILED` remain in the contract
+  crate as orphans pending Agent A cleanup (a separate CAR). The
+  `g` keybinding is now unbound. Existing user TOMLs with a
+  `[dashboard]` section continue to load — serde ignores unknown
+  sections under `Config`'s `#[serde(default)]`. Rationale: the
+  integration was broken in practice, Grafana is a heavyweight
+  dependency for the operator, and the v2 web companion (separate
+  repo) handles the dashboard story.
+
 ### Added
 - **Armed-kill banner** ([UX-1], `src/ui/panels/armed_banner.rs`).
   When a manual kill is armed (1st `k` press), a red full-width

@@ -314,9 +314,10 @@ pub struct Runtime {
     /// exit so we know which file to fingerprint.
     pid_to_model_path: HashMap<u32, PathBuf>,
     /// Tier 3.5 — PIDs the governor has signalled this run. Populated
-    /// by `record_governor_audit` when SIGTERM/SIGKILL fires (or
-    /// would-fire in dry-run); consulted on exit to attribute the
-    /// kill to `ExitReason::GovernorKill`.
+    /// by `record_governor_audit` when SIGTERM/SIGKILL fires;
+    /// consulted on exit to attribute the kill to
+    /// `ExitReason::GovernorKill`. (Pre-CAR-17 this also populated
+    /// on dry-run "would-fire" entries — dry-run is gone now.)
     governor_killed_pids: HashMap<u32, String>,
     /// Previous tick's cumulative CPU ticks, per PID, plus the wall-clock
     /// timestamp that reading was taken at. Used to compute cpu_pct as

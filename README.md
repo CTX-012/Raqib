@@ -32,7 +32,7 @@ governor + edge-first**. That's the gap `edge_monitor` fills.
 # Build release binary (~2.6 MB stripped)
 cargo build --release
 
-# Headless smoke test — two ticks, dry-run default, logs to stderr
+# Headless smoke test — two ticks, logs to stderr
 ./target/release/edge_monitor --no-ui --ticks 2
 
 # Interactive TUI
@@ -45,36 +45,11 @@ cargo build --release
 See [`edge_monitor.toml.example`](edge_monitor.toml.example) for a
 commented config file.
 
-### Opening the dashboard from the TUI (`g` keybinding)
-
-Pressing `g` on a focused AI workload row asks the OS to open the
-configured dashboard URL (`[dashboard].url_template` in the config,
-or the `EDGE_MONITOR_GRAFANA_URL` env var, or a `localhost:3000`
-fallback) in your default browser. On Linux this shells out to
-`xdg-open`; on a vanilla WSL install neither `xdg-open` nor a browser
-association exists by default, so `g` will surface
-`Could not open browser — URL: <url>` in the status footer. Two
-fixes:
-
-```bash
-# Option A — install wslu, which provides wslview as an xdg-open
-# shim that hands the URL to your Windows-side default browser.
-sudo apt install wslu
-sudo update-alternatives --install /usr/bin/xdg-open xdg-open \
-  "$(command -v wslview)" 100
-
-# Option B — set $BROWSER to any opener you have on PATH; xdg-open
-# (when present) honours it, and you can copy the URL from the
-# status footer in the meantime.
-export BROWSER='/mnt/c/Windows/explorer.exe'
-```
-
 ### CLI flags
 
 | Flag                  | Effect                                                       |
 | --------------------- | ------------------------------------------------------------ |
 | `--config <PATH>`     | Load TOML config (default: `./edge_monitor.toml` if present) |
-| `--dry-run`           | Force dry-run regardless of config — no kill signals sent    |
 | `--no-ui`             | Run headless; log to stderr only                             |
 | `--ticks <N>`         | Exit after N ticks (`0` = run until killed). Useful in CI    |
 | `--log-level <LEVEL>` | `trace` / `debug` / `info` / `warn` / `error`                |
@@ -154,8 +129,8 @@ samples. The tick loop uses `event::poll` / `recv_timeout` — never
   when no NVIDIA GPU)
 - Classifier: cmdline / env / script-sniff model identification;
   Inference / Training / ModelDownload / Framework categories
-- Governor: allowlist, dry-run default, SIGTERM→grace→SIGKILL, audit
-  log, rate limit
+- Governor: allowlist, kill_confirm card (CAR-17), SIGTERM→grace
+  →SIGKILL, audit log, rate limit
 - Manual kill by serial ID (allowlist-respecting)
 - Process run summary on termination
 - ratatui TUI

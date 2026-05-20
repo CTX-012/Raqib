@@ -51,6 +51,7 @@ pub fn run(
     mut runtime: Runtime,
     shutdown: Arc<AtomicBool>,
     theme: UiTheme,
+    web_tx: Option<tokio::sync::watch::Sender<crate::web::WireSnapshot>>,
 ) -> anyhow::Result<Runtime> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -58,7 +59,7 @@ pub fn run(
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let result = run_loop(&mut terminal, &mut runtime, shutdown, theme);
+    let result = run_loop(&mut terminal, &mut runtime, shutdown, theme, web_tx);
 
     // Always restore the terminal, even if the loop errored.
     disable_raw_mode().ok();
@@ -74,6 +75,7 @@ fn run_loop(
     runtime: &mut Runtime,
     shutdown: Arc<AtomicBool>,
     theme: UiTheme,
+    web_tx: Option<tokio::sync::watch::Sender<crate::web::WireSnapshot>>,
 ) -> anyhow::Result<()> {
     let tick = Duration::from_millis(runtime.config().runtime.tick_interval_ms);
     let render = Duration::from_millis(runtime.config().runtime.render_interval_ms);
@@ -166,6 +168,27 @@ fn run_loop(
             if let Some(buffers) = live_buffers.as_mut() {
                 buffers.sample(runtime.state());
             }
+
+            // Sprint-6 — publish a fresh wire snapshot to web
+            // subscribers. The activity feed slice bounds the JSON
+            // payload at ~5–10 KB by capping at 50 records;
+            // older entries are still queryable via the persistent
+            // run store, just not pushed every tick.
+            if let Some(tx) = web_tx.as_ref() {
+                let recent: Vec<crate::storage::RunRecord> = runtime
+                    .state()
+                    .completed
+                    .iter()
+                    .rev()
+                    .take(50)
+                    .cloned()
+                    .map(crate::storage::RunRecord::from_summary)
+                    .collect();
+                let snap =
+                    crate::web::WireSnapshot::from_runtime_state(runtime.state(), &recent);
+                let _ = tx.send(snap);
+            }
+
             last_tick = now;
         }
 

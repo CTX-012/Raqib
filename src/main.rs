@@ -68,6 +68,20 @@ struct Cli {
     #[arg(long, value_name = "NAME")]
     theme: Option<String>,
 
+    /// Sprint-6 — disable the embedded web UI. Default is to bind
+    /// `127.0.0.1:7070` and serve the Svelte dashboard alongside the
+    /// TUI; pass `--no-web` for headless / CI runs where the HTTP
+    /// listener would be noise.
+    #[arg(long)]
+    no_web: bool,
+
+    /// Sprint-6 — web UI listen port. Default 7070, localhost-only.
+    /// The binding always uses `127.0.0.1`; there is no flag to
+    /// expose the server on a real network interface in v1.0
+    /// (the CORS / auth posture isn't ready for that).
+    #[arg(long, default_value_t = 7070)]
+    port: u16,
+
     /// Subcommand. Defaults to running the monitor (TUI / headless) when
     /// omitted, preserving the Phase-1 invocation.
     #[command(subcommand)]
@@ -160,8 +174,30 @@ fn main() -> anyhow::Result<()> {
 
     let runtime = Runtime::new(config);
 
+    // Sprint-6 — spawn the web companion on a background thread
+    // BEFORE the TUI / headless loop takes the main thread. The TUI
+    // tick loop publishes snapshots into a `watch::Sender` (created
+    // here); the axum server holds the matching receiver. Disabled
+    // with `--no-web` for headless / CI runs.
+    let web_tx_for_loop = if cli.no_web {
+        tracing::info!("--no-web set; web UI disabled");
+        None
+    } else {
+        match spawn_web_server(cli.port, shutdown.clone()) {
+            Ok(tx) => Some(tx),
+            Err(e) => {
+                // Don't fail the whole binary if the web companion
+                // can't bind — the TUI is the primary surface, and
+                // an EADDRINUSE shouldn't kill the operator's
+                // monitoring session.
+                tracing::warn!(error = %e, "web: server failed to start; continuing without it");
+                None
+            }
+        }
+    };
+
     if cli.no_ui {
-        run_headless(runtime, shutdown, cli.ticks)?;
+        run_headless(runtime, shutdown, cli.ticks, web_tx_for_loop)?;
     } else {
         // §13 — resolve theme from CLI flag → [ui].theme → default
         // `dark`. The CLI string wins outright when provided so an
@@ -173,11 +209,75 @@ fn main() -> anyhow::Result<()> {
             .unwrap_or_else(|| runtime.config().ui.theme.clone());
         let theme = edge_monitor::ui::theme::current_theme(&theme_name);
         // Returns the runtime back to us so we can flush state on the way out.
-        let runtime = ui::run(runtime, shutdown, theme)?;
+        let runtime = ui::run(runtime, shutdown, theme, web_tx_for_loop)?;
         tracing::info!("exited cleanly after {} ticks", runtime.state().tick_count);
     }
 
     Ok(())
+}
+
+/// Sprint-6 — spawn the embedded web server on a background tokio
+/// runtime. Returns the `watch::Sender` so the TUI / headless loop
+/// can publish snapshots into it on every tick.
+///
+/// The server binds to `127.0.0.1:<port>` (localhost-only — never a
+/// wildcard interface in v1.0). The `shutdown` flag plumbed in here
+/// is the same `Arc<AtomicBool>` the rest of the binary watches; a
+/// background task polls it and resolves the axum graceful-
+/// shutdown future when the operator quits the TUI.
+fn spawn_web_server(
+    port: u16,
+    shutdown: Arc<AtomicBool>,
+) -> anyhow::Result<tokio::sync::watch::Sender<edge_monitor::web::WireSnapshot>> {
+    use edge_monitor::web::{WebState, WireSnapshot, serve};
+
+    let (tx, rx) = tokio::sync::watch::channel(WireSnapshot::empty());
+    let state = WebState { rx };
+    let addr: std::net::SocketAddr = ([127, 0, 0, 1], port).into();
+
+    // Dedicated tokio runtime on a background OS thread so the TUI
+    // tick loop (sync) and the web server (async) don't fight for
+    // the main thread.
+    std::thread::Builder::new()
+        .name("web-runtime".into())
+        .spawn(move || {
+            let rt = match tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt,
+                Err(e) => {
+                    tracing::error!(error = %e, "web: tokio runtime build failed");
+                    return;
+                }
+            };
+            rt.block_on(async move {
+                let shutdown_fut = async move {
+                    // Poll the shutdown flag at the render cadence
+                    // (~100 ms) so we resolve quickly when the TUI
+                    // exits. axum's `with_graceful_shutdown` awaits
+                    // this future and stops accepting new
+                    // connections when it resolves.
+                    loop {
+                        if shutdown.load(Ordering::Relaxed) {
+                            return;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    }
+                };
+                tracing::info!(
+                    addr = %addr,
+                    frontend = edge_monitor::web::handlers::frontend_build_status(),
+                    "web: starting"
+                );
+                if let Err(e) = serve(addr, state, shutdown_fut).await {
+                    tracing::warn!(error = %e, "web: server exited with error");
+                }
+            });
+        })?;
+
+    Ok(tx)
 }
 
 /// Headless per-tick log. Prints one aggregate line and — when AI workloads
@@ -475,6 +575,7 @@ fn run_headless(
     mut runtime: Runtime,
     shutdown: Arc<AtomicBool>,
     tick_budget: u64,
+    web_tx: Option<tokio::sync::watch::Sender<edge_monitor::web::WireSnapshot>>,
 ) -> anyhow::Result<()> {
     let interval = Duration::from_millis(runtime.config().runtime.tick_interval_ms);
     let (tx, rx) = mpsc::channel::<()>();
@@ -496,6 +597,25 @@ fn run_headless(
             }
         }
         runtime.record_governor_audit();
+
+        // Sprint-6 — publish a fresh wire snapshot to the web
+        // companion when running with `--no-ui` (headless +
+        // web is a defensible mode: headless logging + remote
+        // dashboard for ops who don't want a terminal up).
+        if let Some(tx) = web_tx.as_ref() {
+            let recent: Vec<edge_monitor::storage::RunRecord> = runtime
+                .state()
+                .completed
+                .iter()
+                .rev()
+                .take(50)
+                .cloned()
+                .map(edge_monitor::storage::RunRecord::from_summary)
+                .collect();
+            let snap =
+                edge_monitor::web::WireSnapshot::from_runtime_state(runtime.state(), &recent);
+            let _ = tx.send(snap);
+        }
 
         ticks_done += 1;
         if tick_budget > 0 && ticks_done >= tick_budget {

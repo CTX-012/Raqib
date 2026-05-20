@@ -29,18 +29,38 @@ governor + edge-first**. That's the gap `edge_monitor` fills.
 ## Quick start
 
 ```bash
+# Build the Svelte web companion first so the Rust binary can
+# embed the compiled assets. Skip this if you only want the TUI
+# (the binary still ships a "frontend not built" placeholder page
+# in that case).
+cd web
+npm install
+npm run build
+cd ..
+
 # Build release binary (~2.6 MB stripped)
 cargo build --release
 
 # Headless smoke test — two ticks, logs to stderr
 ./target/release/edge_monitor --no-ui --ticks 2
 
-# Interactive TUI
+# Interactive TUI + web dashboard on http://localhost:7070
 ./target/release/edge_monitor
+
+# Disable the web companion (TUI-only)
+./target/release/edge_monitor --no-web
+
+# Override the web port
+./target/release/edge_monitor --port 8080
 
 # Point at a custom config
 ./target/release/edge_monitor --config ./edge_monitor.toml
 ```
+
+The web UI is **read-only** for v1.0 — kill confirmation, theme
+selection, and navigation stay TUI-only. The TUI is the
+authoritative control surface; the web dashboard is for at-a-glance
+monitoring from a browser tab.
 
 See [`edge_monitor.toml.example`](edge_monitor.toml.example) for a
 commented config file.
@@ -55,6 +75,9 @@ commented config file.
 | `--log-level <LEVEL>` | `trace` / `debug` / `info` / `warn` / `error`                |
 | `--log-format <FMT>`  | `human` (default K=V text) or `json` (one JSON object per line, `jq`-pipeable) |
 | `--log-stderr`        | Force tracing to stderr while running the TUI (default: write to log file) |
+| `--theme <NAME>`      | `dark` (default), `light`, or `high-contrast` (UX_CONTRACT.md §13) |
+| `--no-web`            | Disable the embedded web companion                           |
+| `--port <N>`          | Web companion listen port (default `7070`, localhost-only)   |
 
 Logs default to `~/.cache/edge_monitor/edge_monitor.log` when running
 the dashboard so tracing output cannot bleed into the alternate-screen

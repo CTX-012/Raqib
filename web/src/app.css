@@ -1,0 +1,49 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Sprint-6 — theme variables. Three classes cover the contract's
+   §13 palettes (dark / light / high-contrast). Body sets one of
+   them; Tailwind reads via rgb() with alpha. Hex values mirror
+   ux_contract::{DARK,LIGHT,HIGH_CONTRAST} exactly. */
+.theme-dark {
+    --em-bg: 26 27 38;
+    --em-bg-raised: 36 40 59;
+    --em-fg: 192 202 245;
+    --em-muted: 154 165 206;
+    --em-accent: 122 162 247;
+    --em-healthy: 158 206 106;
+    --em-attention: 224 175 104;
+    --em-critical: 247 118 142;
+}
+
+.theme-light {
+    --em-bg: 230 226 207;
+    --em-bg-raised: 216 210 187;
+    --em-fg: 44 44 42;
+    --em-muted: 95 94 90;
+    --em-accent: 24 95 165;
+    --em-healthy: 59 109 17;
+    --em-attention: 133 79 11;
+    --em-critical: 163 45 45;
+}
+
+.theme-hc {
+    --em-bg: 0 0 0;
+    --em-bg-raised: 26 26 26;
+    --em-fg: 255 255 255;
+    --em-muted: 204 204 204;
+    --em-accent: 0 255 255;
+    --em-healthy: 0 255 0;
+    --em-attention: 255 255 0;
+    --em-critical: 255 0 0;
+}
+
+html, body {
+    height: 100%;
+}
+
+body {
+    @apply bg-bg text-fg font-mono;
+    margin: 0;
+}

@@ -33,3 +33,4 @@ pub mod runtime;
 pub mod storage;
 pub mod telemetry;
 pub mod ui;
+pub mod web;

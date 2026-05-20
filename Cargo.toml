@@ -34,6 +34,17 @@ regex = "1"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "http2"] }
 sha2 = "0.10"
 
+# Sprint-6 web UI — axum router on tokio, WebSocket via tokio-tungstenite-
+# style upgrade, static assets embedded into the binary so the operator
+# runs `edge_monitor` and gets the dashboard at http://localhost:7070
+# with no extra deploy step.
+axum = { version = "0.7", features = ["ws"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+futures-util = "0.3"
+rust-embed = { version = "8", features = ["mime-guess"] }
+mime_guess = "2"
+
 # UX_CONTRACT.md v0.3 source of truth — copy strings, alert IDs, thresholds,
 # action enum, themes, sizing. Sibling crate, owned by Agent A. Do not edit
 # from this repo; file a Contract Amendment Request instead.
@@ -44,6 +55,10 @@ pretty_assertions = "1"
 tempfile = "3"
 proptest = "1"
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "time", "test-util"] }
+# Sprint-6 — web e2e tests need an HTTP / WebSocket client. `reqwest`
+# is already a runtime dep but used here for tests too; `tokio-
+# tungstenite` is dev-only.
+tokio-tungstenite = "0.24"
 
 [profile.release]
 lto = "thin"

@@ -35,8 +35,8 @@ use ratatui::widgets::{List, ListItem, ListState, Paragraph, Wrap};
 use ux_contract::WorkloadStatus;
 use ux_contract::status::COLD_LOADING;
 use ux_contract::workload_category::{
-    GROUP_HEADER_EMBEDDINGS, GROUP_HEADER_LLM, GROUP_HEADER_ROS2, GROUP_HEADER_UNKNOWN,
-    GROUP_HEADER_VISION,
+    GROUP_HEADER_AGENT, GROUP_HEADER_EMBEDDINGS, GROUP_HEADER_LLM, GROUP_HEADER_ROS2,
+    GROUP_HEADER_UNKNOWN, GROUP_HEADER_VISION,
 };
 
 use crate::model::WorkloadCategory;
@@ -68,6 +68,10 @@ const RUNNING_ACTIVELY: &str = "running actively";
 fn category_header(category: WorkloadCategory) -> &'static str {
     match category {
         WorkloadCategory::LLM => GROUP_HEADER_LLM,
+        // Sprint-7.5 / CAR-18 — Agent gets its own subsection header.
+        // The string comes from ux_contract v0.3.9; this map honors
+        // the constants-pattern guidance in the contract doc-comment.
+        WorkloadCategory::Agent => GROUP_HEADER_AGENT,
         WorkloadCategory::Vision => GROUP_HEADER_VISION,
         WorkloadCategory::ROS2 => GROUP_HEADER_ROS2,
         WorkloadCategory::Embeddings => GROUP_HEADER_EMBEDDINGS,
@@ -340,7 +344,13 @@ fn primary_metric(row: &Row) -> String {
             Some(fps) => format!("{fps:>4.0} fps"),
             None => RUNNING_ACTIVELY.to_string(),
         },
-        WorkloadCategory::ROS2
+        // Sprint-7.5 / CAR-18 — Agent rows show RUNNING_ACTIVELY by
+        // default. These are CLIs (claude-code, cursor, aider,
+        // continue) that proxy to a remote LLM; no local tokens/sec
+        // / KV / fps metric applies, and the v0.3.9 contract doesn't
+        // lock a category-specific schema for Agent in §2 yet.
+        WorkloadCategory::Agent
+        | WorkloadCategory::ROS2
         | WorkloadCategory::Embeddings
         | WorkloadCategory::Unknown => RUNNING_ACTIVELY.to_string(),
     }
@@ -1015,6 +1025,10 @@ mod tests {
             headers,
             vec![
                 GROUP_HEADER_LLM,
+                // Sprint-7.5 / CAR-18 — Agent sits between LLM and
+                // Vision per `WorkloadCategory::display_order`. The
+                // contract const came from ux_contract v0.3.9.
+                GROUP_HEADER_AGENT,
                 GROUP_HEADER_VISION,
                 GROUP_HEADER_ROS2,
                 GROUP_HEADER_EMBEDDINGS,

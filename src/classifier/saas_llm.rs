@@ -80,7 +80,7 @@ pub(crate) fn saas_llm_signal(sample: &ProcessSample) -> Option<&'static str> {
 pub(crate) fn classify(sample: &ProcessSample) -> Option<ClassificationResult> {
     saas_llm_signal(sample).map(|label| {
         let evidence = format!("SaaS-LLM CLI detected: {label}");
-        ClassificationResult::ai(AICategory::Inference, WorkloadCategory::LLM, evidence)
+        ClassificationResult::ai(AICategory::Inference, WorkloadCategory::Agent, evidence)
     })
 }
 
@@ -115,7 +115,7 @@ mod tests {
         );
         let r = classify(&s).expect("claude-code path must fire");
         assert_eq!(r.category, AICategory::Inference);
-        assert_eq!(r.workload_category, WorkloadCategory::LLM);
+        assert_eq!(r.workload_category, WorkloadCategory::Agent);
         assert!(
             r.evidence.contains("claude-code"),
             "evidence should name the matched label: {}",
@@ -134,7 +134,7 @@ mod tests {
         );
         let r = classify(&s).expect("cursor path must fire");
         assert_eq!(r.category, AICategory::Inference);
-        assert_eq!(r.workload_category, WorkloadCategory::LLM);
+        assert_eq!(r.workload_category, WorkloadCategory::Agent);
     }
 
     #[test]
@@ -147,7 +147,7 @@ mod tests {
             &["aider-chat", "--model", "gpt-4o"],
         );
         let r = classify(&s).expect("aider must fire");
-        assert_eq!(r.workload_category, WorkloadCategory::LLM);
+        assert_eq!(r.workload_category, WorkloadCategory::Agent);
     }
 
     #[test]
@@ -172,7 +172,7 @@ mod tests {
             ],
         );
         let r = classify(&s).expect("continue.dev must fire");
-        assert_eq!(r.workload_category, WorkloadCategory::LLM);
+        assert_eq!(r.workload_category, WorkloadCategory::Agent);
     }
 
     #[test]

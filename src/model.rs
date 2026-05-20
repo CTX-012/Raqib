@@ -75,6 +75,17 @@ pub enum AICategory {
 pub enum WorkloadCategory {
     /// Text generation — Ollama, vLLM, llama.cpp, ExLlama, TGI, etc.
     LLM,
+    /// CAR-18 / Sprint-7.5 — SaaS-LLM developer-assistant CLIs
+    /// (Claude Code, Cursor, Aider, Continue, and similar). These
+    /// USE a remote LLM but are not inference servers themselves.
+    /// Sprint-6 smoke testing surfaced that classifying them as LLM
+    /// mixed agent-style consumers with raw inference servers like
+    /// ollama, hiding the distinction operators care about on the
+    /// dashboard. v0.3.9 added `GROUP_HEADER_AGENT` to the contract
+    /// (constants pattern — no contract enum variant), and the
+    /// section-header function in `panels::workloads` maps this
+    /// local enum variant to that string.
+    Agent,
     /// Image / video / audio inference — YOLO, Ultralytics, Stable
     /// Diffusion, ComfyUI, Whisper, MediaPipe, etc.
     Vision,
@@ -228,22 +239,30 @@ impl WorkloadCategory {
     /// `panels::workloads::category_header` mapping the enum to
     /// v0.3.4's `ux_contract::workload_category::GROUP_HEADER_*`
     /// constants.
+    /// Sprint-7.5 — Agent sits at slot 1 (between LLM and Vision).
+    /// Rationale: from the operator's POV the developer-assistant
+    /// CLIs are the most-visible "AI activity" on a workstation,
+    /// just below inference servers; rendering Agent immediately
+    /// after LLM puts both LLM-class sections together at the top
+    /// of the panel.
     pub fn display_order(self) -> u8 {
         match self {
             WorkloadCategory::LLM => 0,
-            WorkloadCategory::Vision => 1,
-            WorkloadCategory::ROS2 => 2,
-            WorkloadCategory::Embeddings => 3,
-            WorkloadCategory::Unknown => 4,
+            WorkloadCategory::Agent => 1,
+            WorkloadCategory::Vision => 2,
+            WorkloadCategory::ROS2 => 3,
+            WorkloadCategory::Embeddings => 4,
+            WorkloadCategory::Unknown => 5,
         }
     }
 
     /// Every variant in display order — used by the panel to walk
     /// categories deterministically (empty groups are filtered out
     /// at render time per §1 region 4).
-    pub fn all_in_order() -> [WorkloadCategory; 5] {
+    pub fn all_in_order() -> [WorkloadCategory; 6] {
         [
             WorkloadCategory::LLM,
+            WorkloadCategory::Agent,
             WorkloadCategory::Vision,
             WorkloadCategory::ROS2,
             WorkloadCategory::Embeddings,

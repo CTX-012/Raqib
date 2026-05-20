@@ -519,7 +519,7 @@ mod tests {
     // `WorkloadCategory != ROS2`. The Fix-2 invariant we layer on
     // is the positive: `AICategory::Inference + WorkloadCategory::LLM`.
     #[test]
-    fn claude_code_with_inherited_ros_env_classified_as_ai_llm_not_ros2() {
+    fn claude_code_with_inherited_ros_env_classified_as_ai_agent_not_ros2() {
         use crate::model::AICategory;
         let s = sample_with_env(
             "node",
@@ -550,10 +550,11 @@ mod tests {
             "Fix-2 invariant: Claude Code's cli.js path should \
              classify as AI inference",
         );
+        // Sprint-7.5 / CAR-18 — was LLM pre-7.5, now Agent.
         assert_eq!(
             result.workload_category,
-            WorkloadCategory::LLM,
-            "Fix-2 invariant: Claude Code's workload category is LLM",
+            WorkloadCategory::Agent,
+            "Sprint-7.5: Claude Code's workload category is Agent",
         );
     }
 
@@ -650,10 +651,13 @@ mod tests {
     // ════════════════════════════════════════════════════════════════════════
 
     #[test]
-    fn claude_code_node_dispatch_classifies_as_inference_llm() {
-        // Pre-fix the audit symptom: `node` from VS Code's
-        // Anthropic extension fell through every predicate to
-        // NotAi. Confirm the new saas_llm priority catches it.
+    fn claude_code_node_dispatch_classifies_as_inference_agent() {
+        // Sprint-7.5 / CAR-18 — claude-code lands in Agent, not LLM.
+        // Pre-fix (Sprint-1 audit) the symptom was `node`-from-VS-Code
+        // falling through to NotAi; that fix arrived as
+        // `WorkloadCategory::LLM`. The Sprint-7.5 follow-up swaps
+        // LLM → Agent so the dashboard's LLM subsection stays for
+        // inference servers (ollama/vllm/llama.cpp) only.
         let s = sample(
             "node",
             &[
@@ -663,12 +667,12 @@ mod tests {
         );
         let r = classify_process(&s);
         assert_eq!(r.category, AICategory::Inference);
-        assert_eq!(r.workload_category, WorkloadCategory::LLM);
+        assert_eq!(r.workload_category, WorkloadCategory::Agent);
         assert!(r.evidence.contains("SaaS-LLM CLI"));
     }
 
     #[test]
-    fn cursor_dispatch_classifies_as_inference_llm() {
+    fn cursor_dispatch_classifies_as_inference_agent() {
         let s = sample(
             "node",
             &[
@@ -678,15 +682,58 @@ mod tests {
         );
         let r = classify_process(&s);
         assert!(r.is_ai(), "cursor must classify as AI");
-        assert_eq!(r.workload_category, WorkloadCategory::LLM);
+        assert_eq!(r.workload_category, WorkloadCategory::Agent);
     }
 
     #[test]
-    fn aider_dispatch_classifies_as_inference_llm() {
+    fn aider_dispatch_classifies_as_inference_agent() {
         let s = sample("aider-chat", &["aider-chat", "--model", "claude-3.5"]);
         let r = classify_process(&s);
         assert!(r.is_ai());
-        assert_eq!(r.workload_category, WorkloadCategory::LLM);
+        assert_eq!(r.workload_category, WorkloadCategory::Agent);
+    }
+
+    #[test]
+    fn continue_dispatch_classifies_as_inference_agent() {
+        // Sprint-7.5 — `continue.continue` was added to the
+        // SaaS-LLM allowlist in Sprint-1 Fix-2. Pin that it lands
+        // in Agent like the other developer-assistant CLIs.
+        let s = sample(
+            "node",
+            &[
+                "node",
+                "/home/dev/.vscode-server/extensions/continue.continue-0.9.0/out/extension.js",
+            ],
+        );
+        let r = classify_process(&s);
+        assert_eq!(r.workload_category, WorkloadCategory::Agent);
+    }
+
+    #[test]
+    fn saas_llm_classification_leaves_model_name_unset() {
+        // Sprint-7.5 Fix 1 — the SaaS-LLM classifier must NOT
+        // populate model_name. The augment_with_model_name post-pass
+        // ONLY fires for LLM category; routing claude to Agent
+        // bypasses it, but the classifier's own
+        // `ClassificationResult::ai()` constructor also leaves
+        // model_name `None`. Pin both invariants so a future
+        // refactor can't accidentally inject a category-tag string
+        // (the user-reported "agents" / similar regression).
+        let s = sample(
+            "node",
+            &[
+                "node",
+                "/home/faiz/.vscode-server/extensions/anthropic.claude-code-2.1.0/cli.js",
+            ],
+        );
+        let r = classify_process(&s);
+        assert_eq!(r.workload_category, WorkloadCategory::Agent);
+        assert!(
+            r.model_name.is_none(),
+            "Agent-classified workload must not carry a model_name; \
+             got {:?}",
+            r.model_name
+        );
     }
 
     #[test]

@@ -417,6 +417,9 @@ fn category_to_str(c: AICategory) -> &'static str {
 fn workload_category_to_str(c: WorkloadCategory) -> &'static str {
     match c {
         WorkloadCategory::LLM => "llm",
+        // Sprint-7.5 / CAR-18 — Agent maps to the lowercase token
+        // the frontend expects in `WorkloadsPanel.svelte::ORDER`.
+        WorkloadCategory::Agent => "agent",
         WorkloadCategory::Vision => "vision",
         WorkloadCategory::ROS2 => "ros2",
         WorkloadCategory::Embeddings => "embeddings",

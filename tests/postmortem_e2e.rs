@@ -71,6 +71,7 @@ fn fixture_post_mortem(model: &str) -> PostMortem {
         display_name: model.to_string(),
         duration_secs: 65,
         avg_cpu_pct: 38.4,
+        peak_cpu_pct: 52.1,
         peak_rss_mb: 1024,
         peak_vram_mb: 4096,
         tokens_per_sec: Some(38.4),

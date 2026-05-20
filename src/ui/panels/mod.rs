@@ -144,28 +144,43 @@ fn render_default(
     theme: &UiTheme,
     tier: SizeTier,
 ) {
+    // Sprint-4 FIX 1 — extend Bundle-3's B7 spacer pattern to every
+    // panel adjacency, not just Vitals↔Workloads. The user-reported
+    // "Vitals merges with adjacent panel when a card opens" symptom
+    // didn't reproduce against Vitals (the original B7 spacer
+    // survives every card overlay — see the Sprint-4 examples repro).
+    // What DID stack visually was Workloads↔Top and Top↔Activity in
+    // Standard/Wide, and Workloads↔Activity in Narrow — those pairs
+    // had no spacer at all, and a card narrowing the visible side
+    // slivers made the lack of gap far more obvious.
+    //
+    // The cost is 2 spacer rows in Standard/Wide (Min for Workloads
+    // drops 8 → 6) and 1 spacer row in Narrow (Min drops 7 → 6).
+    // At §12's 80×24 floor the layout fits exactly; at 120×40 the
+    // workloads area still flexes to ~14 rows of content.
     let constraints: &[Constraint] = if tier == SizeTier::Narrow {
-        // B7 — insert a 1-row spacer between vitals and AI Workloads so
-        // the two panel borders don't visually merge. 1+7+1+Min(7)+7+1
-        // = 24 fits §12's 80×24 floor (Min absorbs the gap cost from 8
-        // → 7; still leaves a usable workloads area at Narrow).
+        // 1+7+1+Min(6)+1+7+1 = 24 fits §12's 80×24 floor.
         &[
-            Constraint::Length(1), // §0 mission-line header (L25)
-            Constraint::Length(7), // vitals (System)
-            Constraint::Length(1), // B7 spacer
-            Constraint::Min(7),    // AI Workloads (flexes)
-            Constraint::Length(7), // Activity (Top processes hidden)
-            Constraint::Length(1), // hint footer
+            Constraint::Length(1), // [0] §0 mission-line header (L25)
+            Constraint::Length(7), // [1] vitals (System)
+            Constraint::Length(1), // [2] B7 spacer (vitals → workloads)
+            Constraint::Min(6),    // [3] AI Workloads (flexes)
+            Constraint::Length(1), // [4] FIX-1 spacer (workloads → activity)
+            Constraint::Length(7), // [5] Activity (Top processes hidden)
+            Constraint::Length(1), // [6] hint footer
         ]
     } else {
+        // 1+7+1+Min(6)+1+7+1+7+1 = 26+Min. At 40 rows Min=14.
         &[
-            Constraint::Length(1), // §0 mission-line header (L25)
-            Constraint::Length(7), // vitals (System)
-            Constraint::Length(1), // B7 spacer
-            Constraint::Min(8),    // AI Workloads (flexes)
-            Constraint::Length(7), // Top processes (L13)
-            Constraint::Length(7), // Activity (L15)
-            Constraint::Length(1), // hint footer
+            Constraint::Length(1), // [0] §0 mission-line header (L25)
+            Constraint::Length(7), // [1] vitals (System)
+            Constraint::Length(1), // [2] B7 spacer (vitals → workloads)
+            Constraint::Min(6),    // [3] AI Workloads (flexes)
+            Constraint::Length(1), // [4] FIX-1 spacer (workloads → top)
+            Constraint::Length(7), // [5] Top processes (L13)
+            Constraint::Length(1), // [6] FIX-1 spacer (top → activity)
+            Constraint::Length(7), // [7] Activity (L15)
+            Constraint::Length(1), // [8] hint footer
         ]
     };
     let layout = Layout::default()
@@ -202,15 +217,17 @@ fn render_default(
     } else {
         workloads::render(f, layout[3], state, app, theme);
     }
+    // layout[4] is the FIX-1 spacer (workloads → next) — unrendered.
 
     if tier == SizeTier::Narrow {
         // §12: Top processes is "first to drop on narrow screens".
-        activity::render(f, layout[4], state, theme);
-        render_footer(f, layout[5], app, theme);
-    } else {
-        top_processes::render(f, layout[4], state, app.top_processes_sort(), theme);
         activity::render(f, layout[5], state, theme);
         render_footer(f, layout[6], app, theme);
+    } else {
+        top_processes::render(f, layout[5], state, app.top_processes_sort(), theme);
+        // layout[6] is the FIX-1 spacer (top → activity) — unrendered.
+        activity::render(f, layout[7], state, theme);
+        render_footer(f, layout[8], app, theme);
     }
 }
 

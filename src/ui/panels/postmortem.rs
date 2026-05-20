@@ -63,6 +63,11 @@ pub struct PostMortem {
     pub duration_secs: u64,
     /// Mean CPU% across the run (one core == 100%).
     pub avg_cpu_pct: f32,
+    /// Sprint-4 B14 — peak CPU% sampled across the run. Together with
+    /// `avg_cpu_pct` this is the per-run detail the history overlay
+    /// USED to surface as a column; B14 moves it into the card body so
+    /// the history overlay can shrink to a clean chronological list.
+    pub peak_cpu_pct: f32,
     pub peak_rss_mb: u64,
     /// 0 means "omit the row entirely" per UI Contract v2.
     pub peak_vram_mb: u64,
@@ -132,6 +137,9 @@ impl PostMortem {
             display_name,
             duration_secs: summary.uptime_secs.max(0) as u64,
             avg_cpu_pct: summary.avg_cpu_pct,
+            // Sprint-4 B14 — peak CPU plumbed from the summary so the
+            // card body carries both avg and peak (was history-only).
+            peak_cpu_pct: summary.peak_cpu_pct,
             peak_rss_mb: summary.peak_rss_mb,
             peak_vram_mb: summary.peak_vram_mb,
             tokens_per_sec: record.metrics.tokens_per_sec_avg,
@@ -309,7 +317,10 @@ fn build_lines_with(card: &PostMortemCard, theme: Option<&UiTheme>) -> Vec<Line<
     lines.push(labeled("Duration:", &format_duration(pm.duration_secs)));
     // 2. Avg CPU:
     lines.push(labeled("Avg CPU:", &format!("{:.1}%", pm.avg_cpu_pct)));
-    // 3. Peak RAM:
+    // 3. Peak CPU: (Sprint-4 B14 — per-run detail moved from the
+    // history overlay column into the card body)
+    lines.push(labeled("Peak CPU:", &format!("{:.1}%", pm.peak_cpu_pct)));
+    // 4. Peak RAM:
     lines.push(labeled("Peak RAM:", &format_megabytes(pm.peak_rss_mb)));
     // 4. Peak GPU memory: (omit when zero/unavailable)
     if pm.peak_vram_mb > 0 {
@@ -547,6 +558,7 @@ mod tests {
             display_name: "phi3-mini".into(),
             duration_secs: 65,
             avg_cpu_pct: 38.4,
+            peak_cpu_pct: 52.1,
             peak_rss_mb: 1024,
             peak_vram_mb: 4096,
             tokens_per_sec: Some(38.4),

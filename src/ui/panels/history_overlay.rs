@@ -78,13 +78,20 @@ fn header_paragraph<'a>(overlay: &'a HistoryOverlay, theme: &UiTheme) -> Paragra
             Style::default().fg(theme.attention),
         ))
     } else {
+        // Sprint-4 B14 — per-run metric detail (Avg CPU, Peak RSS,
+        // Peak VRAM) moves into the post-mortem card body. The history
+        // overlay shrinks to a chronological list with just When,
+        // Duration, and Exit reason; the operator opens a per-run
+        // card via Enter on the focused workload row to see metrics.
+        // Dropping the per-row metric columns frees ~30 cols of width
+        // for the timestamp + exit-reason which used to be cramped.
         Line::from(vec![
             Span::styled(
                 format!(" {} runs · columns: ", overlay.records.len()),
                 Style::default().fg(theme.foreground),
             ),
             Span::styled(
-                "# When  Dur  AvgCPU  PeakRSS  PeakVRAM  Exit",
+                "# When  Dur  Exit",
                 Style::default().fg(theme.muted),
             ),
         ])
@@ -105,20 +112,25 @@ fn body_list<'a>(overlay: &'a HistoryOverlay, theme: &UiTheme) -> List<'a> {
                 "governor" => theme.attention,
                 _ => theme.critical,
             };
+            // B14 — metric columns dropped; per-run detail now lives
+            // in the post-mortem card. Keeps history rows scannable
+            // at a glance (timestamp + duration + exit kind) without
+            // the column-density that made each row hard to parse.
             let row = format!(
-                " {:>3}  {}  {:>4}s  {:>5.0}%  {:>5}MB  {:>6}MB  {}",
+                " {:>3}  {}  {:>4}s  {}",
                 idx,
                 r.summary.exit_time.format("%m-%d %H:%M"),
                 r.summary.uptime_secs,
-                r.summary.avg_cpu_pct,
-                r.summary.peak_rss_mb,
-                r.summary.peak_vram_mb,
                 exit,
             );
             let mut spans: Vec<Span<'_>> = vec![Span::styled(row, Style::default().fg(color))];
 
             // Tier 3.3 — saturation badge. Independent of exit colour
             // so a clean-exit run that maxed KV still gets flagged.
+            // Kept on the history row even after the B14 column drop
+            // because it's a one-off marker (not a column), and
+            // surfaces KV-pressure exits without needing the operator
+            // to open every card.
             if let Some(peak) = r.metrics.kv_cache_peak_pct
                 && peak >= KV_SATURATION_PCT
             {

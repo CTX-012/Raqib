@@ -795,6 +795,7 @@ mod tests {
                 display_name: "phi3-mini".into(),
                 duration_secs: 42,
                 avg_cpu_pct: 0.0,
+                peak_cpu_pct: 0.0,
                 peak_rss_mb: 0,
                 peak_vram_mb: 0,
                 tokens_per_sec: None,

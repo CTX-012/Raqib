@@ -6,7 +6,125 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project aims to adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 once `v1.0.0` is tagged. Until then, minor versions may include breaking changes.
 
-## [Unreleased]
+## [1.0.0] — 2026-05-21
+
+First stable Linux release. Real-time TUI dashboard for AI workloads,
+embedded web companion with live WebSocket updates, kill-safety via
+confirmation card overlay, post-mortem analysis with peak resource
+tracking, Agent classification for SaaS-LLM developer-assistant CLIs.
+
+Built on `ux_contract` v0.3.9 (CAR-17 `kill_confirm_card` +
+CAR-18 `GROUP_HEADER_AGENT`).
+
+The rest of this section preserves the per-sprint detail accumulated
+under the prior `[Unreleased]` heading. A summary of the marquee
+items follows.
+
+### Added (v1.0.0 summary)
+
+- **Web UI** — `axum` HTTP server + WebSocket live updates +
+  Svelte reactive dashboard. Bundle embedded into the binary via
+  `rust-embed`. Default bind `0.0.0.0:7070` (LAN-accessible);
+  `--bind 127.0.0.1` to restrict to localhost on untrusted
+  networks. (Sprint 6 + Sprint 7 Item 4).
+- **Agent workload category** — claude / cursor / aider / continue
+  now render under their own `── Agent ──` subsection in the
+  Workloads panel (and `workload_category: "agent"` on the wire),
+  separate from local LLM inference servers. Consumes
+  `ux_contract::workload_category::GROUP_HEADER_AGENT` from
+  v0.3.9. (Sprint 7.5).
+- **kill_confirm card overlay** — CAR-17 replaced the pre-v1.0
+  armed-banner kill pattern. `k` opens the card; `Enter` confirms
+  the kill on the PINNED PID; `Esc` cancels. Card body shows
+  workload identity, category, status, runtime, and live
+  resource metrics so the operator decides with full context.
+  (Sprint 1 lead).
+- **Post-mortem card metrics** — Avg CPU, Peak CPU (Sprint 4),
+  Peak RAM, Peak GPU memory, Throughput (LLM-only), Exit reason,
+  baseline-status headline. Stderr-when-fresh tail (L19) when
+  captured. (L16 + L19 + Sprint 4).
+- **Mission-line wall clock** (Sprint 3 F1) — right-aligned
+  `HH:MM:SS` local-timezone clock when terminal width allows;
+  drops gracefully on narrow terminals.
+- **Workload start-time column** (Sprint 3 F2 + Sprint 7 Item 3) —
+  `HH:MM (Nm ago)` wide / `Nm ago` narrow. Reads
+  `/proc/<pid>/stat` field 22 + `/proc/stat` `btime` for true OS
+  spawn time; `first_observed_at` is a fallback only when `/proc`
+  parse fails.
+- **Workload Model column** (Sprint 3 F3 + Sprint 7 Item 2) —
+  resolved model name from cmdline (`ollama run X`,
+  `--model /path/Y.gguf`, `-m Z`). Ollama content-hash blobs
+  (`sha256-XXX…`) get humanized to `sha256-XXXXXX…` so the
+  column stays readable.
+
+### Changed (v1.0.0 summary)
+
+- **History overlay scope + columns** (Sprint 4 B13 + B14) —
+  shows only completed/killed runs (RunStore is exit-only by
+  construction); columns reduced to `# When  Dur  Exit`. Per-run
+  metric detail (AvgCPU / PeakRSS / PeakVRAM / PeakCPU) moved
+  into the post-mortem card body.
+- **Workloads panel layout** (Sprint 4 layout fix) — Vitals,
+  Workloads, Top processes, and Activity now have visible
+  spacer rows between adjacent panel borders. Card overlays no
+  longer make the borders read as "merged."
+- **Footer keymap** (L25 + Sprint 1 lead) — `k kill (confirm)`,
+  `j/k select`, `h history`, `? help`, `q quit`. Pre-v1.0 second
+  `k` to fire is gone — `Enter` confirms instead, per CAR-17.
+
+### Removed (v1.0.0 summary)
+
+- **Dry-run mode** (Sprint 1 lead, d8d7897). The `kill_confirm`
+  card IS the safety layer; dry-run no longer exists. `--dry-run`
+  flag and `[policy].enforce` config field both removed.
+- **Grafana integration** (Sprint 5). `g` keybinding, `[dashboard]`
+  config, WP5 TCP preflight probe, and the `webbrowser` Cargo
+  dependency are all gone. The v2 web companion (separate repo)
+  handles the dashboard story.
+- **Default allowlist over-reach** (Sprint 7 Item 1) —
+  `is_allowlisted` previously delegated to a predicate that
+  returned `Allow` for every process (showing every workload as
+  `(ALLOWLISTED)` on the kill_confirm card). Fix: directly check
+  the configured whitelist. Default whitelist remains as intended
+  (`sshd / bash / zsh / sh / systemd / init / kworker / kthreadd`).
+
+### Fixed (v1.0.0 summary)
+
+- **Allowlist false-positive** (Sprint 7 Item 1).
+- **sha256 blob shown as workload name** (Sprint 7 Item 2).
+- **Spawn time reading "1m ago" for hours-old processes**
+  (Sprint 7 Item 3 — resolves Sprint 3 F2 known limitation).
+- **Vitals panel border merging with adjacent panel under any
+  card overlay** (Sprint 4 layout fix).
+- **Token/sec frozen on the workload row** (Sprint 2 investigation
+  + B4 fixes — passive vLLM/llama.cpp scrape now reaches the
+  workloads panel; ollama exec-wrapper covers the ollama path).
+- **kk-kill PID drift under vitals refresh** (Row 1, post-CAR-17)
+  — Enter confirms on the pinned PID, not on whatever
+  `selected_pid` returns at the moment of the press.
+
+### Known Limitations (v1.0.0)
+
+- **New ollama spawn may not appear immediately on the dashboard**
+  (Sprint 7 Item 5). Three hypotheses filed in BACKLOG.md
+  "Open Sprint-7 follow-ups"; needs live reproduction with
+  `RUST_LOG=debug`.
+- **Web UI has no authentication.** Default bind is
+  `0.0.0.0:7070` — trusted-LAN posture. Use `--bind 127.0.0.1`
+  on untrusted networks. README "Web UI security" covers this.
+- **Ollama passive tokens/sec unavailable.** Ollama embeds the
+  per-request rate in JSON with no Prometheus endpoint; capture
+  requires the `edge_monitor exec -- ollama …` wrapper path.
+- **Windows binary on indefinite halt.** Linux is the v1.0
+  reference implementation; Windows parity catches up post-v1.0.
+
+### Contract dependency
+
+- `ux_contract` v0.3.9 (path-dep). CAR-17
+  (`kill_confirm_card` module) and CAR-18 (`GROUP_HEADER_AGENT`)
+  are the v1.0-critical additions.
+
+---
 
 ### Removed
 

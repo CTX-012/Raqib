@@ -631,14 +631,15 @@ fn run_headless(
         if let Some(tx) = web_tx.as_ref() {
             // v1.0.1 B-NEW-8 — AI-only filter, matches the TUI loop
             // at src/ui/mod.rs. Non-AI shell exits don't belong in
-            // the dashboard's activity feed.
+            // the dashboard's activity feed. Cap comes from
+            // ux_contract v0.3.10 (`limits::ACTIVITY_FEED_WIRE_MAX`).
             let recent: Vec<edge_monitor::storage::RunRecord> = runtime
                 .state()
                 .completed
                 .iter()
                 .rev()
                 .filter(|s| s.category.is_some())
-                .take(50)
+                .take(ux_contract::limits::ACTIVITY_FEED_WIRE_MAX)
                 .cloned()
                 .map(edge_monitor::storage::RunRecord::from_summary)
                 .collect();

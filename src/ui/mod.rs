@@ -187,7 +187,7 @@ fn run_loop(
                     .iter()
                     .rev()
                     .filter(|s| s.category.is_some())
-                    .take(50)
+                    .take(ux_contract::limits::ACTIVITY_FEED_WIRE_MAX)
                     .cloned()
                     .map(crate::storage::RunRecord::from_summary)
                     .collect();
@@ -295,14 +295,6 @@ fn apply_action(
                 };
                 app.open_history(key, records);
             }
-        }
-        Action::OpenGrafana => {
-            // Sprint 5 — Grafana integration removed from v1.0. The
-            // dispatch arm survives because `ux_contract::Action` is
-            // exhaustive and the variant is still defined in the
-            // contract crate; the `g` keybinding is unbound in
-            // `input.rs` so this arm is unreachable in practice. A
-            // future contract amendment can drop the variant.
         }
         Action::OpenDetail => {
             // CAR-17 Enter-priority cascade. The kill_confirm card has
@@ -540,15 +532,6 @@ fn handle_open_detail(
         }
     }
 }
-
-// Sprint 5 — `resolve_dashboard_template`, `compute_dashboard_url`,
-// and `format_grafana_unreachable` removed alongside the Grafana
-// integration. The `EDGE_MONITOR_GRAFANA_URL` env var is no longer
-// read; the `[dashboard]` config section is no longer parsed (see
-// `Config` in `src/config.rs`). The contract templates
-// (`status::GRAFANA_UNREACHABLE`, `status::DASHBOARD_OPENED`,
-// `status::DASHBOARD_FAILED`) remain in `ux_contract` as orphans
-// pending Agent A cleanup.
 
 /// L22 / UX_CONTRACT.md §12 — terminal size class. The renderer picks
 /// a layout variant by tier so the same panel module can produce a

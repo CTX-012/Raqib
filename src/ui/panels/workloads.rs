@@ -33,7 +33,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{List, ListItem, ListState, Paragraph, Wrap};
 
 use ux_contract::WorkloadStatus;
-use ux_contract::status::COLD_LOADING;
+use ux_contract::status::{COLD_LOADING, RUNNING_ACTIVELY};
 use ux_contract::workload_category::{
     GROUP_HEADER_AGENT, GROUP_HEADER_EMBEDDINGS, GROUP_HEADER_LLM, GROUP_HEADER_ROS2,
     GROUP_HEADER_UNKNOWN, GROUP_HEADER_VISION,
@@ -52,26 +52,19 @@ use crate::ui::theme::UiTheme;
 /// is alive but its category sampler hasn't reported a value this
 /// tick (LLM with no KV cache yet, non-LLM categories whose
 /// per-type sampler isn't wired in v1.0). "running actively"
-/// conveys "process alive, doing work, just no metrics this tick"
-/// — the prior "(no metrics)" framing read as a fault. The
-/// genuinely-distinct cold-start state continues to render
-/// `status::COLD_LOADING` via the Loading-status override above.
-/// No Contract const exists for this slot yet (filed in BACKLOG as
-/// a future CAR; low priority since only one render site uses it).
-const RUNNING_ACTIVELY: &str = "running actively";
-
-/// v1.0.1 B-NEW-4 — Agent rows display this string instead of
-/// `RUNNING_ACTIVELY`. Inspector #2 found "running actively"
-/// overclaimed activity for SaaS-LLM CLIs (claude-code, cursor,
-/// aider, continue) — these processes proxy to a remote LLM, and
-/// edge_monitor measures none of the per-request rate. "alive"
-/// is the honest minimum signal: the process exists on this
-/// host and is in our annotated set; no further claim.
-///
-/// Extracted as a top-level const (next to `RUNNING_ACTIVELY`)
-/// so the contract-extraction follow-up (v0.3.10 CAR-XX) has a
-/// single grep target when adding `ux_contract::status::
-/// AGENT_ALIVE`.
+/// v0.3.10 vendored `status::RUNNING_ACTIVELY` (CAR-19a). The local
+/// const is gone; this re-export is just a navigation aid for
+/// readers grepping the file.
+//
+// v1.0.1 B-NEW-4 — Agent rows display `AGENT_ALIVE` instead of
+// `RUNNING_ACTIVELY`. Inspector #2 found "running actively"
+// overclaimed activity for SaaS-LLM CLIs (claude-code, cursor,
+// aider, continue) — these processes proxy to a remote LLM, and
+// edge_monitor measures none of the per-request rate. "alive" is
+// the honest minimum signal: the process exists on this host and
+// is in our annotated set; no further claim. The Contract did NOT
+// pick this up in v0.3.10 — `AGENT_ALIVE` is still local. Filed
+// again in BACKLOG as a future CAR.
 const AGENT_ALIVE: &str = "alive";
 
 /// L11c — map the local `WorkloadCategory` enum to the v0.3.4

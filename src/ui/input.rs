@@ -47,12 +47,6 @@ pub fn translate(key: KeyEvent, app: &App) -> Option<Action> {
         // status footer) when no alerts are active; the dispatch
         // handler in `apply_action` decides.
         KeyCode::Char('a') => Some(Action::AcknowledgeAlerts),
-        // Sprint 5 — `g` (open Grafana) is unbound now that the
-        // dashboard integration was hard-deleted from v1.0. The
-        // `ux_contract::Action::OpenGrafana` variant still exists
-        // in the contract and has a no-op arm in `apply_action`
-        // to keep the match exhaustive; a future contract
-        // amendment can drop the variant entirely.
         // §6 / §1 region 5 — `t` cycles the Top processes panel
         // sort (RAM → CPU → VRAM). Dispatch handler is
         // `App::cycle_top_sort`; help-overlay text is

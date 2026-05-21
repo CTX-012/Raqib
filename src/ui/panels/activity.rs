@@ -38,10 +38,12 @@ use crate::ui::theme::UiTheme;
 
 use super::panel_block;
 
-/// Per UX_CONTRACT.md §1 region 6 — "last 5 events". §12 narrow-
+/// Per UX_CONTRACT.md §1 region 6 — "last N events". §12 narrow-
 /// mode caps Activity at 3 rows; sizing-aware truncation lives in
-/// L22's row.
-pub const MAX_VISIBLE_EVENTS: usize = 5;
+/// L22's row. v0.3.10 (CAR-19c) ratifies the cap in the contract
+/// as `limits::ACTIVITY_FEED_TUI_MAX`; this re-export keeps the
+/// existing call sites unchanged.
+pub const MAX_VISIBLE_EVENTS: usize = ux_contract::limits::ACTIVITY_FEED_TUI_MAX;
 
 /// One ready-to-render event with a semantic tone and the timestamp
 /// used for ordering. Tests construct these directly without

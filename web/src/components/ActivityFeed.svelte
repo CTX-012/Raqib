@@ -1,5 +1,6 @@
 <script lang="ts">
     import type { WireRunRecord } from '../lib/types';
+    import { ACTIVITY_FEED_WEB_MAX } from '../lib/limits';
     export let activity: WireRunRecord[];
 
     // v1.0.1 B-NEW-11 — "unknown" exit_kind routes to muted, not
@@ -52,7 +53,7 @@
         <div class="text-fg-muted italic text-sm py-2">No recent activity.</div>
     {:else}
         <ul class="space-y-1 text-sm">
-            {#each activity.slice(0, 12) as ev (ev.pid + '-' + ev.exit_time)}
+            {#each activity.slice(0, ACTIVITY_FEED_WEB_MAX) as ev (ev.pid + '-' + ev.exit_time)}
                 <li class="grid grid-cols-[5rem_1fr_auto_auto] gap-x-3">
                     <span class="text-fg-muted text-xs">{shortTime(ev.exit_time)}</span>
                     <span class="text-fg truncate">{ev.model_name ?? ev.name}</span>

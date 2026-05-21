@@ -33,9 +33,19 @@ allowlist = [
 blocklist = []
 
 # Default action for AI-classified processes that match neither list.
-# "Allow" or "Kill". Kill is recommended; the rate limiter + allowlist
-# are the safety knobs that keep an automated misfire from cascading.
-default_ai_action = "Kill"
+# "Allow" or "Kill".
+#
+# v1.0.1 default: Allow. Pre-v1.0.1 Inspector audit (B-NEW-1) found
+# that the runtime tick loop never wired `send_sigterm` to a real
+# signal, but still recorded `success: true` audit entries for the
+# governor's evaluate() decisions — phantom kills. The default flip
+# closes the gap until a future release wires the signal path and
+# defines kill policy semantics. Operators who want automated kill
+# (with the rate limiter + allowlist as safety belts) can set
+# `default_ai_action = "Kill"` here once they understand the policy.
+# Manual kill via the TUI kill_confirm card is unaffected by this
+# setting.
+default_ai_action = "Allow"
 
 # Seconds between SIGTERM and SIGKILL for any single process. Minimum 1s.
 sigterm_grace_secs = 5

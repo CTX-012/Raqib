@@ -116,6 +116,13 @@ pub struct WireWorkload {
     pub workload_category: String,
     pub cpu_pct: f32,
     pub rss_mb: u64,
+    /// v1.0.1 B-NEW-9 (operator request) — RSS as a percentage of the
+    /// host's total RAM. `None` when the platform layer hasn't yet
+    /// surfaced a `total_memory > 0` snapshot (first tick on a fresh
+    /// process, or a sysinfo failure). The dashboard renders this as
+    /// "121M (0.4%)"; an operator quoted absolute megabytes only and
+    /// asked "is that a lot?" — the percentage answers that for them.
+    pub ram_pct: Option<f32>,
     /// VRAM in MB. `None` when the process has no GPU allocation
     /// (vision/LLM workloads that haven't loaded yet, ROS2 nodes
     /// that don't touch GPU).
@@ -289,6 +296,12 @@ impl WireWorkload {
         let tokens_per_sec = lt.and_then(|t| t.tokens_per_sec_avg);
         let fps = lt.and_then(|t| t.fps_avg);
         let kv_cache_peak_pct = lt.and_then(|t| t.kv_cache_peak_pct);
+        let total_ram_bytes = state
+            .last_snapshot
+            .as_ref()
+            .map(|s| s.system.total_memory)
+            .filter(|&t| t > 0);
+        let ram_pct = compute_ram_pct(p.rss_mb, total_ram_bytes);
         let inputs = build_status_inputs(p, state);
         let status = crate::runtime::compute_workload_status(&inputs);
         Self {
@@ -305,6 +318,7 @@ impl WireWorkload {
             workload_category: workload_category_to_str(p.workload_category).to_string(),
             cpu_pct: p.cpu_pct,
             rss_mb: p.rss_mb,
+            ram_pct,
             vram_mb,
             tokens_per_sec,
             fps,
@@ -312,6 +326,19 @@ impl WireWorkload {
             status: workload_status_to_str(status).to_string(),
         }
     }
+}
+
+/// v1.0.1 B-NEW-9 — pure helper so the percentage rule is testable
+/// without spinning up an AnnotatedProcess + RuntimeState. None
+/// signals "platform layer has no total to divide against"; the
+/// dashboard then falls back to bare megabytes.
+pub(crate) fn compute_ram_pct(rss_mb: u64, total_ram_bytes: Option<u64>) -> Option<f32> {
+    let total = total_ram_bytes?;
+    if total == 0 {
+        return None;
+    }
+    let rss_bytes = rss_mb.saturating_mul(1024 * 1024) as f64;
+    Some(((rss_bytes / total as f64) * 100.0) as f32)
 }
 
 impl WireRunRecord {
@@ -510,6 +537,32 @@ mod tests {
             workload_status_to_str(ux_contract::WorkloadStatus::Loading),
             "loading"
         );
+    }
+
+    /// v1.0.1 B-NEW-9 — when the platform layer surfaces a non-zero
+    /// total, RSS megabytes get projected to a percentage so the web
+    /// row can render "121M (0.4%)" alongside the absolute figure.
+    #[test]
+    fn rss_renders_as_percentage_when_total_known() {
+        // 121 MB ÷ 32 GB ≈ 0.369 %.
+        let pct = compute_ram_pct(121, Some(32 * 1024 * 1024 * 1024)).unwrap();
+        assert!(
+            (pct - 0.369).abs() < 0.01,
+            "expected ~0.37%; got {pct}"
+        );
+
+        // 16 GB ÷ 32 GB = 50 %.
+        let half = compute_ram_pct(16 * 1024, Some(32 * 1024 * 1024 * 1024)).unwrap();
+        assert!((half - 50.0).abs() < 0.001, "expected 50%; got {half}");
+    }
+
+    /// v1.0.1 B-NEW-9 — no total ⇒ no percentage. The dashboard
+    /// then renders the bare megabyte figure rather than a misleading
+    /// "0.0%".
+    #[test]
+    fn rss_falls_back_to_absolute_when_total_unknown() {
+        assert!(compute_ram_pct(121, None).is_none());
+        assert!(compute_ram_pct(121, Some(0)).is_none());
     }
 
     #[test]

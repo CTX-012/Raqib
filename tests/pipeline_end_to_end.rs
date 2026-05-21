@@ -5,6 +5,7 @@
 use std::collections::HashMap;
 
 use edge_monitor::classifier::classify_process;
+use edge_monitor::governor::policy::PolicyAction;
 use edge_monitor::governor::{GovernorExecutor, GovernorPolicy, KillAction};
 use edge_monitor::lifecycle::tracker::LifecycleTracker;
 use edge_monitor::model::{AICategory, ProcessSample};
@@ -41,7 +42,13 @@ fn ai_process_with_model_path_is_tracked_and_killed_in_enforce_mode() {
     let snapshot = tracker.update(&[ai, shell]).unwrap();
     assert_eq!(snapshot.active_count(), 2);
 
-    let policy = GovernorPolicy::safe_default();
+    // v1.0.1 B-NEW-1 — `safe_default()` ships with
+    // `default_ai_action = Allow`, so an "enforce mode" pipeline
+    // test must opt back in to kills explicitly. The point of this
+    // test is the AI→Kill pathway, so the opt-in is exactly what
+    // the scenario covers.
+    let mut policy = GovernorPolicy::safe_default();
+    policy.default_ai_action = PolicyAction::Kill;
     let mut governor = GovernorExecutor::new(policy);
     let decisions = governor.evaluate(&snapshot);
 

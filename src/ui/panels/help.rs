@@ -60,6 +60,29 @@ pub fn render(f: &mut Frame, area: Rect, theme: &UiTheme) {
             body,
         ),
         Line::from(""),
+        // v1.0.1 B-NEW-1 / Inspector #1 — operators were surprised
+        // that no governor action ever fired even after telemetry
+        // flagged a workload. The default is now Allow; opting back
+        // in to kills is an explicit config change, not a silent
+        // built-in. Surface that here so the next operator who reads
+        // `?` knows where the safety surface lives.
+        Line::from(Span::styled(
+            "Automated governor: DEFAULT DISABLED (v1.0.1).",
+            Style::default().fg(theme.attention),
+        )),
+        Line::styled(
+            "  Enable via edge_monitor.toml:",
+            body,
+        ),
+        Line::styled(
+            "    [governor.policy]  default_ai_action = \"Kill\"",
+            body,
+        ),
+        Line::styled(
+            "  Manual kill (the `k` keybinding) still works regardless.",
+            body,
+        ),
+        Line::from(""),
         // Sprint-7 Item 4 — surface the no-auth posture on the help
         // overlay so the operator who just SSH'd in to a shared box
         // can see why the dashboard is reachable from their laptop.

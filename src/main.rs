@@ -629,11 +629,15 @@ fn run_headless(
         // web is a defensible mode: headless logging + remote
         // dashboard for ops who don't want a terminal up).
         if let Some(tx) = web_tx.as_ref() {
+            // v1.0.1 B-NEW-8 — AI-only filter, matches the TUI loop
+            // at src/ui/mod.rs. Non-AI shell exits don't belong in
+            // the dashboard's activity feed.
             let recent: Vec<edge_monitor::storage::RunRecord> = runtime
                 .state()
                 .completed
                 .iter()
                 .rev()
+                .filter(|s| s.category.is_some())
                 .take(50)
                 .cloned()
                 .map(edge_monitor::storage::RunRecord::from_summary)

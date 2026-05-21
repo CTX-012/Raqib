@@ -10,7 +10,7 @@ use crate::classifier;
 use crate::config::{Config, expand_tilde};
 use crate::exit_classify::{ExitContext, classify_exit, read_recent_kernel_log};
 use crate::fingerprint::Fingerprinter;
-use crate::governor::manual::{AuditLogEntry, KillSource, ManualKillAction};
+use crate::governor::manual::{AuditLogEntry, ManualKillAction};
 use crate::governor::{AuditWriter, GovernorExecutor, KillAction, ManualKiller};
 use crate::lifecycle::tracker::LifecycleTracker;
 use crate::lifecycle::{LifecycleSnapshot, LifecycleSummary};
@@ -928,58 +928,48 @@ impl Runtime {
 
     /// Mirror governor (automated) decisions into the audit ring buffer.
     /// Called once per tick by the loop owner so the UI sees them.
+    ///
+    /// v1.0.1 B-NEW-1 / B-NEW-3 — the runtime never wires
+    /// `GovernorExecutor::send_sigterm` to a real `libc::kill`
+    /// call. Pre-v1.0.1 this loop populated `governor_killed_pids`
+    /// and wrote `success: true` audit entries directly from
+    /// `state.decisions` — phantom kills that left a trail without
+    /// actually sending a signal.
+    ///
+    /// v1.0.1 closes the gap two ways:
+    ///   * `safe_default()`'s `default_ai_action` flipped from
+    ///     `Kill` to `Allow`, so `state.decisions` carries no kill
+    ///     verbs unless the operator explicitly opts in.
+    ///   * If a future config opts in, this loop stays a no-op
+    ///     for the kill-verb branches — audit entries are now
+    ///     written only when `send_sigterm` is wired AND succeeds.
+    ///     The matched `kill_action` is kept for the v1.x+ wiring
+    ///     target so when the path lights up the audit shape is
+    ///     already correct.
+    ///
+    /// Manual kills via `Runtime::manual_kill` continue to write
+    /// audit entries with real success/failure — they go through
+    /// `ManualKiller::kill_sigterm` which actually calls
+    /// `libc::kill` and reports the OS result.
     pub fn record_governor_audit(&mut self) {
-        for (pid, action, reason) in &self.state.decisions {
+        for (pid, action, _reason) in &self.state.decisions {
             let kill_action = match action {
                 KillAction::SignalTermSent => Some(ManualKillAction::SendSigterm),
                 KillAction::SignalKillSent => Some(ManualKillAction::SendSigkill),
                 _ => None,
             };
-            let Some(kill_action) = kill_action else {
+            let Some(_kill_action) = kill_action else {
                 continue;
             };
-
-            // Tier 3.5 — remember governor-driven kills so the exit
-            // classifier can attribute them. Post-CAR-17 the governor
-            // only fires real signals; there is no longer a dry-run
-            // false-exit path to compensate for.
-            self.governor_killed_pids.insert(*pid, reason.clone());
-
-            let name = self
-                .state
-                .annotated
-                .iter()
-                .find(|p| p.pid == *pid)
-                .map(|p| p.name.clone())
-                .unwrap_or_default();
-            let category = self
-                .state
-                .annotated
-                .iter()
-                .find(|p| p.pid == *pid)
-                .map(|p| p.category)
-                .filter(|c| *c != AICategory::NotAi);
-
-            let entry = AuditLogEntry {
-                timestamp: chrono::Utc::now(),
-                action: kill_action,
-                source: KillSource::Automated,
-                pid: *pid,
-                process_name: name,
-                category,
-                reason: reason.clone(),
-                success: true,
-                error_msg: None,
-            };
-            if let Some(w) = &self.audit_writer
-                && let Err(e) = w.append(&entry)
-            {
-                tracing::warn!(error = %e, "failed to persist automated audit entry");
-            }
-            self.state.audit.push_back(entry);
-            while self.state.audit.len() > self.config.runtime.audit_history {
-                self.state.audit.pop_front();
-            }
+            // v1.0.1 B-NEW-1 — intentional gap. See doc-comment.
+            // `governor_killed_pids` only gets populated when an
+            // actual `send_sigterm` call succeeds; that wiring lives
+            // in a future minor release. Until then the path is a
+            // no-op for kill verbs (Allow → no decisions, Kill +
+            // unwired send → no audit). Pid var stays as `_pid` to
+            // signal "we know this is the candidate but we are
+            // intentionally NOT recording an unrealised kill."
+            let _ = pid;
         }
     }
 }

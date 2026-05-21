@@ -289,6 +289,20 @@ impl RunRecord {
             .as_deref()
             .unwrap_or(self.summary.name.as_str())
     }
+
+    /// v1.0.1 B-NEW-2 — true for pre-v1.0 records whose
+    /// `GovernorKill::reason` carries the removed dry-run text. The
+    /// runtime no longer produces these (dry-run was hard-deleted in
+    /// Sprint 1 lead `d8d7897`), so a positive match here means the
+    /// record predates v1.0 and the original action was never taken.
+    /// Detect-and-tag at render time keeps the raw JSON on disk
+    /// untouched — that's the audit trail Inspector #1 wanted to keep.
+    pub fn is_legacy_dry_run_record(&self) -> bool {
+        matches!(
+            &self.exit_reason,
+            ExitReason::GovernorKill { reason } if reason.contains("dry-run mode")
+        )
+    }
 }
 
 /// One line in `index.jsonl` — minimal data needed to find the full

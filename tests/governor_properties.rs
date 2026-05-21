@@ -8,6 +8,7 @@
 
 use std::collections::HashMap;
 
+use edge_monitor::governor::policy::PolicyAction;
 use edge_monitor::governor::{GovernorExecutor, GovernorPolicy, KillAction};
 use edge_monitor::lifecycle::{LifecycleSnapshot, ProcessLifecycle};
 use edge_monitor::model::{AICategory, ProcessSample};
@@ -73,6 +74,12 @@ proptest! {
         n_candidates in 0usize..20
     ) {
         let mut policy = GovernorPolicy::safe_default();
+        // v1.0.1 B-NEW-1 — `safe_default()` now leaves
+        // `default_ai_action = Allow`, so no rate-limit ceiling can
+        // be exercised without first opting back in to kills. This
+        // property test is specifically about the rate-limit
+        // invariant, so the opt-in is the right scope.
+        policy.default_ai_action = PolicyAction::Kill;
         policy.rate_limit_max_kills = max;
         policy.rate_limit_window_secs = 60;
         let mut executor = GovernorExecutor::new(policy);

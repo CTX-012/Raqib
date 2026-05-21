@@ -46,6 +46,7 @@ export interface WireWorkload {
     workload_category: string;
     cpu_pct: number;
     rss_mb: number;
+    ram_pct: number | null;
     vram_mb: number | null;
     tokens_per_sec: number | null;
     fps: number | null;

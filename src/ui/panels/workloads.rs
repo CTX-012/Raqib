@@ -60,6 +60,20 @@ use crate::ui::theme::UiTheme;
 /// a future CAR; low priority since only one render site uses it).
 const RUNNING_ACTIVELY: &str = "running actively";
 
+/// v1.0.1 B-NEW-4 — Agent rows display this string instead of
+/// `RUNNING_ACTIVELY`. Inspector #2 found "running actively"
+/// overclaimed activity for SaaS-LLM CLIs (claude-code, cursor,
+/// aider, continue) — these processes proxy to a remote LLM, and
+/// edge_monitor measures none of the per-request rate. "alive"
+/// is the honest minimum signal: the process exists on this
+/// host and is in our annotated set; no further claim.
+///
+/// Extracted as a top-level const (next to `RUNNING_ACTIVELY`)
+/// so the contract-extraction follow-up (v0.3.10 CAR-XX) has a
+/// single grep target when adding `ux_contract::status::
+/// AGENT_ALIVE`.
+const AGENT_ALIVE: &str = "alive";
+
 /// L11c — map the local `WorkloadCategory` enum to the v0.3.4
 /// contract group-header const. Contract refined CAR-8 to
 /// const-only headers; the enum stays local per the orchestrator's
@@ -344,13 +358,13 @@ fn primary_metric(row: &Row) -> String {
             Some(fps) => format!("{fps:>4.0} fps"),
             None => RUNNING_ACTIVELY.to_string(),
         },
-        // Sprint-7.5 / CAR-18 — Agent rows show RUNNING_ACTIVELY by
-        // default. These are CLIs (claude-code, cursor, aider,
-        // continue) that proxy to a remote LLM; no local tokens/sec
-        // / KV / fps metric applies, and the v0.3.9 contract doesn't
-        // lock a category-specific schema for Agent in §2 yet.
-        WorkloadCategory::Agent
-        | WorkloadCategory::ROS2
+        // v1.0.1 B-NEW-4 — Agent rows show `AGENT_ALIVE` ("alive")
+        // instead of "running actively". See `AGENT_ALIVE` const
+        // doc-comment. ROS2 / Embeddings / Unknown keep the
+        // historical fallback for v1.0.1; Phase 2 sampler work
+        // will give each its own honest signal.
+        WorkloadCategory::Agent => AGENT_ALIVE.to_string(),
+        WorkloadCategory::ROS2
         | WorkloadCategory::Embeddings
         | WorkloadCategory::Unknown => RUNNING_ACTIVELY.to_string(),
     }

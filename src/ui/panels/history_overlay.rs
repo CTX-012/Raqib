@@ -16,7 +16,8 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph};
 
-use crate::history::format_exit_short;
+use crate::history::format_exit_short_for_record;
+use crate::storage::run_store::ExitReason;
 use crate::ui::theme::UiTheme;
 
 use super::super::app::{App, HistoryOverlay};
@@ -106,12 +107,16 @@ fn body_list<'a>(overlay: &'a HistoryOverlay, theme: &UiTheme) -> List<'a> {
         .enumerate()
         .map(|(i, r)| {
             let idx = overlay.records.len() - i;
-            let exit = format_exit_short(&r.exit_reason);
-            let color: Color = match exit.as_str() {
-                "clean" => theme.healthy,
-                "governor" => theme.attention,
+            // v1.0.1 B-NEW-2 — colour from the raw ExitReason so the
+            // legacy-dry-run prefix doesn't flip a governor record into
+            // the critical band when `format_exit_short_for_record`
+            // tags it with the longer pre-v1.0 string.
+            let color: Color = match &r.exit_reason {
+                ExitReason::CleanExit => theme.healthy,
+                ExitReason::GovernorKill { .. } => theme.attention,
                 _ => theme.critical,
             };
+            let exit = format_exit_short_for_record(r);
             // B14 — metric columns dropped; per-run detail now lives
             // in the post-mortem card. Keeps history rows scannable
             // at a glance (timestamp + duration + exit kind) without

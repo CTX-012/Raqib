@@ -325,6 +325,7 @@ impl GovernorExecutor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::governor::policy::PolicyAction;
     use std::collections::HashMap;
 
     fn make_lifecycle(
@@ -403,7 +404,12 @@ mod tests {
     fn executor_rate_limits_enforced_kills() {
         // 10 kill-eligible processes, budget 3 — only 3 get SignalTermSent,
         // the rest are RateLimited. Matches HANDOFF Module 5 acceptance test.
+        // v1.0.1 — flip default_ai_action back to Kill for THIS test so
+        // the rate-limit semantics stay testable; the safe_default's
+        // top-level Allow is the production posture, and the rate
+        // limiter only fires when an operator opts back into Kill.
         let mut policy = GovernorPolicy::safe_default();
+        policy.default_ai_action = PolicyAction::Kill;
         policy.rate_limit_max_kills = 3;
         policy.rate_limit_window_secs = 60;
         let mut executor = GovernorExecutor::new(policy);
@@ -437,6 +443,10 @@ mod tests {
     #[test]
     fn executor_rate_limit_disabled_when_max_is_zero() {
         let mut policy = GovernorPolicy::safe_default();
+        // v1.0.1 — same opt-back-in as the enforced-kills test above:
+        // the rate-limit-zero semantics presupposes Kill is the
+        // operator-selected default action.
+        policy.default_ai_action = PolicyAction::Kill;
         policy.rate_limit_max_kills = 0;
         let mut executor = GovernorExecutor::new(policy);
 

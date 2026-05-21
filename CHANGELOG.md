@@ -6,6 +6,100 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project aims to adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 once `v1.0.0` is tagged. Until then, minor versions may include breaking changes.
 
+## [1.0.1] — 2026-05-21
+
+Hotfix release closing twelve Inspector-surfaced bugs found
+post-`v1.0.0`. No new features and no wire-schema breaks; only
+behavioural corrections and one additive wire field (`ram_pct`).
+
+### Fixed
+
+- **Phantom kills (B-NEW-1 + B-NEW-3).** `policy.default_ai_action`
+  in `GovernorPolicy::safe_default()` flipped from `Kill` to `Allow`.
+  v1.0.0 logged kill decisions to the audit trail without sending a
+  real signal because `send_sigterm` was never wired up; the audit
+  log read like the governor was killing AI workloads even though
+  nothing died. The Allow-by-default flip closes the audit/reality
+  gap. Operators who want automated kills must opt in via
+  `edge_monitor.toml` (`[governor.policy] default_ai_action =
+  "Kill"`) and accept that the executor itself still needs
+  `send_sigterm` to be wired before any real kill fires. Surfaced
+  in the help overlay and `edge_monitor.toml.example`.
+- **Stale May-18 dry-run records (B-NEW-2).** RunRecord JSONs from
+  pre-v1.0 ollama runs still carry `"Would stop ollama (dry-run
+  mode — no action taken)"` in their `GovernorKill::reason`.
+  Detect-and-tag at render time via the new
+  `RunRecord::is_legacy_dry_run_record()` + `format_exit_short_for_record()`
+  helpers; the raw JSON on disk is left intact (audit-trail
+  preservation). Legacy rows now render as `governor (pre-v1.0
+  dry-run mode — record retained for archeology)`.
+- **Agent rows misclaiming activity (B-NEW-4 + B-NEW-6).** The
+  primary-metric fallback for Agent workloads (claude-code, cursor,
+  aider, continue) was `"running actively"` even when no metric was
+  measured — Inspector #2 flagged this as a load-bearing lie. Agent
+  rows now read `"alive"` (honest minimum signal: the process
+  exists; no activity claim). LLM/Vision rows keep
+  tokens/sec → fps → `"running actively"` precedence. Applied in
+  both `src/ui/panels/workloads.rs` (`AGENT_ALIVE` const) and the
+  web `WorkloadRow.svelte` per-category branch.
+- **Activity feed flooded with shell exits (B-NEW-8).** The wire
+  publisher (both TUI and headless paths) now filters recent
+  RunRecords to `category.is_some()` before taking the last 50, so
+  non-AI shell processes that briefly entered the lifecycle table
+  don't crowd out the AI exits the operator actually wants to see.
+- **`exit_kind = "unknown"` painting as a red alarm (B-NEW-11).**
+  The web `ActivityFeed.svelte` `exitClass()` now routes `unknown`
+  to `text-fg-muted` (no signal) and reserves `text-critical` for
+  outcomes the runtime KNOWS went wrong (`crash`, `segfault`,
+  `oom`, `cuda`). Exhaustive mapping with a muted-not-critical
+  defensive default for future wire-schema variants.
+
+### Added
+
+- **`ram_pct` on `WireWorkload` (B-NEW-9, operator request).** RSS
+  now renders as `121M (0.4%)` in the web dashboard when the
+  platform layer surfaced a total. Falls back to bare megabytes
+  when total is unknown — no misleading `0.0%`. Pure helper
+  `compute_ram_pct(rss_mb, total_ram_bytes)` keeps the rule
+  testable in isolation.
+- **Help overlay governor disclosure (Inspector #1 rec).** `?`
+  now states that the automated governor is DEFAULT DISABLED in
+  v1.0.1 and shows the exact config snippet to opt back in.
+  Manual kill (the `k` keybinding) is called out as unaffected.
+
+### Contract Amendment Requests (deferred to a v0.3.10 batch on `ux_contract`)
+
+These would have been single-line contract reads except that the
+constants don't exist yet. Per the dispatch protocol (CLAUDE.md
+"No UX changes without a contract amendment") this Linux PR keeps
+the strings inline and surfaces the asks for Agent A to land in a
+contract bump:
+
+- **CAR — `status::RUNNING_ACTIVELY` + `status::AGENT_ALIVE`** (B-NEW-5).
+  Both strings currently live as local `const`s in
+  `src/ui/panels/workloads.rs`. The pair belongs in
+  `ux_contract::status` so the sibling Windows binary picks up the
+  same wording.
+- **CAR — drop `status::KILL_DRY_RUN` + `status::KILL_DRY_RUN_PREFIX`**
+  (B-NEW-7). Dry-run mode was hard-deleted from the runtime in
+  Sprint 1 lead (`d8d7897`); these contract constants are orphans
+  with no live caller in `src/`. Safe to remove in the next
+  contract minor.
+- **CAR — `activity_feed::MAX_RECENT_RECORDS`** (B-NEW-10). The cap
+  of 50 lives inline in `runtime.recent_completed(50)` calls
+  across the TUI and headless wire publishers. A contract const
+  unifies the two and makes the cap a contract-versioned choice
+  rather than an accident of two call sites happening to agree.
+
+### Notes
+
+- Wire schema stays at v0.1; the new `ram_pct` field is additive
+  and serializes as `null` when unknown.
+- `tests/governor_properties.proptest-regressions` now pins the
+  `max=0, n_candidates=1` shrink that surfaced when FIX 1 first
+  landed — checked in per proptest's recommendation so the
+  regression always re-runs first.
+
 ## [1.0.0] — 2026-05-21
 
 First stable Linux release. Real-time TUI dashboard for AI workloads,

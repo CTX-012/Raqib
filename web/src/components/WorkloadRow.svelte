@@ -15,11 +15,24 @@
         loading: 'text-fg-muted',
     };
 
-    $: primary = workload.tokens_per_sec != null
-        ? `${workload.tokens_per_sec.toFixed(1)} tok/s`
-        : workload.fps != null
-        ? `${workload.fps.toFixed(1)} fps`
-        : 'running actively';
+    // v1.0.1 B-NEW-6 + B-NEW-4 — branch on workload_category so an
+    // Agent row with no metric reads "alive" (honest minimum signal:
+    // the process exists; no activity claim), while LLM keeps
+    // tokens/sec → KV → "running actively", and Vision keeps fps.
+    // Pre-v1.0.1 the fallback was always "running actively" — every
+    // Agent claude-code row claimed activity that wasn't measured.
+    $: primary = (() => {
+        if (workload.tokens_per_sec != null) {
+            return `${workload.tokens_per_sec.toFixed(1)} tok/s`;
+        }
+        if (workload.fps != null) {
+            return `${workload.fps.toFixed(1)} fps`;
+        }
+        if (workload.workload_category === 'agent') {
+            return 'alive';
+        }
+        return 'running actively';
+    })();
 </script>
 
 <div class="grid grid-cols-[auto_1fr_auto_auto_auto] gap-x-3 py-0.5 items-baseline text-sm">
@@ -32,6 +45,6 @@
     <span class="text-fg-muted text-xs">{primary}</span>
     <span class="text-fg-muted text-xs">{workload.cpu_pct.toFixed(1)}% CPU</span>
     <span class="text-fg-muted text-xs tabular-nums">
-        {workload.rss_mb}M{#if workload.vram_mb} · {workload.vram_mb}M GPU{/if}
+        {workload.rss_mb}M{#if workload.ram_pct != null} ({workload.ram_pct.toFixed(1)}%){/if}{#if workload.vram_mb} · {workload.vram_mb}M GPU{/if}
     </span>
 </div>

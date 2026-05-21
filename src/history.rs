@@ -157,7 +157,7 @@ pub fn build_model_summaries(store: &RunStore) -> Vec<ModelSummary> {
             let (last_run_at, last_status) = match recent.first() {
                 Some(r) => (
                     Some(r.summary.exit_time),
-                    Some(format_exit_short(&r.exit_reason)),
+                    Some(format_exit_short_for_record(r)),
                 ),
                 None => (None, None),
             };
@@ -260,7 +260,7 @@ fn render_runs(w: &mut impl Write, model: &str, records: &[RunRecord]) -> std::i
             r.summary.avg_cpu_pct,
             r.summary.peak_rss_mb,
             r.summary.peak_vram_mb,
-            format_exit_short(&r.exit_reason)
+            format_exit_short_for_record(r)
         )?;
         if let Some(line) = format_concurrent_line(r) {
             writeln!(w, "     {}", line)?;
@@ -358,6 +358,21 @@ pub fn format_exit_short(reason: &ExitReason) -> String {
         ExitReason::Crash { exit_code } => format!("crash({})", exit_code),
         ExitReason::Unknown => "unknown".into(),
     }
+}
+
+/// v1.0.1 B-NEW-2 — render path that masks legacy pre-v1.0 dry-run
+/// records (see [`RunRecord::is_legacy_dry_run_record`]). The
+/// historical reason string ("Would stop ollama (dry-run mode — no
+/// action taken)") was produced by a code path that has not existed
+/// since Sprint 1 lead `d8d7897`, so surfacing it as "governor"
+/// alongside post-v1.0 records is misleading. Tag it at render time
+/// instead; the raw JSON on disk stays intact.
+pub fn format_exit_short_for_record(record: &RunRecord) -> String {
+    if record.is_legacy_dry_run_record() {
+        return "governor (pre-v1.0 dry-run mode — record retained for archeology)"
+            .into();
+    }
+    format_exit_short(&record.exit_reason)
 }
 
 #[cfg(test)]
@@ -534,6 +549,60 @@ mod tests {
             "crash(139)"
         );
         assert_eq!(format_exit_short(&ExitReason::Unknown), "unknown");
+    }
+
+    /// v1.0.1 B-NEW-2 — a stale May-18 record whose `GovernorKill`
+    /// reason still carries the removed "dry-run mode" phrase must be
+    /// recognised as a legacy artefact, not a live governor action.
+    #[test]
+    fn legacy_dry_run_record_detected_by_substring() {
+        let mut rec = record_for("phi3-mini", None);
+        rec.exit_reason = ExitReason::GovernorKill {
+            reason: "Would stop ollama (dry-run mode — no action taken)".into(),
+        };
+        assert!(rec.is_legacy_dry_run_record());
+
+        let other = ExitReason::GovernorKill {
+            reason: "rate limit exceeded".into(),
+        };
+        let mut not_legacy = record_for("phi3-mini", None);
+        not_legacy.exit_reason = other;
+        assert!(!not_legacy.is_legacy_dry_run_record());
+    }
+
+    /// Render-time tagging is the migration path Inspector #1 asked
+    /// for: on-disk JSON is left intact, but the history view shows
+    /// the operator that this row predates v1.0.
+    #[test]
+    fn legacy_dry_run_render_text_is_replaced() {
+        let mut rec = record_for("phi3-mini", None);
+        rec.exit_reason = ExitReason::GovernorKill {
+            reason: "Would stop ollama (dry-run mode — no action taken)".into(),
+        };
+        let rendered = format_exit_short_for_record(&rec);
+        assert!(
+            rendered.contains("pre-v1.0 dry-run mode"),
+            "legacy record should render with the migration tag; got: {rendered}"
+        );
+        assert!(
+            rendered.starts_with("governor"),
+            "legacy tag must keep the 'governor' prefix so the row stays in the attention band; got: {rendered}"
+        );
+    }
+
+    /// A live (post-v1.0) governor kill must still render as the
+    /// bare "governor" token — the legacy migration must not regress
+    /// the normal path.
+    #[test]
+    fn non_legacy_record_render_text_unchanged() {
+        let mut rec = record_for("phi3-mini", None);
+        rec.exit_reason = ExitReason::GovernorKill {
+            reason: "rate limit exceeded".into(),
+        };
+        assert_eq!(format_exit_short_for_record(&rec), "governor");
+
+        let clean = record_for("phi3-mini", None);
+        assert_eq!(format_exit_short_for_record(&clean), "clean");
     }
 
     /// Helper to build a record with concurrency telemetry populated —

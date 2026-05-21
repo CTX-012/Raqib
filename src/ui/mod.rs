@@ -175,11 +175,18 @@ fn run_loop(
             // older entries are still queryable via the persistent
             // run store, just not pushed every tick.
             if let Some(tx) = web_tx.as_ref() {
+                // v1.0.1 B-NEW-8 — filter on `.category.is_some()` so
+                // non-AI shell exits (sh / sleep / ls / grep …) don't
+                // flood the activity feed. Pre-v1.0.1 the wire took
+                // any LifecycleSummary, AI or not; web users saw
+                // background-shell churn that the TUI's category-
+                // filtered Activity panel hides.
                 let recent: Vec<crate::storage::RunRecord> = runtime
                     .state()
                     .completed
                     .iter()
                     .rev()
+                    .filter(|s| s.category.is_some())
                     .take(50)
                     .cloned()
                     .map(crate::storage::RunRecord::from_summary)

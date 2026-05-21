@@ -45,7 +45,18 @@ impl GovernorPolicy {
                 "kthreadd".to_string(),
             ]),
             blacklist_names: HashSet::new(),
-            default_ai_action: PolicyAction::Kill,
+            // v1.0.1 B-NEW-1 — default flipped from Kill to Allow.
+            // Inspector #1 found that `evaluate()` ran with Kill but
+            // `send_sigterm` was never wired from the runtime tick
+            // loop, producing audit entries with `success=true` for
+            // kills that never happened. Flipping the default to
+            // Allow closes the phantom-kill gap until the policy
+            // semantics + actual send-signal path are wired in a
+            // future minor release. Operators who want automated
+            // kill enable it via `policy.default_ai_action = "Kill"`
+            // in `edge_monitor.toml` — documented in the help
+            // overlay (FIX 10) and edge_monitor.toml.example.
+            default_ai_action: PolicyAction::Allow,
             sigterm_grace_period_secs: 5,
             // CLAUDE.md safety rule 5: max 3 automated kills per 60s window.
             rate_limit_max_kills: 3,
@@ -100,7 +111,22 @@ mod tests {
         let policy = GovernorPolicy::safe_default();
         assert!(policy.whitelist_names.contains("bash"));
         assert!(policy.whitelist_names.contains("sshd"));
-        assert_eq!(policy.default_ai_action, PolicyAction::Kill);
+        // v1.0.1 B-NEW-1 — flipped from Kill to Allow to close the
+        // phantom-kill gap (Inspector #1). Operators opt in via
+        // `policy.default_ai_action = "Kill"` in edge_monitor.toml.
+        assert_eq!(policy.default_ai_action, PolicyAction::Allow);
+    }
+
+    #[test]
+    fn governor_default_ai_action_is_allow_v1_0_1() {
+        // v1.0.1 B-NEW-1 regression guard. Explicit name so a
+        // grep for "phantom kill" or "B-NEW-1" finds this test.
+        let policy = GovernorPolicy::safe_default();
+        assert_eq!(
+            policy.default_ai_action,
+            PolicyAction::Allow,
+            "v1.0.1 default must be Allow until send_sigterm is wired",
+        );
     }
 
     #[test]

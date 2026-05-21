@@ -141,6 +141,17 @@ context.
 
 ## Known limitations
 
+- **Automated governor disabled by default (v1.0.1).** The
+  `policy.default_ai_action` for AI workloads is `Allow`, not `Kill`.
+  Inspector #1 caught a phantom-kill audit-trail bug in v1.0.0 where
+  the governor logged automated kills without sending a signal; the
+  v1.0.1 fix is to leave the default at Allow and require an explicit
+  opt-in (`default_ai_action = "Kill"` in `edge_monitor.toml`) to
+  enable automated kills. Manual kills via the `k` keybinding /
+  `kill_confirm` card still work regardless. Surfaced in the `?` help
+  overlay. Re-enabling automated kills also requires wiring
+  `send_sigterm` into the executor — until that lands, opting in
+  produces audit lines without real kills.
 - **Ollama tokens/sec only available via `edge_monitor exec`**, not via
   passive monitoring. Ollama embeds tokens/sec in the per-request JSON
   response with no exposed Prometheus endpoint or log file — the only

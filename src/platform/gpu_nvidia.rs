@@ -157,22 +157,60 @@ impl GpuCollector {
         // Collect per-process VRAM usage
         let mut per_process_vram = HashMap::new();
 
-        // Note: NVML per-process memory tracking requires elevated privileges
-        // on most systems. We attempt to collect but don't fail if unavailable.
+        // NVML per-process queries: graphics and compute are separate APIs.
+        // graphics_processes returns OpenGL/Vulkan/X11 clients (compositor,
+        // browsers, games); compute_processes returns CUDA clients (every
+        // AI workload). Must query both to cover all GPU users.
+        //
+        // Pre-driver-510 releases required nvidia-modprobe -u for non-root
+        // per-process queries; no longer load-bearing on driver baseline ≥ 510.
         match device.running_graphics_processes() {
             Ok(processes) => {
-                for process in processes {
-                    let name = format!("pid_{}", process.pid);
-                    // Store memory as string (format varies by NVML version)
-                    let memory_str = format!("{:?}", process.used_gpu_memory);
-                    per_process_vram.insert(process.pid, (name, memory_str));
-                }
+                let pairs: Vec<(u32, String)> = processes
+                    .into_iter()
+                    .map(|p| (p.pid, format!("{:?}", p.used_gpu_memory)))
+                    .collect();
+                merge_per_process_vram(&mut per_process_vram, pairs);
             }
             Err(e) => {
                 tracing::debug!(
                     device = device_id,
                     error = %e,
-                    "cannot read per-process GPU memory (may require elevated privileges)"
+                    "cannot read per-process graphics GPU memory"
+                );
+            }
+        }
+
+        // v1.0.3 B-VRAM-ZERO — compute processes are where every AI
+        // workload appears (Ollama, vLLM, llama.cpp, PyTorch, ROS2
+        // perception with cuDNN). Without this branch (pre-v1.0.3
+        // behavior), every AI workload's per-PID VRAM reported zero
+        // because graphics_processes only returns OpenGL/Vulkan
+        // clients.
+        //
+        // Order matters: compute branch goes AFTER graphics so a
+        // process appearing on both lists (rare — typically only
+        // the compositor when GPU compute is active) keeps its
+        // compute reading via HashMap::insert overwriting behavior.
+        //
+        // Per Tester-A empirical confirmation (v1_0_3/
+        // b_vram_zero_confirmation): the allocating PID (e.g. the
+        // ollama runner subprocess holding 838 MiB) appears in this
+        // list directly; the daemon parent (e.g. ollama serve at
+        // PID 1685, 0 MiB) does NOT. No ppid reconciliation needed.
+        match device.running_compute_processes() {
+            Ok(processes) => {
+                let pairs: Vec<(u32, String)> = processes
+                    .into_iter()
+                    .map(|p| (p.pid, format!("{:?}", p.used_gpu_memory)))
+                    .collect();
+                merge_per_process_vram(&mut per_process_vram, pairs);
+            }
+            Err(e) => {
+                tracing::debug!(
+                    device = device_id,
+                    error = %e,
+                    "cannot read per-process compute GPU memory"
                 );
             }
         }
@@ -198,6 +236,25 @@ impl GpuCollector {
             power_watts,
             temp_c,
         })
+    }
+}
+
+/// v1.0.3 B-VRAM-ZERO — pure helper, no NVML coupling. Pulled out
+/// so the runner-attribution invariant Tester-A's evidence captured
+/// (an ollama runner subprocess holding 838 MiB lands in the
+/// compute list, the daemon parent lands at 0 MiB) can be unit-
+/// tested without spinning up real hardware. The real call sites
+/// in `read_device_metrics` populate `pairs` from
+/// `running_graphics_processes()` and `running_compute_processes()`
+/// respectively; tests populate them directly. Compute runs after
+/// graphics, so a PID listed on both lists keeps its compute value.
+pub(crate) fn merge_per_process_vram(
+    per_process_vram: &mut HashMap<u32, (String, String)>,
+    pairs: Vec<(u32, String)>,
+) {
+    for (pid, memory_str) in pairs {
+        let name = format!("pid_{pid}");
+        per_process_vram.insert(pid, (name, memory_str));
     }
 }
 
@@ -303,5 +360,97 @@ mod tests {
         assert!(!snapshot.has_gpu());
         assert_eq!(snapshot.total_vram_all_devices(), 0);
         assert_eq!(snapshot.used_vram_all_devices(), 0);
+    }
+
+    // ────────────────────────────────────────────────────────────
+    // v1.0.3 B-VRAM-ZERO — per-process VRAM merge invariants.
+    // Tests drive `merge_per_process_vram` directly with the
+    // same shape `read_device_metrics` derives from NVML's
+    // graphics + compute lists, so the runner-attribution
+    // behaviour Tester-A confirmed empirically is pinned without
+    // any NVML coupling.
+    // ────────────────────────────────────────────────────────────
+
+    /// Both NVML APIs (graphics and compute) populate the same
+    /// per-PID map. Pre-v1.0.3 only the graphics list was queried,
+    /// so a compute-only AI workload silently dropped to zero.
+    #[test]
+    fn gpu_collector_queries_both_graphics_and_compute_apis() {
+        let mut per_process_vram = HashMap::new();
+        // Graphics-list entries (e.g. the desktop compositor).
+        merge_per_process_vram(
+            &mut per_process_vram,
+            vec![(900, "Some(MemoryUsed(120000000))".into())],
+        );
+        // Compute-list entries (e.g. the ollama runner subprocess).
+        merge_per_process_vram(
+            &mut per_process_vram,
+            vec![(114547, "Some(MemoryUsed(878706688))".into())],
+        );
+        assert!(
+            per_process_vram.contains_key(&900),
+            "graphics entry must survive",
+        );
+        assert!(
+            per_process_vram.contains_key(&114547),
+            "compute entry must be added (pre-v1.0.3 it was missing)",
+        );
+    }
+
+    /// Runner-attribution invariant: only the *allocating* PID
+    /// appears in NVML's compute list; the daemon parent (PID
+    /// 1685 in Tester-A's evidence) is invisible to NVML and so
+    /// is absent from the merge entirely. The runner subprocess
+    /// (PID 114547, 838 MiB) is the only entry, and no ppid
+    /// reconciliation is required.
+    #[test]
+    fn gpu_collector_compute_only_workload_appears_in_per_process_vram() {
+        let mut per_process_vram = HashMap::new();
+        // Graphics list is empty (no compositor running, headless
+        // box) — Tester-A's repro shape.
+        merge_per_process_vram(&mut per_process_vram, vec![]);
+        // Compute list carries the runner subprocess only. NVML
+        // does NOT report the daemon parent (PID 1685, 0 MiB),
+        // so it is genuinely absent here — not "present with
+        // zero".
+        merge_per_process_vram(
+            &mut per_process_vram,
+            vec![(114547, "Some(MemoryUsed(878706688))".into())],
+        );
+        assert_eq!(per_process_vram.len(), 1);
+        let (name, mem) = per_process_vram.get(&114547).unwrap();
+        assert_eq!(name, "pid_114547");
+        assert!(
+            mem.contains("878706688"),
+            "compute-list memory string must round-trip into the merge map",
+        );
+        assert!(
+            !per_process_vram.contains_key(&1685),
+            "daemon parent must NOT appear in the per-process map \
+             (NVML doesn't report it; no ppid walk was needed)",
+        );
+    }
+
+    /// Order invariant: compute runs after graphics, so a PID
+    /// appearing on both lists keeps its compute reading. Rare
+    /// in practice (typically only the compositor when also
+    /// running compute), but pinned so a refactor that swaps
+    /// the call order doesn't silently regress.
+    #[test]
+    fn compute_overrides_graphics_for_pids_on_both_lists() {
+        let mut per_process_vram = HashMap::new();
+        merge_per_process_vram(
+            &mut per_process_vram,
+            vec![(2000, "Some(MemoryUsed(1024))".into())],
+        );
+        merge_per_process_vram(
+            &mut per_process_vram,
+            vec![(2000, "Some(MemoryUsed(99999))".into())],
+        );
+        let (_, mem) = per_process_vram.get(&2000).unwrap();
+        assert!(
+            mem.contains("99999"),
+            "compute reading must win when PID appears on both lists; got {mem}",
+        );
     }
 }

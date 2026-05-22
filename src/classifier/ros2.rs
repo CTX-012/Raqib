@@ -3,17 +3,24 @@
 //! Process-level only for v1.0. Three independent signals trigger
 //! `WorkloadCategory::ROS2`:
 //!
-//! 1. **Environment variables** — set by `ros2 launch`, the rclpy
-//!    init path, and the rclcpp/rmw initialisation. Most reliable
-//!    of the three; checked first because it requires no I/O
-//!    beyond what `ProcessSample::environ` already collected.
-//! 2. **Command line** — `ros2 run`, `ros2 launch`, the
+//! 1. **Linked libraries** — read `/proc/<pid>/maps` and look for
+//!    `librcl.so`, `librmw_implementation.so`, `_rclpy_pybind11`,
+//!    `librclcpp.so`, and the Fast-DDS RMW libs. Library linkage is
+//!    the most reliable signal of the three. Every ROS2 process
+//!    loads `librcl.so` + `librmw_implementation.so` at runtime
+//!    regardless of distro, RMW backend, or language (Python rclpy
+//!    or C++ rclcpp).
+//! 2. **Environment variables** — `ROS_DOMAIN_ID`, `ROS_DISTRO`,
+//!    `RMW_IMPLEMENTATION`. Reliably exported by `ros2 launch` and
+//!    `ros2 run` runners; NOT exported by bare `rclpy.init()` /
+//!    `rclcpp::init()` calls. Env signal therefore fires only for
+//!    runner-spawned children and operator shells with an explicit
+//!    `export ROS_DOMAIN_ID=N`.
+//! 3. **Command line** — `ros2 run`, `ros2 launch`, the
 //!    `rclcpp_component_container` host process, and bare `rclpy`
-//!    invocations.
-//! 3. **Linked libraries** — read `/proc/<pid>/maps` and look for
-//!    `librclcpp.so`, `librclpy.so`, `libfastdds.so`,
-//!    `libfastrtps.so`. Catches C++ nodes that were spawned
-//!    outside of `ros2 launch` and so don't carry the env vars.
+//!    invocations. Catches the runners themselves but does NOT
+//!    catch realistic `python3 my_node.py` invocations — those
+//!    only show up via the library signal.
 //!
 //! Per UX_CONTRACT.md §1 region 4, ROS2 detection runs **before**
 //! the LLM/Vision/Embeddings classifiers — a perception node that
@@ -32,14 +39,18 @@ use std::fs;
 
 use crate::model::{AICategory, ClassificationResult, ProcessSample, WorkloadCategory};
 
-/// Fix-1 — env vars that are reliably set **at runtime** by the
-/// rclpy/rclcpp init path (`rclpy.init()`, `rclcpp::init()`, the
-/// `ros2 launch` runner). Presence implies the process actually
-/// joined a ROS2 graph, so this signal is standalone trustworthy.
+/// Fix-1 / v1.0.3 B-EMPIRICAL-4 — env vars reliably exported by the
+/// `ros2 launch` and `ros2 run` runners. Bare `rclpy.init()` /
+/// `rclcpp::init()` calls READ these env vars but do not export
+/// them, so processes spawned outside of `ros2 launch` / `ros2 run`
+/// (e.g. `python3 my_node.py`) will not match this signal — for
+/// those, the library signal at [`ROS2_LIBRARY_MARKERS`] is
+/// load-bearing.
 ///
-/// Today this list is just `ROS_DOMAIN_ID`; other runtime-set vars
-/// can be added here if a future RMW or distro emits something that
-/// only fires at init time and never at shell-source time.
+/// Today this list is just `ROS_DOMAIN_ID`; other runner-exported
+/// vars can be added here if a future RMW or distro emits something
+/// that fires only at runner-init time and never at shell-source
+/// time.
 const ROS2_RUNTIME_ENV_VARS: &[&str] = &["ROS_DOMAIN_ID"];
 
 /// Fix-1 — env vars set by `/opt/ros/<distro>/setup.bash` (the
@@ -82,12 +93,36 @@ const ROS2_CMDLINE_MARKERS: &[&str] = &[
 
 /// Library basenames that signal ROS2 linkage. Looked up as
 /// substrings of `/proc/<pid>/maps` lines so the absolute install
-/// path doesn't matter. `libfastdds`/`libfastrtps` cover the
-/// default DDS implementations on Humble; cyclonedds-only nodes are
-/// caught via the rcl libraries.
+/// path doesn't matter.
+///
+/// v1.0.3 B-EMPIRICAL-4 — dropped the fictional `librclpy.so`
+/// (rclpy on Humble is a Python package + `_rclpy_pybind11`
+/// C-extension; no such library file exists). Added `librcl.so`
+/// (the canonical underlying library every ROS2 process loads —
+/// closes DESIGN_HANDOFF.md L9 spec drift at lines 128/335/1080),
+/// `librmw_implementation.so` (the RMW-discovery shim every ROS2
+/// process loads at runtime), and `_rclpy_pybind11` (the
+/// C-extension Python rclpy actually links). Kept `librclcpp.so`
+/// (C++ nodes), `libfastdds.so` / `libfastrtps.so` (Fast-DDS
+/// RMW backends).
 const ROS2_LIBRARY_MARKERS: &[&str] = &[
+    // Canonical underlying lib — loaded by every ROS2 process,
+    // every distro, every RMW backend.
+    "librcl.so",
+    // C++ rclcpp linkage.
     "librclcpp.so",
-    "librclpy.so",
+    // RMW shim — every ROS2 process loads this to discover the
+    // RMW plugin at runtime. Belt-and-braces against unusual
+    // distro layouts that don't surface librcl.so on the maps
+    // line we expect.
+    "librmw_implementation.so",
+    // Python rclpy via C-extension — the actual library Python
+    // rclpy nodes load (not the fictional `librclpy.so` the
+    // pre-v1.0.3 marker named, which does not exist on Humble).
+    "_rclpy_pybind11",
+    // Fast-DDS RMW backends — Humble + Fast-DDS hosts. Cyclone
+    // DDS hosts are caught by librcl.so / librmw_implementation.so
+    // above; no Cyclone-specific lib is needed in this list.
     "libfastdds.so",
     "libfastrtps.so",
 ];
@@ -213,11 +248,14 @@ fn make_ros2_result(evidence: String) -> ClassificationResult {
     ClassificationResult::ai(AICategory::Inference, WorkloadCategory::ROS2, evidence)
 }
 
-/// Fix-1 — returns the matched env var name when a *runtime-set*
-/// ROS2 env var is present with a non-empty value. Currently just
-/// `ROS_DOMAIN_ID` — set by `rclpy.init()` / `rclcpp::init()` and
-/// the `ros2 launch` runner, so its presence is strong evidence
-/// the process actually joined a ROS2 graph.
+/// Fix-1 / v1.0.3 B-EMPIRICAL-4 — returns the matched env var name
+/// when a *runner-exported* ROS2 env var is present with a non-empty
+/// value. Currently just `ROS_DOMAIN_ID` — exported by `ros2 launch`
+/// and `ros2 run`. Bare `rclpy.init()` / `rclcpp::init()` calls READ
+/// this env var but do not export it, so its presence is strong
+/// evidence of a runner-spawned (or explicitly-exported) process,
+/// but its absence does NOT rule out a real ROS2 process — see
+/// [`ROS2_LIBRARY_MARKERS`] for the load-bearing fallback.
 pub(crate) fn ros2_runtime_env_signal(sample: &ProcessSample) -> Option<&'static str> {
     env_signal_for(sample, ROS2_RUNTIME_ENV_VARS)
 }
@@ -477,15 +515,46 @@ mod tests {
     // Library-link signal (pure helper)
     // ────────────────────────────────────────────────────────────
 
+    /// v1.0.3 B-EMPIRICAL-4 — replaces the pre-v1.0.3
+    /// `rclpy_in_maps_signals_ros2` test that asserted on the
+    /// fictional `librclpy.so` (no such file ships on Humble).
+    /// Python rclpy actually links the
+    /// `_rclpy_pybind11.cpython-<abi>-<arch>.so` C-extension.
     #[test]
-    fn rclpy_in_maps_signals_ros2() {
+    fn _rclpy_pybind11_signals_ros2() {
         let maps = "\
-7f1234567000-7f1234600000 r-xp 00000000 00:00 0 /opt/ros/humble/lib/librclpy.so.5.3.0
+7f1234567000-7f1234600000 r-xp 00000000 00:00 0 /opt/ros/humble/local/lib/python3.10/dist-packages/rclpy/_rclpy_pybind11.cpython-310-x86_64-linux-gnu.so
 7f1234600000-7f1234700000 rw-p 00000000 00:00 0 [heap]
 ";
         assert_eq!(
             ros2_library_in_maps_text(maps),
-            Some("librclpy.so")
+            Some("_rclpy_pybind11")
+        );
+    }
+
+    /// v1.0.3 B-EMPIRICAL-4 — every ROS2 process loads
+    /// `librcl.so` regardless of distro / RMW / language.
+    /// Closes DESIGN_HANDOFF.md L9 spec drift.
+    #[test]
+    fn librcl_so_alone_signals_ros2() {
+        let maps = "\
+7f1000000000-7f1000100000 r-xp 00000000 00:00 0 /opt/ros/humble/lib/librcl.so.5.3.0
+";
+        assert_eq!(ros2_library_in_maps_text(maps), Some("librcl.so"));
+    }
+
+    /// v1.0.3 B-EMPIRICAL-4 — the RMW-discovery shim is also
+    /// universally linked; belt-and-braces against odd distro
+    /// layouts where librcl.so wouldn't surface on the maps
+    /// line we expect.
+    #[test]
+    fn librmw_implementation_so_signals_ros2() {
+        let maps = "\
+7f1000000000-7f1000100000 r-xp 00000000 00:00 0 /opt/ros/humble/lib/librmw_implementation.so.5.3.6
+";
+        assert_eq!(
+            ros2_library_in_maps_text(maps),
+            Some("librmw_implementation.so")
         );
     }
 
@@ -525,6 +594,58 @@ mod tests {
     #[test]
     fn empty_maps_returns_none() {
         assert_eq!(ros2_library_in_maps_text(""), None);
+    }
+
+    /// v1.0.3 B-EMPIRICAL-4 — realistic `/proc/<pid>/maps` snippet
+    /// for a Python rclpy node on Humble + Cyclone DDS (the operator's
+    /// default; Tester-A confirmed this case). The libs enumerated
+    /// here are what Tester-A observed in their evidence directory
+    /// (`tests/empirical/v1_0_2/tester_a/evidence/positive_with_domain_id_091415/`)
+    /// for a `python3 my_node.py` invocation. None of these are the
+    /// fictional `librclpy.so` the pre-v1.0.3 marker looked for, so
+    /// the new `librcl.so` / `librmw_implementation.so` /
+    /// `_rclpy_pybind11` markers are load-bearing for this case.
+    #[test]
+    fn realistic_humble_cyclone_dds_maps_signals_ros2() {
+        let maps = "\
+7f1000000000-7f1000100000 r-xp 00000000 00:00 0 /opt/ros/humble/lib/librcl.so.5.3.0
+7f1000100000-7f1000200000 r-xp 00000000 00:00 0 /opt/ros/humble/lib/librcl_action.so.5.3.0
+7f1000200000-7f1000300000 r-xp 00000000 00:00 0 /opt/ros/humble/lib/librcl_lifecycle.so.5.3.0
+7f1000300000-7f1000400000 r-xp 00000000 00:00 0 /opt/ros/humble/lib/librcl_yaml_param_parser.so.5.3.0
+7f1000400000-7f1000500000 r-xp 00000000 00:00 0 /opt/ros/humble/lib/librmw.so.6.1.2
+7f1000500000-7f1000600000 r-xp 00000000 00:00 0 /opt/ros/humble/lib/librmw_implementation.so.5.3.6
+7f1000600000-7f1000700000 r-xp 00000000 00:00 0 /opt/ros/humble/lib/librcutils.so.5.1.5
+7f1000700000-7f1000800000 r-xp 00000000 00:00 0 /opt/ros/humble/lib/librmw_cyclonedds_cpp.so
+7f1000800000-7f1000900000 r-xp 00000000 00:00 0 /opt/ros/humble/lib/libddsc.so.0.10.5
+7f1000900000-7f1000a00000 r-xp 00000000 00:00 0 /opt/ros/humble/local/lib/python3.10/dist-packages/rclpy/_rclpy_pybind11.cpython-310-x86_64-linux-gnu.so
+";
+        // librcl.so fires first per the marker order; if it ever
+        // moves position the test should still classify the
+        // process as ROS2, so assert via the signal helper rather
+        // than the exact marker string.
+        assert!(
+            ros2_library_in_maps_text(maps).is_some(),
+            "realistic Humble + Cyclone DDS rclpy maps must signal ROS2",
+        );
+    }
+
+    /// v1.0.3 B-EMPIRICAL-4 — negative. A non-ROS2 Python process
+    /// whose imports happen to bring in `rcl_interfaces` (the Python
+    /// package, not the library) should NOT classify as ROS2. The
+    /// substring "rcl" appears in the path but no `librcl.so` SO
+    /// is mapped — the markers are .so-anchored.
+    #[test]
+    fn process_with_rcl_substring_but_no_librcl_so_returns_none() {
+        let maps = "\
+7f1000000000-7f1000100000 r-xp 00000000 00:00 0 /usr/lib/python3/dist-packages/rcl_interfaces/__init__.py
+7f1000100000-7f1000200000 rw-p 00000000 00:00 0 [heap]
+";
+        assert_eq!(
+            ros2_library_in_maps_text(maps),
+            None,
+            "bare `rcl` substring in a Python path must not fire \
+             the library signal — the markers are .so-anchored",
+        );
     }
 
     // ────────────────────────────────────────────────────────────

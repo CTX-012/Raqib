@@ -80,7 +80,17 @@ impl RaplReader {
                 },
                 Err(e) => {
                     if !self.warned_unavailable {
-                        tracing::warn!(
+                        // v1.0.3 RIDE 2 — downgraded from warn! to info!.
+                        // Tester-B observed the WARN firing at every
+                        // launch on desktop systems where the user
+                        // lacks `/sys/class/powercap` read perms (the
+                        // default on a fresh Ubuntu install). An INFO
+                        // line still surfaces the diagnostic in the
+                        // log; the WARN severity was alarming for what
+                        // is a routine permission state. The
+                        // once-per-process gate (`warned_unavailable`)
+                        // is unchanged — still fires exactly once.
+                        tracing::info!(
                             path = %pkg.energy_path.display(),
                             error = %e,
                             "RAPL energy_uj unreadable; CPU watts unavailable"

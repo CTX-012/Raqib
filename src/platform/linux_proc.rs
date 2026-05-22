@@ -54,7 +54,7 @@ impl ProcessCollector {
     }
 
     /// Collects all running processes from /proc.
-    /// Returns a Vec<ProcessSample> where each sample has been parsed from the filesystem.
+    /// Returns a `Vec<ProcessSample>` where each sample has been parsed from the filesystem.
     pub fn collect(&self) -> PlatformResult<Vec<ProcessSample>> {
         let mut processes = Vec::new();
 

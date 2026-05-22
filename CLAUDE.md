@@ -150,15 +150,20 @@ context.
 
 ## Known limitations
 
-- **B-EMPIRICAL surfaced 2026-05-22:** RunStore records show
-  `peak_vram_mb=0` on this NVML-working host. Root cause not yet
-  determined. May be NVML permission gating, NVML init failure,
-  per-PID VRAM accounting bug, or runtime.rs:1322 string-parsing
-  issue. Tracked for next investigation cycle.
-- **B-EMPIRICAL-4 surfaced 2026-05-22:** rclpy Python ROS2 nodes
-  invisible to classifier on default Humble + Cyclone DDS. Three
-  compounding causes — recommended fix in Inspector #9 report.
-  v1.0.3 hotfix candidate.
+- **(RESOLVED in v1.0.3.)** ~~B-EMPIRICAL surfaced 2026-05-22:
+  RunStore records show `peak_vram_mb=0` on this NVML-working
+  host.~~ Root cause: `gpu_nvidia.rs::read_device_metrics`
+  queried only NVML's graphics-process API, never the
+  compute-process API where every CUDA workload lives. Fixed in
+  v1.0.3 by adding a parallel `running_compute_processes()` call;
+  see CHANGELOG.md [1.0.3] B-VRAM-ZERO.
+- **(RESOLVED in v1.0.3.)** ~~B-EMPIRICAL-4 surfaced 2026-05-22:
+  rclpy Python ROS2 nodes invisible to classifier on default
+  Humble + Cyclone DDS.~~ Root cause: the library marker list
+  hard-coded a non-existent `librclpy.so`. Fixed in v1.0.3 by
+  replacing it with the real markers `librcl.so`,
+  `librmw_implementation.so`, and `_rclpy_pybind11`; see
+  CHANGELOG.md [1.0.3] B-EMPIRICAL-4.
 - **Automated governor disabled by default (v1.0.1).** The
   `policy.default_ai_action` for AI workloads is `Allow`, not `Kill`.
   Inspector #1 caught a phantom-kill audit-trail bug in v1.0.0 where

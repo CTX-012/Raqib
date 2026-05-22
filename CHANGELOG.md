@@ -6,6 +6,103 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project aims to adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 once `v1.0.0` is tagged. Until then, minor versions may include breaking changes.
 
+## [1.0.3] — 2026-05-22
+
+Hotfix release closing two platform-layer bugs that were silently
+shaping every v1.0.x record — rclpy Python ROS2 nodes invisible to
+the classifier (B-EMPIRICAL-4) and every CUDA workload reporting
+zero VRAM (B-VRAM-ZERO) — plus four small hygiene rides. No wire
+schema change; no behaviour change for processes already classified
+correctly under v1.0.2.
+
+### Fixed
+
+- **B-EMPIRICAL-4 (Tester-A + Inspector #9):** rclpy Python ROS2
+  nodes are now correctly classified on default Humble + Cyclone
+  DDS hosts. Previously, every Python rclpy node was invisible to
+  the classifier because:
+  1. `rclpy.init()` does NOT export `ROS_DOMAIN_ID` — only `ros2
+     launch` / `ros2 run` runners do. The env signal therefore
+     fires for runner-spawned children but not for bare
+     `python3 my_node.py` invocations.
+  2. Typical `python3 my_node.py` cmdlines lack any ROS2 marker.
+  3. `ROS2_LIBRARY_MARKERS` listed `librclpy.so` — a library that
+     doesn't exist on Humble; rclpy is a Python package whose
+     C-extension is `_rclpy_pybind11.cpython-<abi>-<arch>.so`.
+
+  Fixed by replacing the fictional `librclpy.so` marker with three
+  real, universally-loaded markers: `librcl.so` (the canonical
+  underlying lib every ROS2 process loads, regardless of distro /
+  RMW / language — closes DESIGN_HANDOFF.md L9 spec drift at lines
+  128 / 335 / 1080), `librmw_implementation.so` (the RMW-discovery
+  shim every ROS2 process loads), and `_rclpy_pybind11` (the
+  C-extension Python rclpy actually links). Existing markers
+  (`librclcpp.so`, `libfastdds.so`, `libfastrtps.so`) retained.
+
+  Also corrected misleading module-level doc-comments at
+  `src/classifier/ros2.rs` that claimed env vars were the "most
+  reliable" signal (library linkage is — env vars don't fire for
+  bare `rclpy.init()` / `rclcpp::init()` calls).
+
+- **B-VRAM-ZERO (Tester-A + Inspector-A):** per-workload
+  `peak_vram_mb` now reports correctly for AI workloads.
+  Previously, every CUDA workload (Ollama, vLLM, llama.cpp,
+  PyTorch, ROS2 perception with cuDNN) reported `peak_vram_mb=0`
+  in RunStore records and `vram_mb=null` in live snapshots because
+  `gpu_nvidia.rs::read_device_metrics` only called NVML's
+  `running_graphics_processes()` API — which returns only OpenGL /
+  Vulkan / X11 clients (compositor, browsers, games), never CUDA
+  clients.
+
+  Fixed by adding a parallel `running_compute_processes()` call
+  that merges into the same per-PID VRAM map. Both NVML APIs are
+  queried every tick; compute runs after graphics so a PID
+  appearing on both lists keeps its compute reading. The merge
+  step is extracted as a pure helper (`merge_per_process_vram`)
+  so the runner-attribution invariant Tester-A confirmed
+  empirically can be unit-tested without spinning up real NVML.
+
+  Per Tester-A's confirmation
+  (`tests/empirical/v1_0_3/b_vram_zero_confirmation/REPORT.md`):
+  the allocating PID (ollama runner subprocess at PID 114547
+  holding 838 MiB) appears in NVML's compute list directly; the
+  daemon parent (ollama serve at PID 1685, 0 MiB) is invisible
+  to NVML. No ppid reconciliation needed.
+
+  Latent since 2026-04-28 (commit `d02a7eb0`). All v1.0.0–v1.0.2
+  RunStore records on every host have been silently affected.
+  Phase 3's governor pressure-detection depends on accurate
+  per-PID VRAM; this fix is mandatory before Phase 3 work.
+
+### Changed (hygiene)
+
+- **RIDE 1:** removed stale "Governor will send real signals"
+  startup WARN at `src/main.rs:173-177`. v1.0.1 flipped
+  `default_ai_action` to Allow and routed the kill-verb branch in
+  `record_governor_audit` to a no-op, so the warning claimed an
+  automated kill path that no longer exists.
+- **RIDE 2:** downgraded the RAPL `energy_uj` permission-denied
+  log from `warn!` to `info!` at `src/telemetry/rapl.rs`. The
+  once-per-process gate (`warned_unavailable`) was already in
+  place; only the severity changed. INFO conveys the diagnostic
+  without alarming operators on systems that lack
+  `/sys/class/powercap` read perms by default.
+- **RIDE 3:** fixed 4 `cargo doc` `unclosed HTML tag` warnings —
+  `<pid>` / `<ProcessSample>` / `<Span>` in doc-comments at
+  `src/model.rs:18-20` (two hits on the same struct), `src/
+  platform/linux_proc.rs:57`, and `src/ui/panels/live_detail.rs:190`
+  are now backtick-quoted so rustdoc no longer parses them as
+  literal HTML.
+- **RIDE 4 / B-NEW-20:** corrected the stale "NVML per-process
+  memory tracking requires elevated privileges" comment at
+  `src/platform/gpu_nvidia.rs:160`. No longer load-bearing on
+  driver baseline ≥ 510; the new comment documents the
+  graphics-vs-compute API split.
+
+### Wire schema
+
+Unchanged — still v0.1.
+
 ## [1.0.2] — 2026-05-22
 
 Hotfix release closing two Inspector #5 classifier findings plus a

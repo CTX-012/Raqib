@@ -15,9 +15,9 @@ pub struct ProcessSample {
     pub environ: HashMap<String, String>,
     pub cwd: Option<PathBuf>,
     /// Resident set size in bytes. 0 for kernel threads and permission-denied reads.
-    /// Parsed from /proc/<pid>/status VmRSS line.
+    /// Parsed from `/proc/<pid>/status` VmRSS line.
     pub rss_bytes: u64,
-    /// Cumulative CPU time (user+system) in clock ticks, from /proc/<pid>/stat.
+    /// Cumulative CPU time (user+system) in clock ticks, from `/proc/<pid>/stat`.
     /// Raw value; per-tick CPU% is computed by the runtime against the previous
     /// sample. 0 for permission-denied reads.
     pub cpu_time_ticks: u64,

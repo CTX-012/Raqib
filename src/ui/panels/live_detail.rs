@@ -187,7 +187,7 @@ fn block_for(value: f32, range: (f32, f32)) -> char {
     BLOCKS[idx.min(BLOCKS.len() - 1)]
 }
 
-/// L17 / §5 — render a metric buffer as a Vec<Span> sparkline.
+/// L17 / §5 — render a metric buffer as a `Vec<Span>` sparkline.
 ///
 /// Each cell becomes one `Span` so threshold colors can land per
 /// sample: a buffer whose recent values cross the §14 attention /

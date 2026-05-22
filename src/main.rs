@@ -170,12 +170,13 @@ fn main() -> anyhow::Result<()> {
         };
     }
 
-    tracing::warn!(
-        "Governor will send real signals. Allowlist + rate limit + \
-         grace period still apply. Manual kills require kill_confirm \
-         card confirmation per UX_CONTRACT §6 (CAR-17)."
-    );
-
+    // v1.0.3 RIDE 1 — removed the "Governor will send real signals"
+    // startup WARN that fired at every launch. v1.0.1 flipped
+    // `policy.default_ai_action` to Allow and routed the kill-verb
+    // branch in `record_governor_audit` to a no-op, so the warning
+    // claimed an automated kill path that no longer exists. Manual
+    // kills still require the kill_confirm card per UX_CONTRACT §6
+    // (CAR-17); the help overlay already surfaces that.
     let shutdown = install_shutdown_handler()?;
 
     let runtime = Runtime::new(config);

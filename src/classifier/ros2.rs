@@ -63,12 +63,19 @@ const ROS2_SHELL_ENV_VARS: &[&str] = &[
 
 /// Substrings (lowercased, word-boundary not required because
 /// these strings are unambiguous) that match in a cmdline join.
+///
+/// v1.0.2 B-NEW-16 (Inspector #5) — dropped `"ros2 topic"`,
+/// `"ros2 service"`, `"ros2 node"`. These are introspection CLIs,
+/// not node-spawning commands, and they conflated short-lived
+/// shell invocations (1-5 s `ros2 topic hz` polls during debug
+/// sessions) with actual ROS2 graph participants. The operator's
+/// RunStore was carrying 55 transient `"ros2"` records that
+/// flooded the workloads panel and the activity feed. Kept:
+/// `"ros2 run"`, `"ros2 launch"` (these DO spawn a node),
+/// `"rclcpp_component_container"`, `"rclpy"`.
 const ROS2_CMDLINE_MARKERS: &[&str] = &[
     "ros2 run",
     "ros2 launch",
-    "ros2 service",
-    "ros2 topic",
-    "ros2 node",
     "rclcpp_component_container",
     "rclpy",
 ];
@@ -83,6 +90,36 @@ const ROS2_LIBRARY_MARKERS: &[&str] = &[
     "librclpy.so",
     "libfastdds.so",
     "libfastrtps.so",
+];
+
+/// v1.0.2 (Inspector #5) — process-name blacklist. These are
+/// ROS2 *tooling* (visualisers, build / lint, GUIs), not ROS2
+/// graph participants. They link the rcl libraries and inherit
+/// the setup.bash env, so without this guard they'd false-fire
+/// the library / cmdline signals.
+///
+/// Just as important: Phase 2 will run `ros2 topic hz <topic>` as
+/// a Hz sampler shellout. Without this list (and the bash-`-c`
+/// guard below) edge_monitor would classify its own sampler
+/// probes as ROS2 nodes, creating a feedback loop. Matching is
+/// case-insensitive prefix on `ProcessSample::name`; the entries
+/// are all ≤15 chars so the kernel's `TASK_COMM_LEN=16`
+/// truncation of `/proc/<pid>/comm` doesn't lose any of them.
+const ROS2_TOOLING_NAMES: &[&str] = &[
+    "rviz",
+    "rviz2",
+    "rqt_graph",
+    "rqt_plot",
+    "rqt_console",
+    "rqt_logger_level",
+    "rqt_image_view",
+    "rqt_reconfigure",
+    "rqt",
+    "colcon",
+    "ament_lint",
+    "ament_cpplint",
+    "ament_flake8",
+    "ament_pep257",
 ];
 
 /// Top-level entry — runs the signal checks in priority order and
@@ -100,6 +137,16 @@ const ROS2_LIBRARY_MARKERS: &[&str] = &[
 /// classify on their own — see [`ros2_shell_env_signal`] for the
 /// surfaced-but-not-load-bearing helper.
 pub(crate) fn classify(sample: &ProcessSample) -> Option<ClassificationResult> {
+    // v1.0.2 (Inspector #5) — tooling-name and shell-wrapper
+    // guards. Both run before any signal check: the goal is "we
+    // know this process is NOT a ROS2 node even though some of
+    // the downstream signals would falsely fire on it".
+    if is_ros2_tooling_name(&sample.name) {
+        return None;
+    }
+    if is_shell_wrapped_ros2_invocation(&sample.cmdline) {
+        return None;
+    }
     if let Some(var) = ros2_runtime_env_signal(sample) {
         let evidence = format!("ROS2 runtime env var present: {var}");
         return Some(make_ros2_result(evidence));
@@ -119,6 +166,47 @@ pub(crate) fn classify(sample: &ProcessSample) -> Option<ClassificationResult> {
     // to the AI classifiers (most of which will return None for a
     // non-AI process, which is exactly what we want).
     None
+}
+
+/// v1.0.2 — case-insensitive prefix match against
+/// [`ROS2_TOOLING_NAMES`]. Prefix (not exact) so the kernel's
+/// `TASK_COMM_LEN=16` truncation of `/proc/<pid>/comm` still
+/// matches the canonical short name on the longer real
+/// executable.
+pub(crate) fn is_ros2_tooling_name(name: &str) -> bool {
+    let lowered = name.to_ascii_lowercase();
+    ROS2_TOOLING_NAMES
+        .iter()
+        .any(|tool| lowered.starts_with(tool))
+}
+
+/// v1.0.2 — `bash -c "ros2 …"` / `sh -c "ros2 …"` and the
+/// `/bin/...` variants are NOT ROS2 nodes. The process is the
+/// shell wrapper; the embedded `ros2 …` text in argv would
+/// otherwise falsely match the cmdline signal. Phase 2's Hz
+/// sampler will shell out this exact shape, so the guard also
+/// breaks the self-classification feedback loop the sampler
+/// would otherwise create.
+pub(crate) fn is_shell_wrapped_ros2_invocation(cmdline: &[String]) -> bool {
+    let Some(first) = cmdline.first() else {
+        return false;
+    };
+    // Match basename so `/bin/bash` and `/usr/bin/sh` are caught too.
+    let basename = first.rsplit('/').next().unwrap_or(first);
+    if !matches!(basename, "bash" | "sh") {
+        return false;
+    }
+    let Some(dash_c_idx) = cmdline.iter().position(|a| a == "-c") else {
+        return false;
+    };
+    // The "-c" argument must be followed by at least one shell-
+    // command argument. Look for "ros2" in any argv element AFTER
+    // the -c so a `bash -c …` that doesn't actually contain ros2
+    // text doesn't trip the guard.
+    cmdline
+        .iter()
+        .skip(dash_c_idx + 1)
+        .any(|arg| arg.to_ascii_lowercase().contains("ros2"))
 }
 
 fn make_ros2_result(evidence: String) -> ClassificationResult {
@@ -554,6 +642,128 @@ mod tests {
             "evidence should cite cmdline, got: {}",
             result.evidence,
         );
+    }
+
+    // ────────────────────────────────────────────────────────────
+    // v1.0.2 B-NEW-16 — introspection-CLI cmdline markers must
+    // NOT classify as ROS2. These shell out for a second or two
+    // and were polluting the workloads panel + activity feed.
+    // ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn ros2_topic_list_does_not_classify_as_ros2() {
+        let s = sample("ros2", &["ros2", "topic", "list"]);
+        assert!(
+            classify(&s).is_none(),
+            "B-NEW-16 — `ros2 topic` is introspection, not a node",
+        );
+    }
+
+    #[test]
+    fn ros2_service_list_does_not_classify_as_ros2() {
+        let s = sample("ros2", &["ros2", "service", "list"]);
+        assert!(
+            classify(&s).is_none(),
+            "B-NEW-16 — `ros2 service` is introspection, not a node",
+        );
+    }
+
+    #[test]
+    fn ros2_node_list_does_not_classify_as_ros2() {
+        let s = sample("ros2", &["ros2", "node", "list"]);
+        assert!(
+            classify(&s).is_none(),
+            "B-NEW-16 — `ros2 node` is introspection, not a node",
+        );
+    }
+
+    /// Positive guard: dropping the introspection markers must NOT
+    /// break detection of real node-spawning commands.
+    #[test]
+    fn ros2_run_my_node_still_classifies_as_ros2() {
+        let s = sample("ros2", &["ros2", "run", "demo_nodes_cpp", "talker"]);
+        let result = classify(&s).expect("ros2 run must still classify");
+        assert_eq!(result.workload_category, WorkloadCategory::ROS2);
+    }
+
+    /// Positive guard for the other surviving node-spawn verb.
+    #[test]
+    fn ros2_launch_still_classifies_as_ros2() {
+        let s = sample(
+            "ros2",
+            &["ros2", "launch", "my_pkg", "system.launch.py"],
+        );
+        let result = classify(&s).expect("ros2 launch must still classify");
+        assert_eq!(result.workload_category, WorkloadCategory::ROS2);
+    }
+
+    // ────────────────────────────────────────────────────────────
+    // v1.0.2 (Inspector #5) — sampler self-classification guards.
+    // Tooling names AND `bash -c "ros2 …"` shell wrappers must
+    // NOT classify as ROS2, or else Phase 2's Hz sampler will
+    // treat its own probes as new ROS2 nodes.
+    // ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn rviz2_does_not_classify_as_ros2() {
+        // rviz2 links the rcl libraries (via the rviz_common
+        // packages) so the library signal WOULD fire on it
+        // without the tooling-name guard. The guard short-circuits
+        // before the library read happens.
+        let s = sample("rviz2", &["rviz2", "-d", "config.rviz"]);
+        assert!(classify(&s).is_none(), "rviz2 is tooling, not a graph node");
+    }
+
+    #[test]
+    fn rqt_graph_does_not_classify_as_ros2() {
+        let s = sample("rqt_graph", &["rqt_graph"]);
+        assert!(classify(&s).is_none());
+    }
+
+    /// The Phase 2 ROS Hz sampler will exec `bash -c "ros2 topic
+    /// hz /chatter"`. Even after B-NEW-16 dropped the `ros2
+    /// topic` cmdline marker, the shell-wrapper guard is the
+    /// final defence: a future contract amendment that re-adds a
+    /// `ros2`-prefixed marker still won't feedback-loop the
+    /// sampler.
+    #[test]
+    fn bash_dash_c_ros2_topic_hz_does_not_classify_as_ros2() {
+        let s = sample("bash", &["bash", "-c", "ros2 topic hz /chatter"]);
+        assert!(
+            classify(&s).is_none(),
+            "Phase 2 sampler shellout must not self-classify",
+        );
+    }
+
+    /// `/bin/bash`/`/usr/bin/sh` basenames also count.
+    #[test]
+    fn absolute_path_bash_dash_c_ros2_still_guarded() {
+        let s = sample("bash", &["/bin/bash", "-c", "ros2 launch x y"]);
+        assert!(classify(&s).is_none());
+    }
+
+    /// Negative: `bash -c "…"` with no "ros2" text in the command
+    /// must NOT be force-guarded — the guard is intentionally
+    /// narrow.
+    #[test]
+    fn bash_dash_c_non_ros2_does_not_trip_guard() {
+        let s = sample("bash", &["bash", "-c", "ls -la"]);
+        assert!(
+            !is_shell_wrapped_ros2_invocation(&s.cmdline),
+            "guard must only fire on ros2-substring -c payloads",
+        );
+    }
+
+    /// Positive guard: real rclpy-using node must still classify
+    /// even after the tooling/shell-wrapper additions.
+    #[test]
+    fn genuine_ros2_node_with_rclpy_still_classifies() {
+        let s = sample(
+            "perception_node",
+            &["python3", "-m", "rclpy.executors", "perception_node.py"],
+        );
+        let result = classify(&s).expect("rclpy node must still classify");
+        assert_eq!(result.workload_category, WorkloadCategory::ROS2);
     }
 
     #[test]

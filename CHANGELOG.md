@@ -6,6 +6,53 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project aims to adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 once `v1.0.0` is tagged. Until then, minor versions may include breaking changes.
 
+## [1.0.2] — 2026-05-22
+
+Hotfix release closing two Inspector #5 classifier findings plus a
+release-process hygiene gap from Tester's empirical sweep. No
+wire-schema break.
+
+### Fixed
+
+- **B-NEW-16 — ROS2 introspection markers polluted workloads
+  panel.** `ROS2_CMDLINE_MARKERS` in `src/classifier/ros2.rs`
+  dropped three introspection-CLI substrings (`"ros2 topic"`,
+  `"ros2 service"`, `"ros2 node"`). These are short-lived
+  diagnostic shell-outs, not node-spawners. The operator's
+  RunStore was carrying 55 transient 1-5 s `"ros2"` records
+  that flooded both the Workloads panel and the Activity feed.
+  Kept: `"ros2 run"`, `"ros2 launch"`,
+  `"rclcpp_component_container"`, `"rclpy"`.
+- **Sampler self-classification protection (Inspector #5).** Two
+  guards added to `classify()`:
+  1. `ROS2_TOOLING_NAMES` process-name blacklist
+     (`rviz`/`rviz2`, `rqt*`, `colcon`, `ament_*`) — these
+     processes link the rcl libraries but are tooling, not graph
+     participants. Case-insensitive prefix match handles the
+     kernel's `TASK_COMM_LEN=16` truncation of
+     `/proc/<pid>/comm`.
+  2. `bash -c "ros2 …"` / `sh -c "ros2 …"` shell-wrapper guard.
+     Phase 2 will exec `bash -c "ros2 topic hz <topic>"` as its
+     Hz sampler. Without this guard the sampler would classify
+     its own probes as new ROS2 nodes, creating a feedback loop.
+     The guard recognises bash/sh as `cmdline[0]` (basename
+     match so `/bin/bash` works), then looks for `ros2` text in
+     argv AFTER the `-c` separator.
+- **B-EMPIRICAL-3 — release binary version hygiene.** Tester
+  reported `target/release/edge_monitor --version` was still
+  emitting `1.0.0` after the v1.0.1 tag because the release
+  binary had not been rebuilt. Added `RELEASE.md` with the
+  explicit `--release` rebuild + version-check step
+  (`cargo pkgid` vs `--version` output) that every release must
+  pass before tagging.
+
+### Notes
+
+- Test suite +11 vs the v1.0.1 baseline (9 new ROS2 classifier
+  tests + 2 from carried-over module growth). Workspace total
+  815 passed.
+- No new contract dependency; v0.3.10 surface is unchanged.
+
 ## [1.0.1] — 2026-05-21
 
 Hotfix release closing twelve Inspector-surfaced bugs found

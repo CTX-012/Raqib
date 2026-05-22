@@ -9,10 +9,11 @@ before the kernel OOM-killer takes the whole robot stack down.
 Target platforms: Ubuntu 22.04+ x86_64 and NVIDIA Jetson (JetPack 6).
 Windows is out of scope.
 
-> **Status — 2026-04-24:** Phase 0 complete. 150 tests pass on WSL
-> Ubuntu. Pre-launch (Phase 1) work in progress: demo recording on
-> Jetson Orin, CI, `.deb` packaging. No stable release yet; API may
-> still shift before `v0.1.0` is tagged.
+> **Status — 2026-04-24:** Phase 0 complete. 150 tests pass on the
+> primary dev host (bare Ubuntu 22.04 + RTX 3060). Pre-launch (Phase 1)
+> work in progress: demo recording on Jetson Orin, CI, `.deb`
+> packaging. No stable release yet; API may still shift before
+> `v0.1.0` is tagged.
 
 ## Why not `htop` / `nvtop` / `jtop`
 

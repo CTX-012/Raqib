@@ -130,17 +130,35 @@ dispatch arm for `Action::OpenGrafana` is a documented no-op in
 _dashboard` or `dashboard_preflight::probe`, treat them as historical
 context.
 
-## Environment caveats
+## Environment
 
-- Primary dev env: WSL Ubuntu. Limited — no real GPU, no thermal, fake
-  `/sys`. Don't trust WSL for GPU/thermal feature verification.
-- Real test target: Jetson AGX Orin via SSH. Any feature touching
-  hardware must be tested on Orin before merge.
-- NVML may fail to initialize on WSL. Code must handle
-  `Option<GpuSnapshot>` everywhere. Never panic on missing NVML.
+- **Dev + test host (primary):** bare Ubuntu 22.04.5 LTS on Gigabyte
+  B560M H V2, kernel 6.8, x86_64. NOT WSL.
+- **GPU:** NVIDIA GeForce RTX 3060 12GB, driver 595.58.03, CUDA 13.2.
+  NVML is fully functional (`libnvidia-ml.so.595.58.03` installed).
+- **ROS:** ROS Humble at `/opt/ros/humble`, RMW=Cyclone DDS
+  (`rmw_cyclonedds_cpp`). Multiple workspaces sourced into shell
+  (palb_ws, thesis_ws, yo_ws, turtlebot3_ws).
+- **Production target (deployment, separate device):** Jetson AGX
+  Orin via SSH. Hardware-touching features verified here before
+  release.
+- **NVML works on primary dev host**, but code must still handle
+  `Option<GpuSnapshot>` gracefully — NVML can fail on environments
+  WITHOUT NVIDIA hardware (CPU-only systems, certain containers,
+  some WSL configurations). The graceful-degradation requirement
+  is general, not WSL-specific.
 
 ## Known limitations
 
+- **B-EMPIRICAL surfaced 2026-05-22:** RunStore records show
+  `peak_vram_mb=0` on this NVML-working host. Root cause not yet
+  determined. May be NVML permission gating, NVML init failure,
+  per-PID VRAM accounting bug, or runtime.rs:1322 string-parsing
+  issue. Tracked for next investigation cycle.
+- **B-EMPIRICAL-4 surfaced 2026-05-22:** rclpy Python ROS2 nodes
+  invisible to classifier on default Humble + Cyclone DDS. Three
+  compounding causes — recommended fix in Inspector #9 report.
+  v1.0.3 hotfix candidate.
 - **Automated governor disabled by default (v1.0.1).** The
   `policy.default_ai_action` for AI workloads is `Allow`, not `Kill`.
   Inspector #1 caught a phantom-kill audit-trail bug in v1.0.0 where

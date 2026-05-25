@@ -139,6 +139,14 @@ pub struct WireWorkload {
     /// `healthy`/`attention`/`critical`/`loading`. The dashboard
     /// renders the status dot color from this.
     pub status: String,
+    /// Phase 2 / DISPATCH 1 — per-category activity state as a
+    /// wire-stable string. One of `active`/`idle`/`loading`/
+    /// `not_detected`. `None` when no Phase-2 sampler has surfaced a
+    /// state for this PID yet (cold start, or a workload category
+    /// with no Phase-2 sampler — vLLM / llama.cpp continue to
+    /// report throughput-only). Web UI hides the column when every
+    /// visible row's `activity` is `None`, mirroring the TUI.
+    pub activity: Option<String>,
 }
 
 /// One completed-run record, suitable for both the history view and
@@ -296,6 +304,9 @@ impl WireWorkload {
         let tokens_per_sec = lt.and_then(|t| t.tokens_per_sec_avg);
         let fps = lt.and_then(|t| t.fps_avg);
         let kv_cache_peak_pct = lt.and_then(|t| t.kv_cache_peak_pct);
+        let activity = lt
+            .and_then(|t| t.activity)
+            .map(|a| activity_state_to_str(a).to_string());
         let total_ram_bytes = state
             .last_snapshot
             .as_ref()
@@ -324,7 +335,23 @@ impl WireWorkload {
             fps,
             kv_cache_peak_pct,
             status: workload_status_to_str(status).to_string(),
+            activity,
         }
+    }
+}
+
+/// Phase 2 / DISPATCH 1 — wire-stable string projection of the local
+/// `ActivityState` enum. Kept here rather than relying on serde's
+/// `rename_all = "snake_case"` so the wire schema is decoupled from
+/// the enum's `Serialize` impl (lift-to-`ux_contract::activity` won't
+/// break the dashboard's expected string set).
+fn activity_state_to_str(state: crate::telemetry::source::ActivityState) -> &'static str {
+    use crate::telemetry::source::ActivityState;
+    match state {
+        ActivityState::Active => "active",
+        ActivityState::Idle => "idle",
+        ActivityState::Loading => "loading",
+        ActivityState::NotDetected => "not_detected",
     }
 }
 

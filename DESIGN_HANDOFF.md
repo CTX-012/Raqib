@@ -637,6 +637,100 @@ matcher checked a `cmdline` field that does not exist on
 discovery that only `name` (TASK_COMM_LEN-truncated) is exposed.
 This section is the contract response.
 
+## §21 — Phase 2 per-category activity surfacing (v1.1.0)
+
+DISPATCH 1 foundation introduces an additive per-category activity
+state for the workloads-panel column. The foundation ships the
+infrastructure; the runtime-specific samplers (B1 Ollama merge,
+B2 Agent, B3 ROS2-shellout, B4 Embeddings-CPU) land in DISPATCH 2A
+and 2B and populate the state.
+
+### Architecture lock
+
+Phase 2 **reuses** the existing `TelemetrySource` trait +
+`Dispatcher` infrastructure at `src/telemetry/`. There is **no**
+parallel trait, dispatcher, or async pattern. Per Inspector #12,
+the existing concurrency model (2-thread tokio runtime,
+`Arc<Mutex>` per source, mpsc frame channel, 1s per-sample
+timeout, `JoinError` panic isolation, `Drop` shutdown) satisfies
+all Phase-2 requirements with zero new `Cargo.toml` deps.
+
+### Additive wire-schema changes
+
+- `TelemetryFrame.activity_state: Option<ActivityState>`, gated
+  on `#[serde(default)]` so a v1.0 JSON frame still round-trips
+  into a v1.1 reader. Inspector #7 ratified this as additive-only.
+- `WireSnapshot.workloads[i].activity: Option<String>` exposes
+  the per-PID state to the web companion / `/api/snapshot`. One
+  of `active` / `idle` / `loading` / `not_detected`, or `null`
+  when no Phase-2 sampler has surfaced a state for the PID. The
+  Svelte SPA mirrors this with an `ActivityState` TypeScript
+  union.
+
+### `ActivityState` enum (LOCAL until v0.3.12 CAR)
+
+Four bare variants — `Active`, `Idle`, `Loading`, `NotDetected`.
+No payload on `NotDetected`; granularity ("why not detected") is
+sampler-side debug context, not user-visible state. Variant
+shape can be extended additively in v1.1.1+ once P5 sampler
+validation proves the surface.
+
+**CAR-candidate:** lift to `ux_contract::activity` in v0.3.12
+once shape is proven. Until then the enum lives at
+`crate::telemetry::source::ActivityState`. The wire schema
+projection uses an explicit string-table mapping (not serde's
+`rename_all`) so the lift to ux_contract won't break the
+dashboard.
+
+### `sample_with_context` additive trait method
+
+The `TelemetrySource` trait grows one optional method:
+
+```rust
+async fn sample_with_context(
+    &mut self,
+    proc: &ProcessSnapshot,
+    _all_procs: &[ProcessSnapshot],
+) -> SourceResult<TelemetryFrame> {
+    self.sample(proc).await
+}
+```
+
+The default polyfill delegates to `sample`, so every existing
+sampler (vLLM, llama.cpp, Ollama) compiles unchanged and behaves
+identically. The dispatcher's tick path calls
+`sample_with_context`; samplers that need parent / child tree
+visibility (B2 agent-claude in particular) override the method
+to read the full process list. Per Inspector #12 Option (i).
+
+### TUI / web rendering (Inspector #8 V1)
+
+New 8-char activity column on the workloads panel.
+**Foreground-only** — L21 §14 invariant ("only status dots are
+colored on workload rows") means the column conveys state via
+the text label (`active` / `idle` / `loading` / `—`), not via
+per-state color. Auto-hides when every visible row's `activity`
+is `None`, mirroring the `model` column's hide rule
+(Inspector #8 V1). Column is wide-rows only — narrow rows drop
+the primary-metric column to fit F2/F3 columns inside the 80-col
+floor, so an additional 8-char slot would overflow.
+
+The web companion mirrors the column exactly (`web/src/
+components/WorkloadRow.svelte`), with the same auto-hide rule
+keyed on `workload.activity == null`.
+
+### CAR-candidate inventory (post-v1.1.0 + P5 validation)
+
+- `ux_contract::activity::ActivityState` (lift the local enum).
+- Per-sampler thresholds currently marked `PROVISIONAL` in
+  DISPATCH 2A/2B (Ollama 5s window, Agent tree-shape heuristics,
+  ROS2 30s topic-list / 60s topic-hz / 5s subprocess timeout
+  cadences, Embeddings 60% CPU / 3-tick / 10-tick-window
+  thresholds).
+- Wire-schema column-label strings (`active` etc.) — would
+  belong in `ux_contract::status` or a new `ux_contract::
+  workloads::columns` module.
+
 # What this contract changes from current state
 
 **Linux changes (~25 items):**

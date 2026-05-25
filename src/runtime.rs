@@ -21,7 +21,7 @@ use crate::telemetry::samplers::{
     llama_cpp_server::LlamaCppServerSource, ollama_api::OllamaApiSource,
     vllm_prometheus::VllmPrometheusSource,
 };
-use crate::telemetry::source::ProcessSnapshot as TelemetryProcessSnapshot;
+use crate::telemetry::source::{ActivityState, ProcessSnapshot as TelemetryProcessSnapshot};
 use crate::telemetry::{Dispatcher, TelemetrySource};
 
 /// Errors emitted by the runtime tick loop. Platform errors are fatal;
@@ -187,6 +187,14 @@ pub struct LiveTelemetry {
     /// `tokens_per_sec_avg`; populated for Vision workloads when the
     /// vision-probe socket or the stdout parser has observed frames.
     pub fps_avg: Option<f32>,
+    /// Phase 2 / DISPATCH 1 — most-recent activity state for this
+    /// PID, sourced from the dispatcher's accumulator. `None` when
+    /// no Phase-2 sampler has surfaced one yet (cold start, or the
+    /// workload's category has no Phase-2 sampler — vLLM /
+    /// llama.cpp continue to report throughput-only). Renderer
+    /// hides the activity column when every visible row's
+    /// `activity` is `None`.
+    pub activity: Option<ActivityState>,
 }
 
 impl RuntimeState {
@@ -783,13 +791,22 @@ impl Runtime {
         // reads. Pulls from the dispatcher's accumulator (already
         // updated above by `d.tick(...)`). Empty when telemetry is
         // off or the accumulator has no samples for that PID.
+        //
+        // Phase 2 / DISPATCH 1 — also flow `activity_for(pid)` through
+        // so the workloads-panel activity column has a read path. A
+        // PID with activity but no metrics (e.g. embeddings workload
+        // reporting only ActivityState via the CPU heuristic, no
+        // Prometheus endpoint) still gets a `LiveTelemetry` entry.
         self.state.live_telemetry.clear();
         if let Some(d) = &self.telemetry {
             for p in &annotated {
                 if p.category == AICategory::NotAi {
                     continue;
                 }
-                if let Some(m) = d.metrics_for(p.pid) {
+                let metrics = d.metrics_for(p.pid);
+                let activity = d.activity_for(p.pid);
+                if metrics.is_some() || activity.is_some() {
+                    let m = metrics.unwrap_or_default();
                     self.state.live_telemetry.insert(
                         p.pid,
                         LiveTelemetry {
@@ -802,6 +819,7 @@ impl Runtime {
                             // fix the workloads panel had no read path.
                             tokens_per_sec_avg: m.tokens_per_sec_avg,
                             fps_avg: m.fps_avg,
+                            activity,
                         },
                     );
                 }

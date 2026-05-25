@@ -9,7 +9,7 @@ use std::collections::HashMap;
 
 use crate::storage::run_store::RunMetrics;
 use crate::telemetry::concurrent_requests::TimeWeightedGauge;
-use crate::telemetry::source::TelemetryFrame;
+use crate::telemetry::source::{ActivityState, TelemetryFrame};
 
 /// Running aggregates for one PID. Reset on PID reuse (the dispatcher
 /// notices a fresh spawn and instantiates a new accumulator).
@@ -306,6 +306,13 @@ fn percentile(values: &[f32], pct: f32) -> Option<f32> {
 #[derive(Debug, Clone, Default)]
 pub struct TelemetryAccumulator {
     by_pid: HashMap<u32, PerPidStats>,
+    /// Phase 2 / DISPATCH 1 — per-PID activity state for the
+    /// workloads-panel column. "Latest wins" — a fresh non-`None`
+    /// `frame.activity_state` overwrites whatever was there. Frames
+    /// with `activity_state: None` (every existing sampler) leave
+    /// the previous state untouched so a sampler that occasionally
+    /// reports doesn't flicker the column to "missing" between hits.
+    activity_state: HashMap<u32, ActivityState>,
 }
 
 impl TelemetryAccumulator {
@@ -316,6 +323,14 @@ impl TelemetryAccumulator {
     /// Fold one frame into the per-PID stats. The frame's `pid` field
     /// is the routing key; the dispatcher must set it correctly.
     pub fn record(&mut self, frame: TelemetryFrame) {
+        // Phase 2 — capture activity_state with latest-wins semantics
+        // BEFORE moving `frame` into `record`. `None` is no-op so a
+        // sampler that doesn't surface activity (every pre-Phase-2
+        // one) leaves whatever the most-recent activity-aware sampler
+        // wrote.
+        if let Some(state) = frame.activity_state {
+            self.activity_state.insert(frame.pid, state);
+        }
         self.by_pid.entry(frame.pid).or_default().record(&frame);
     }
 
@@ -329,8 +344,22 @@ impl TelemetryAccumulator {
 
     /// Drop the per-PID stats. Called when a process exits and its
     /// metrics have been folded into the `RunRecord`.
+    ///
+    /// Phase 2 / Inspector #12 §5.4 — also clear the activity-state
+    /// entry. Otherwise an exited PID would render stale `Active` /
+    /// `Loading` etc. forever (or until PID reuse stomped it). The
+    /// dispatcher's `forget` already calls this on the exit hook.
     pub fn forget(&mut self, pid: u32) {
         self.by_pid.remove(&pid);
+        self.activity_state.remove(&pid);
+    }
+
+    /// Phase 2 / DISPATCH 1 — most-recent activity state for `pid`,
+    /// or `None` when no Phase-2 sampler has surfaced one yet (or
+    /// the entry was cleared by `forget`). Renderer hides the column
+    /// when this returns `None`.
+    pub fn activity_for(&self, pid: u32) -> Option<ActivityState> {
+        self.activity_state.get(&pid).copied()
     }
 
     pub fn pids(&self) -> impl Iterator<Item = u32> + '_ {
@@ -399,6 +428,79 @@ mod tests {
         assert!(acc.snapshot(1).is_some());
         acc.forget(1);
         assert!(acc.snapshot(1).is_none());
+    }
+
+    // ─── Phase 2 / DISPATCH 1 — activity state ──────────────────────
+
+    /// Latest non-`None` activity_state wins. A frame with
+    /// `activity_state: None` (every existing sampler) leaves the
+    /// previous state intact so an occasional-reporter doesn't
+    /// flicker the column to "missing" between hits.
+    #[test]
+    fn activity_state_latest_wins_and_none_is_no_op() {
+        let mut acc = TelemetryAccumulator::new();
+        // No state yet.
+        assert_eq!(acc.activity_for(7), None);
+
+        // Record Loading.
+        acc.record(TelemetryFrame {
+            pid: 7,
+            activity_state: Some(ActivityState::Loading),
+            ..TelemetryFrame::new(7)
+        });
+        assert_eq!(acc.activity_for(7), Some(ActivityState::Loading));
+
+        // A frame with activity_state = None doesn't clear it.
+        acc.record(TelemetryFrame {
+            pid: 7,
+            tokens_per_sec: Some(5.0),
+            ..TelemetryFrame::new(7)
+        });
+        assert_eq!(acc.activity_for(7), Some(ActivityState::Loading));
+
+        // Active wins over the previous Loading.
+        acc.record(TelemetryFrame {
+            pid: 7,
+            activity_state: Some(ActivityState::Active),
+            ..TelemetryFrame::new(7)
+        });
+        assert_eq!(acc.activity_for(7), Some(ActivityState::Active));
+    }
+
+    /// `forget(pid)` clears the activity_state entry — Inspector
+    /// #12 §5.4. Without this an exited PID would render stale
+    /// `Active` forever (or until PID reuse stomped it).
+    #[test]
+    fn forget_clears_activity_state() {
+        let mut acc = TelemetryAccumulator::new();
+        acc.record(TelemetryFrame {
+            pid: 1,
+            activity_state: Some(ActivityState::Active),
+            ..TelemetryFrame::new(1)
+        });
+        assert_eq!(acc.activity_for(1), Some(ActivityState::Active));
+        acc.forget(1);
+        assert_eq!(acc.activity_for(1), None);
+    }
+
+    /// Activity entries are per-PID; one PID's state doesn't leak
+    /// into another's. Mirrors the existing
+    /// `pids_do_not_cross_contaminate` invariant.
+    #[test]
+    fn activity_does_not_cross_contaminate_pids() {
+        let mut acc = TelemetryAccumulator::new();
+        acc.record(TelemetryFrame {
+            pid: 1,
+            activity_state: Some(ActivityState::Active),
+            ..TelemetryFrame::new(1)
+        });
+        acc.record(TelemetryFrame {
+            pid: 2,
+            activity_state: Some(ActivityState::Idle),
+            ..TelemetryFrame::new(2)
+        });
+        assert_eq!(acc.activity_for(1), Some(ActivityState::Active));
+        assert_eq!(acc.activity_for(2), Some(ActivityState::Idle));
     }
 
     #[test]

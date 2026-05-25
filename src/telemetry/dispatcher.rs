@@ -32,7 +32,9 @@ use crate::telemetry::accumulator::TelemetryAccumulator;
 use crate::telemetry::cold_load::{ColdLoadTracker, read_bytes_for};
 use crate::telemetry::exporter::{self, MetricsSnapshot, SnapshotHandle};
 use crate::telemetry::rapl::RaplReader;
-use crate::telemetry::source::{ProcessSnapshot, TelemetryFrame, TelemetrySource};
+use crate::telemetry::source::{
+    ActivityState, ProcessSnapshot, TelemetryFrame, TelemetrySource,
+};
 use crate::telemetry::vision_probe::VisionProbe;
 
 /// Default per-sample timeout. Long enough for a slow vLLM scrape
@@ -155,10 +157,18 @@ impl Dispatcher {
         //    the dispatcher thread because applies_to may inspect the
         //    sampler's mutable state (e.g. cached endpoint poisoning).
         //    The spawned task does the check after acquiring the lock.
+        //
+        // Phase 2 / DISPATCH 1 — the spawned task calls
+        // `sample_with_context` (the additive trait method), passing
+        // the full snapshot list so samplers like B2 agent-claude can
+        // see parent / child trees. Existing samplers inherit the
+        // default polyfill that delegates to `sample`.
+        let all_procs: Vec<ProcessSnapshot> = processes.to_vec();
         for proc in processes {
             for source in &self.sources {
                 let source = source.clone();
                 let proc = proc.clone();
+                let all_procs = all_procs.clone();
                 let tx = self.frame_tx.clone();
                 let timeout = self.sample_timeout;
                 self.runtime.spawn(async move {
@@ -168,7 +178,7 @@ impl Dispatcher {
                     }
                     let name = guard.name().to_string();
                     let pid = proc.pid;
-                    let fut = guard.sample(&proc);
+                    let fut = guard.sample_with_context(&proc, &all_procs);
                     match tokio::time::timeout(timeout, fut).await {
                         Ok(Ok(frame)) => {
                             let _ = tx.send(frame);
@@ -285,6 +295,18 @@ impl Dispatcher {
     /// `RunRecord.summary.model_name`.
     pub fn model_name_hint_for(&self, pid: u32) -> Option<String> {
         self.accumulator.model_name_hint_for(pid).map(String::from)
+    }
+
+    /// Phase 2 / DISPATCH 1 — most-recent activity state for `pid`,
+    /// or `None` when no Phase-2 sampler has surfaced one yet. The
+    /// renderer calls this per workload row each frame and hides the
+    /// activity column when it returns `None` (non-blocking by
+    /// construction — same accumulator-only read as
+    /// [`metrics_for`]).
+    ///
+    /// [`metrics_for`]: Self::metrics_for
+    pub fn activity_for(&self, pid: u32) -> Option<ActivityState> {
+        self.accumulator.activity_for(pid)
     }
 
     /// Drop accumulator state for `pid` after persisting the record.
@@ -482,5 +504,79 @@ mod tests {
         wait_for_frame(&mut d, 1, StdDuration::from_secs(2)).unwrap();
         d.forget(1);
         assert!(d.metrics_for(1).is_none());
+    }
+
+    // ─── Phase 2 / DISPATCH 1 — Dispatcher::activity_for ────────────
+
+    /// A sampler that emits frames with `activity_state` populates
+    /// the dispatcher's accumulator, and `activity_for(pid)`
+    /// returns the latest state. End-to-end through the same mpsc
+    /// channel that carries metrics frames.
+    struct ActivitySampler {
+        state: ActivityState,
+    }
+    #[async_trait]
+    impl TelemetrySource for ActivitySampler {
+        fn name(&self) -> &str {
+            "activity-stub"
+        }
+        fn applies_to(&self, _: &ProcessSnapshot) -> bool {
+            true
+        }
+        async fn sample(&mut self, p: &ProcessSnapshot) -> SourceResult<TelemetryFrame> {
+            Ok(TelemetryFrame {
+                pid: p.pid,
+                activity_state: Some(self.state),
+                ..TelemetryFrame::new(p.pid)
+            })
+        }
+    }
+
+    /// Wait for the dispatcher's accumulator to surface an activity
+    /// state for `pid`. Parallels the existing `wait_for_frame`
+    /// helper that polls `metrics_for`.
+    fn wait_for_activity(
+        d: &mut Dispatcher,
+        pid: u32,
+        timeout: StdDuration,
+    ) -> Option<ActivityState> {
+        let start = std::time::Instant::now();
+        while start.elapsed() < timeout {
+            d.tick(&[]);
+            if let Some(a) = d.activity_for(pid) {
+                return Some(a);
+            }
+            std::thread::sleep(StdDuration::from_millis(20));
+        }
+        None
+    }
+
+    #[test]
+    fn dispatcher_activity_for_returns_latest_sampled_state() {
+        let mut d = Dispatcher::new(vec![Box::new(ActivitySampler {
+            state: ActivityState::Active,
+        })])
+        .unwrap();
+        d.tick(&[snap(1)]);
+        let observed = wait_for_activity(&mut d, 1, StdDuration::from_secs(2));
+        assert_eq!(observed, Some(ActivityState::Active));
+    }
+
+    #[test]
+    fn dispatcher_activity_for_returns_none_for_unknown_pid() {
+        let d = Dispatcher::new(vec![]).unwrap();
+        assert_eq!(d.activity_for(99), None);
+    }
+
+    #[test]
+    fn dispatcher_forget_clears_activity_state() {
+        let mut d = Dispatcher::new(vec![Box::new(ActivitySampler {
+            state: ActivityState::Loading,
+        })])
+        .unwrap();
+        d.tick(&[snap(1)]);
+        wait_for_activity(&mut d, 1, StdDuration::from_secs(2)).unwrap();
+        d.forget(1);
+        assert_eq!(d.activity_for(1), None);
     }
 }

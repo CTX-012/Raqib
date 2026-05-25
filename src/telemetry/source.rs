@@ -22,6 +22,37 @@ pub struct ProcessSnapshot {
     pub model_name: Option<String>,
 }
 
+/// Phase 2 — per-category activity surfacing (DISPATCH 1 foundation).
+///
+/// Samplers produce one of four states per process per sample:
+///
+/// * `Active` — workload is doing observable work (publishing topics,
+///   running prompts, high CPU on the inference loop).
+/// * `Idle` — workload is alive but doing no observable work.
+/// * `Loading` — workload is in a startup / warm-up phase (model
+///   load, cold-start).
+/// * `NotDetected` — sampler ran but couldn't determine state (no
+///   API, no shellout output, insufficient samples in the rolling
+///   window, etc.). Distinct from "sampler didn't apply": if no
+///   sampler ever sets `activity_state` for a PID, the accumulator
+///   returns `None` and the UI hides the column for that row.
+///
+/// The variant shape is a **bare enum** (no payload). The "why not
+/// detected" is per-sampler debug context, not user-visible state;
+/// granularity (sub-variants / reasons) can be added additively in
+/// v1.1.1+ via P5 sampler validation.
+///
+/// CAR-candidate: lift to `ux_contract::activity` in v0.3.12 once
+/// shape proven through P5 sampler validation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActivityState {
+    Active,
+    Idle,
+    Loading,
+    NotDetected,
+}
+
 /// One reading. Most fields are `Option` because no single runtime
 /// exposes everything; downstream `TelemetryAccumulator::record` skips
 /// `None`s rather than treating them as zero.
@@ -69,6 +100,16 @@ pub struct TelemetryFrame {
     /// counters and gauges without a tagged union.
     #[serde(default)]
     pub extras: HashMap<String, f64>,
+
+    /// Phase 2 — per-category activity state for the workloads-panel
+    /// column (DISPATCH 1 foundation). `None` when the sampler did
+    /// not produce a state this frame (existing samplers all leave
+    /// this `None`; the accumulator keeps the most recent non-`None`
+    /// value per PID). Additive wire-schema bump per Inspector #7
+    /// ratification: a v1.0 RunRecord JSON round-trips into a v1.1
+    /// reader by virtue of `#[serde(default)]`.
+    #[serde(default)]
+    pub activity_state: Option<ActivityState>,
 }
 
 impl TelemetryFrame {
@@ -113,6 +154,22 @@ pub trait TelemetrySource: Send + Sync {
     /// Take a single reading. Errors are logged; the dispatcher does
     /// not propagate them up to the tick loop.
     async fn sample(&mut self, proc: &ProcessSnapshot) -> SourceResult<TelemetryFrame>;
+
+    /// Phase 2 / DISPATCH 1 — `sample` variant that receives the full
+    /// process list this tick. Used by samplers that need parent /
+    /// child tree visibility (B2 agent-claude needs to see siblings
+    /// to distinguish "agent CLI alone" from "agent CLI with a model
+    /// subprocess running"). Default polyfill delegates to `sample`
+    /// so every existing impl keeps working unchanged; the dispatcher
+    /// calls `sample_with_context` on the tick path. Additive trait
+    /// extension per Inspector #12 Option (i).
+    async fn sample_with_context(
+        &mut self,
+        proc: &ProcessSnapshot,
+        _all_procs: &[ProcessSnapshot],
+    ) -> SourceResult<TelemetryFrame> {
+        self.sample(proc).await
+    }
 }
 
 /// Crash-isolated wrapper around `TelemetrySource::sample`. A
@@ -180,6 +237,78 @@ mod tests {
         let frame = s.sample(&proc(7)).await.unwrap();
         assert_eq!(frame.pid, 7);
         assert_eq!(frame.tokens_per_sec, Some(42.0));
+        assert_eq!(s.called, 1);
+    }
+
+    // ─── Phase 2 / DISPATCH 1 — ActivityState wire shape ────────────
+
+    /// `ActivityState` serialises to snake_case strings (#[serde
+    /// (rename_all = "snake_case")]). Pins the wire-shape contract
+    /// the Svelte SPA + integration tests both lean on.
+    #[test]
+    fn activity_state_serialises_snake_case() {
+        let cases: &[(ActivityState, &str)] = &[
+            (ActivityState::Active, "\"active\""),
+            (ActivityState::Idle, "\"idle\""),
+            (ActivityState::Loading, "\"loading\""),
+            (ActivityState::NotDetected, "\"not_detected\""),
+        ];
+        for (state, expected) in cases {
+            let serialised = serde_json::to_string(state).unwrap();
+            assert_eq!(&serialised, expected, "{state:?} should serialise to {expected}");
+            // Round-trip back.
+            let parsed: ActivityState = serde_json::from_str(expected).unwrap();
+            assert_eq!(&parsed, state);
+        }
+    }
+
+    /// A `TelemetryFrame` with `activity_state: None` (every
+    /// existing sampler) round-trips through JSON correctly —
+    /// `#[serde(default)]` lets a pre-Phase-2 reader / writer
+    /// pretend the field doesn't exist.
+    #[test]
+    fn telemetry_frame_roundtrips_with_activity_state_none() {
+        let frame = TelemetryFrame::new(42);
+        let json = serde_json::to_string(&frame).unwrap();
+        let restored: TelemetryFrame = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.pid, 42);
+        assert_eq!(restored.activity_state, None);
+    }
+
+    /// A `TelemetryFrame` carries activity_state through JSON.
+    #[test]
+    fn telemetry_frame_roundtrips_with_activity_state_some() {
+        let mut frame = TelemetryFrame::new(99);
+        frame.activity_state = Some(ActivityState::Active);
+        let json = serde_json::to_string(&frame).unwrap();
+        let restored: TelemetryFrame = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.activity_state, Some(ActivityState::Active));
+    }
+
+    /// Backward-compat: a v1.0 JSON frame (no `activity_state`
+    /// key) deserialises with `activity_state: None`. This is the
+    /// additive-wire-schema invariant Inspector #7 ratified.
+    #[test]
+    fn telemetry_frame_deserialises_pre_phase2_json_with_default_activity() {
+        // Hand-crafted JSON omitting `activity_state` entirely.
+        let json = r#"{"pid":7,"timestamp":null,"tokens_per_sec":null,"fps":null,"latency_ms":null,"kv_cache_pct":null,"kv_cache_evictions":null,"concurrent_requests":null,"num_requests_waiting":null,"gpu_watts":null,"gpu_temp_c":null,"cpu_watts":null,"model_name_hint":null,"extras":{}}"#;
+        let frame: TelemetryFrame = serde_json::from_str(json).unwrap();
+        assert_eq!(frame.pid, 7);
+        assert_eq!(frame.activity_state, None);
+    }
+
+    /// `sample_with_context` default polyfill delegates to `sample`.
+    /// A sampler that doesn't override the new method gets the old
+    /// behaviour exactly — no surprise side-effects.
+    #[tokio::test]
+    async fn sample_with_context_default_polyfill_delegates_to_sample() {
+        let mut s = StubSource { called: 0 };
+        let p = proc(11);
+        let all = vec![p.clone(), proc(12), proc(13)];
+        let frame = s.sample_with_context(&p, &all).await.unwrap();
+        assert_eq!(frame.pid, 11);
+        assert_eq!(frame.tokens_per_sec, Some(42.0));
+        // Default polyfill went through `sample` exactly once.
         assert_eq!(s.called, 1);
     }
 

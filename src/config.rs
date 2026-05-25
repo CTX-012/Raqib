@@ -78,6 +78,19 @@ pub struct TelemetryConfig {
     pub vllm_scrape: bool,
     pub llamacpp_scrape: bool,
     pub ollama_api: bool,
+    /// Phase 2 / DISPATCH 2A — SaaS-LLM CLI activity sampler
+    /// (claude-code, cursor, aider, continue). Off the box detects
+    /// process tree shape only; no network I/O. Default `true`.
+    pub agent_claude: bool,
+    /// Phase 2 / DISPATCH 2B — ROS2 topic-rate sampler via
+    /// `ros2 topic list` + `ros2 topic hz` shellout. Off the box
+    /// inherits a ROS2 host's CLI; falls silent on hosts without it.
+    /// Default `true`.
+    pub ros2_shellout: bool,
+    /// Phase 2 / DISPATCH 2B — embeddings-workload activity from
+    /// sustained-CPU heuristic. Pure compute, no new I/O. Default
+    /// `true`.
+    pub embeddings_cpu: bool,
     /// Empty disables the in-process Prometheus exporter.
     /// Format: `host:port` (e.g. `127.0.0.1:9472`). Tier 2.3.
     pub prometheus_bind: String,
@@ -93,6 +106,9 @@ impl Default for TelemetryConfig {
             vllm_scrape: true,
             llamacpp_scrape: true,
             ollama_api: true,
+            agent_claude: true,
+            ros2_shellout: true,
+            embeddings_cpu: true,
             prometheus_bind: String::new(),
             vision_probe_socket: String::new(),
         }

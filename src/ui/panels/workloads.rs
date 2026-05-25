@@ -33,7 +33,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{List, ListItem, ListState, Paragraph, Wrap};
 
 use ux_contract::WorkloadStatus;
-use ux_contract::status::{COLD_LOADING, RUNNING_ACTIVELY};
+use ux_contract::status::{AGENT_ALIVE, COLD_LOADING, RUNNING_ACTIVELY};
 use ux_contract::workload_category::{
     GROUP_HEADER_AGENT, GROUP_HEADER_EMBEDDINGS, GROUP_HEADER_LLM, GROUP_HEADER_ROS2,
     GROUP_HEADER_UNKNOWN, GROUP_HEADER_VISION,
@@ -48,13 +48,13 @@ use super::super::app::App;
 use super::panel_block;
 use crate::ui::theme::UiTheme;
 
-/// Local placeholder for the primary-metric column when a workload
-/// is alive but its category sampler hasn't reported a value this
-/// tick (LLM with no KV cache yet, non-LLM categories whose
-/// per-type sampler isn't wired in v1.0). "running actively"
-/// v0.3.10 vendored `status::RUNNING_ACTIVELY` (CAR-19a). The local
-/// const is gone; this re-export is just a navigation aid for
-/// readers grepping the file.
+// Local placeholder for the primary-metric column when a workload
+// is alive but its category sampler hasn't reported a value this
+// tick (LLM with no KV cache yet, non-LLM categories whose
+// per-type sampler isn't wired in v1.0). "running actively"
+// v0.3.10 vendored `status::RUNNING_ACTIVELY` (CAR-19a). The local
+// const is gone; this re-export is just a navigation aid for
+// readers grepping the file.
 //
 // v1.0.1 B-NEW-4 — Agent rows display `AGENT_ALIVE` instead of
 // `RUNNING_ACTIVELY`. Inspector #2 found "running actively"
@@ -62,10 +62,9 @@ use crate::ui::theme::UiTheme;
 // aider, continue) — these processes proxy to a remote LLM, and
 // edge_monitor measures none of the per-request rate. "alive" is
 // the honest minimum signal: the process exists on this host and
-// is in our annotated set; no further claim. The Contract did NOT
-// pick this up in v0.3.10 — `AGENT_ALIVE` is still local. Filed
-// again in BACKLOG as a future CAR.
-const AGENT_ALIVE: &str = "alive";
+// is in our annotated set; no further claim. CAR-20 lifted this
+// to `ux_contract::status::AGENT_ALIVE` in v0.3.11; the local
+// const is gone — see the imports at the top of this file.
 
 /// L11c — map the local `WorkloadCategory` enum to the v0.3.4
 /// contract group-header const. Contract refined CAR-8 to
@@ -193,6 +192,15 @@ pub(crate) struct Row {
     /// name. Panel auto-hides the column when every visible row's
     /// model is `None`.
     pub model: Option<String>,
+    /// Phase 2 / DISPATCH 1 — most-recent per-category activity state
+    /// for this row, surfaced by the Phase-2 samplers (agent /
+    /// ros2-shellout / embeddings-cpu) via the dispatcher
+    /// accumulator. `None` when no Phase-2 sampler has reported for
+    /// this PID yet, or the workload category has no Phase-2 sampler
+    /// (vLLM / llama.cpp continue to report throughput-only). Panel
+    /// auto-hides the column when every visible row's `activity` is
+    /// `None`.
+    pub activity: Option<crate::telemetry::source::ActivityState>,
 }
 
 /// CAR-17 — compute the §3 `WorkloadStatus` for a single annotated
@@ -223,6 +231,7 @@ pub(crate) fn ordered_rows(state: &RuntimeState, app: &App) -> Vec<Row> {
             let kv_cache_pct = lt.and_then(|t| t.kv_cache_peak_pct);
             let tokens_per_sec_avg = lt.and_then(|t| t.tokens_per_sec_avg);
             let fps_avg = lt.and_then(|t| t.fps_avg);
+            let activity = lt.and_then(|t| t.activity);
             // F2 — pull spawn_time from the lifecycle snapshot. None
             // on the first tick before the tracker has populated.
             let spawn_time = state
@@ -248,6 +257,10 @@ pub(crate) fn ordered_rows(state: &RuntimeState, app: &App) -> Vec<Row> {
                 // F3 — classifier already populated AnnotatedProcess
                 // .model_name via augment_with_model_name; copy across.
                 model: p.model_name.clone(),
+                // Phase 2 / DISPATCH 1 — activity surfaced via
+                // RuntimeState::live_telemetry (refreshed each tick
+                // from Dispatcher::activity_for in runtime.rs).
+                activity,
             }
         })
         .collect();
@@ -384,6 +397,13 @@ pub fn render(f: &mut Frame, area: Rect, state: &RuntimeState, app: &App, theme:
     // workloads (bare `ollama serve` etc.) without forcing the
     // operator to interpret a perpetually-empty column.
     let show_model = rows.iter().any(|r| r.model.is_some());
+    // Phase 2 / DISPATCH 1 — Inspector #8 V1: same auto-hide rule
+    // for the activity column. Until any visible row has a
+    // Phase-2 sampler reading, the column doesn't render at all
+    // (no perpetually-empty 8-char slot). Activity column is
+    // wide-rows-only — narrow rows already drop the primary metric
+    // to fit Model + start-time inside the 80-col floor.
+    let show_activity = !narrow && rows.iter().any(|r| r.activity.is_some());
     let now_for_relative = Utc::now();
 
     if rows.is_empty() {
@@ -448,6 +468,24 @@ pub fn render(f: &mut Frame, area: Rect, state: &RuntimeState, app: &App, theme:
             } else {
                 String::new()
             };
+            // Phase 2 / DISPATCH 1 — activity column. Empty string
+            // when `show_activity` is false (every row's `activity`
+            // is None, or narrow tier) so the column disappears
+            // entirely rather than rendering 8 spaces. Wide rows
+            // only, per Inspector #8 V1 (narrow rows drop primary
+            // metric to fit F2/F3 columns; adding an 8-char
+            // activity slot on narrow would overflow the 80-col
+            // floor).
+            let activity_label_text = if show_activity {
+                let label = row.activity.map(activity_label).unwrap_or("");
+                format!(
+                    " {:<width$}",
+                    truncate(label, ACTIVITY_COL_WIDTH),
+                    width = ACTIVITY_COL_WIDTH,
+                )
+            } else {
+                String::new()
+            };
             // F2 — start-time column. "HH:MM (Nm ago)" wide, "Nm ago"
             // narrow. Rendered as a fixed-width slot so the trailing
             // cpu/rss/vram columns align. Empty when the lifecycle
@@ -479,9 +517,10 @@ pub fn render(f: &mut Frame, area: Rect, state: &RuntimeState, app: &App, theme:
                 )
             } else {
                 format!(
-                    " {:<22}{} {:<14} {:<14} cpu {:>5.1}% rss {:>5}M {}",
+                    " {:<22}{}{} {:<14} {:<14} cpu {:>5.1}% rss {:>5}M {}",
                     truncate(&row.name, 22),
                     model_label,
+                    activity_label_text,
                     primary_metric(row),
                     start_label,
                     row.cpu_pct,
@@ -595,6 +634,27 @@ pub(crate) fn format_start_time(
 /// at 14 keeps the row inside the §12 narrow-tier 80-col floor.
 const MODEL_COL_WIDTH: usize = 14;
 
+/// Phase 2 / DISPATCH 1 — width of the per-row activity column.
+/// 8 chars fits the longest visible label ("loading" with a
+/// trailing space) without forcing a layout reflow when state
+/// flips between Active / Idle / Loading. The column is shown
+/// only on non-narrow panels and auto-hides when no visible row
+/// has `activity = Some(_)` (Inspector #8 V1).
+const ACTIVITY_COL_WIDTH: usize = 8;
+
+/// Phase 2 / DISPATCH 1 — render an `ActivityState` to its column
+/// label. Bare-variant enum keeps this a pure match; the caller
+/// pads / truncates to `ACTIVITY_COL_WIDTH`.
+fn activity_label(a: crate::telemetry::source::ActivityState) -> &'static str {
+    use crate::telemetry::source::ActivityState;
+    match a {
+        ActivityState::Active => "active",
+        ActivityState::Idle => "idle",
+        ActivityState::Loading => "loading",
+        ActivityState::NotDetected => "—",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -642,6 +702,7 @@ mod tests {
             fps_avg: None,
             spawn_time: None,
             model: None,
+            activity: None,
         }
     }
 
@@ -961,6 +1022,7 @@ mod tests {
                 fps_avg: None,
                 kv_cache_peak_pct: None,
                 kv_cache_evictions_total: None,
+                activity: None,
             },
         );
         let rows = ordered_rows(&s, &App::new());

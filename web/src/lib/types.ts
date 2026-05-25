@@ -52,9 +52,19 @@ export interface WireWorkload {
     fps: number | null;
     kv_cache_peak_pct: number | null;
     status: WorkloadStatus;
+    /**
+     * Phase 2 / DISPATCH 1 — per-category activity state. `null` when
+     * no Phase-2 sampler has surfaced a state for this PID yet, or
+     * the workload's category has no Phase-2 sampler. Dashboard
+     * hides the column when every visible row's `activity` is null,
+     * mirroring the TUI's auto-hide rule (Inspector #8 V1).
+     */
+    activity: ActivityState | null;
 }
 
 export type WorkloadStatus = 'healthy' | 'attention' | 'critical' | 'loading';
+
+export type ActivityState = 'active' | 'idle' | 'loading' | 'not_detected';
 
 export interface WireRunRecord {
     pid: number;

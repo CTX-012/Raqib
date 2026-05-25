@@ -9,7 +9,7 @@ pub struct ProcessSample {
     pub pid: u32,
     pub ppid: Option<u32>,
     pub name: String,
-    /// argv, including argv[0] (the executable path or name).
+    /// argv, including `argv[0]` (the executable path or name).
     pub cmdline: Vec<String>,
     /// Process environment, key=value pairs from /proc/PID/environ.
     pub environ: HashMap<String, String>,

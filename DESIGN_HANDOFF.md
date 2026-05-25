@@ -564,6 +564,79 @@ prefix + labels exist.
 
 ---
 
+## §20 — Wire snapshot observable surface (added in v1.0.4)
+
+The web companion exposes a JSON snapshot at `/api/snapshot` and the
+same shape over WebSocket. Consumers (Tester matchers, third-party
+integrators, web UI components) must reference only the fields
+actually serialized — the live `WireSnapshot` Rust type is
+authoritative; this section enumerates the human-visible promise.
+
+### What workload rows expose
+
+Each `WireSnapshot.workloads[i]` entry carries:
+
+- `pid` — process id (u32).
+- `name` — the kernel-recorded process name from
+  `/proc/<pid>/comm`. **`TASK_COMM_LEN`-truncated to 15 characters
+  plus the null terminator**, so any executable name longer than 15
+  chars will be cut off. Matchers built against `name` must account
+  for this truncation.
+- `model_name` — resolved model identifier when the classifier
+  extracted one (e.g. `llama3-8b`); `null` otherwise.
+- `category` — `AICategory` projected as a wire-stable string.
+- `workload_category` — `WorkloadCategory` projected as a
+  wire-stable string (`llm` / `agent` / `vision` / `ros2` /
+  `embeddings` / `unknown`).
+- `cpu_pct`, `rss_mb`, `vram_mb`, `ram_pct` — current resource
+  reads.
+- `tokens_per_sec`, `fps`, `kv_cache_peak_pct` — live telemetry,
+  `null` when the per-workload sampler hasn't reported.
+- `status` — `WorkloadStatus` projected as a string
+  (`healthy` / `attention` / `critical` / `loading`).
+
+`WireSnapshot.activity[i]` entries carry `pid`, `name`,
+`model_name`, `spawn_time`, `exit_time`, `uptime_secs`, peak
+resource fields, and the projected `exit_kind` / `exit_detail`.
+
+### What workload rows do NOT expose
+
+The wire schema is deliberately narrow. The following are observable
+inside the binary but never crossed the wire boundary in v1.0:
+
+- `cmdline` — full `argv` is NOT serialized. Matchers that expected
+  `cmdline` need to either (a) constrain on the truncated `name`,
+  (b) consult the local RunStore for completed runs, or (c) ask for
+  a contract amendment to expand the wire schema.
+- Full process-tree info (`ppid`, sibling enumeration).
+- `/proc/<pid>/maps` content (the library-signal evidence that
+  drives ROS2 classification stays internal).
+- Per-tick stderr tails (UI Contract v2 made stderr ephemeral —
+  see `src/storage/run_store.rs` doc-comment).
+
+### Implication for `name`-based matchers
+
+`name` is truncated by the kernel (`TASK_COMM_LEN = 16`, including
+the null terminator). Test fixtures and operator matchers should
+either:
+
+- Pin against the kernel-truncated form (e.g. `claude` not
+  `claude-code`, `python3` not `python3.10`), or
+- Look the process up via a separate `/proc/<pid>/comm` or
+  `/proc/<pid>/cmdline` read outside the wire schema.
+
+This rule applies symmetrically to the lifecycle / classifier
+internals — the `ProcessSample::name` field carries the same
+truncation because it is sourced from the same kernel field.
+
+### F1 origin
+
+Surfaced by Tester-A during v1.0.3 validation: their first
+matcher checked a `cmdline` field that does not exist on
+`/api/snapshot` workload rows, causing 3 false negatives before
+discovery that only `name` (TASK_COMM_LEN-truncated) is exposed.
+This section is the contract response.
+
 # What this contract changes from current state
 
 **Linux changes (~25 items):**

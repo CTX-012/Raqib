@@ -35,7 +35,7 @@ use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
 /// Read the kernel-clock-tick `starttime` (field 22 of `/proc/<pid>/stat`).
 ///
 /// Field 2 of `/proc/<pid>/stat` is `comm`, which is wrapped in parentheses
-/// and may itself contain spaces and parens (e.g. a process whose argv[0]
+/// and may itself contain spaces and parens (e.g. a process whose `argv[0]`
 /// contains `") evil ("`). Splitting on whitespace from the start of the
 /// line therefore mis-aligns later fields. The kernel guarantees the LAST
 /// `)` in the line ends the comm field, so we anchor parsing there.

@@ -8,7 +8,7 @@
 //! ```
 //!
 //! When at least two frames arrive for the same PID within the
-//! [`AGGREGATION_WINDOW`], the listener computes an instantaneous fps
+//! `AGGREGATION_WINDOW`, the listener computes an instantaneous fps
 //! and pushes a `TelemetryFrame` into the dispatcher's accumulator.
 //!
 //! Pure-Python helper that ships with edge_monitor for users:

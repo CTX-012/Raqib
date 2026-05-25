@@ -78,7 +78,7 @@ pub fn render(
 /// assertions without spinning a `Frame` or wiring real time.
 ///
 /// Drops the clock entirely when the terminal is too narrow to fit
-/// both with at least [`MIN_TIME_GAP_COLS`] of visual breathing room
+/// both with at least `MIN_TIME_GAP_COLS` of visual breathing room
 /// between them — at that point the operator is already squeezed and
 /// the mission text is the higher-value content.
 ///

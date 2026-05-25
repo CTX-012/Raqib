@@ -6,6 +6,65 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project aims to adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 once `v1.0.0` is tagged. Until then, minor versions may include breaking changes.
 
+## [1.0.4] — 2026-05-23
+
+Documentation-only release closing the 7 pre-existing `cargo doc`
+warnings surfaced post-v1.0.3 (Inspector #11 audit), wiring a
+permanent CI gate against doc-warning regression, and answering
+two documentation gaps Tester-A flagged during v1.0.3 validation.
+No source behaviour change. Test count unchanged at 822.
+
+### Changed (doc-only)
+
+- **W1 `src/config.rs:70`** — `[\`telemetry::Dispatcher\`]` →
+  `[\`crate::telemetry::Dispatcher\`]` (path qualification).
+- **W2 `src/governor/pid_reuse.rs:38`** — `argv[0]` → `` `argv[0]` ``
+  (rustdoc was parsing the literal brackets as a link target).
+- **W3 `src/model.rs:12`** — same fix as W2 on the
+  `ProcessSample::cmdline` doc-comment.
+- **W4 `src/runtime.rs:119`** — `[\`ExitReason\`]` →
+  `[\`crate::storage::run_store::ExitReason\`]` (path qualification;
+  the function body imports `ExitReason` but the outer doc-comment
+  doesn't inherit the import).
+- **W5 `src/telemetry/vision_probe.rs:11`** — de-linked
+  `AGGREGATION_WINDOW` to a bare backtick form, matching the
+  existing convention at lines 69 / 195 / 200 in the same file.
+  The constant is module-internal, not stable API.
+- **W6 `src/ui/panels/alerts.rs:4`** — `[\`AlertState::visible\`]` →
+  `[\`crate::ui::alerts::AlertState::visible\`]`.
+- **W7 `src/ui/panels/header.rs:81`** — de-linked
+  `MIN_TIME_GAP_COLS` (module-internal layout constant).
+
+### Added
+
+- **CI gate against doc-warning regression.** New step in
+  `.github/workflows/ci.yml` runs `cargo doc --workspace --no-deps`
+  with `RUSTDOCFLAGS: -D warnings`. The Inspector #11 dispatch
+  documented the gate as `cargo doc … -- -D warnings` but that
+  syntax fails — cargo doc has no `--` separator for rustdoc
+  flags; the rustdoc-flag channel is the `RUSTDOCFLAGS` env var.
+  CI step uses the working form.
+- **§20 — Wire snapshot observable surface** added to
+  `DESIGN_HANDOFF.md`. Documents what `/api/snapshot` workload
+  rows actually expose (`pid`, `name`, `model_name`, `category`,
+  `workload_category`, resource fields, status), what they do NOT
+  expose (`cmdline`, full process tree, `/proc/<pid>/maps`), and
+  the `TASK_COMM_LEN=16` kernel-truncation rule on `name`.
+  Closes Tester-A's F1 finding.
+- **`Known gotchas` section** added to `CLAUDE.md` documenting
+  the `ros2 launch` SIGTERM-propagation gotcha (it does not call
+  `setsid` before spawning its children, so SIGTERM propagates
+  across the session group and can kill `edge_monitor` if both
+  share a terminal). Workaround documented: wrap in `setsid` or
+  use a separate session. Verified that the demo at
+  `edge_monitor_demo.sh` uses `ros2 run rclcpp_components
+  component_container`, NOT `ros2 launch`, so it is unaffected
+  and does not need updating. Closes Tester-A's F2 finding.
+
+### Wire schema
+
+Unchanged — still v0.1.
+
 ## [1.0.3] — 2026-05-22
 
 Hotfix release closing two platform-layer bugs that were silently

@@ -210,6 +210,38 @@ context.
   security" and surfaced as a startup `tracing::warn!` when the
   bind isn't a loopback address.
 
+## Known gotchas
+
+### `ros2 launch` propagates SIGTERM out of its session
+
+`ros2 launch` does NOT call `setsid()` before spawning its child
+nodes, so the launched processes share a session group with the
+shell that invoked them. A SIGTERM (or Ctrl-C / Ctrl-Backslash)
+delivered to `ros2 launch` propagates to every process in that
+session — including `edge_monitor` if both were started from the
+same terminal. The operator stops their ROS graph and silently
+takes the monitor down with it.
+
+Workaround: wrap `ros2 launch` in `setsid`:
+
+```bash
+setsid ros2 launch <package> <launch_file>
+```
+
+`setsid` creates a fresh session group so SIGTERM to `ros2 launch`
+stays contained. Alternatively, run `ros2 launch` in a separate
+terminal / tmux pane / background session — anything that puts it
+in a different controlling-tty session from `edge_monitor` works.
+
+This applies **only to `ros2 launch`**. `ros2 run` does not
+exhibit the same propagation pattern: it spawns a single child
+process that doesn't try to terminate sibling processes on
+shutdown. `edge_monitor_demo.sh` uses `ros2 run rclcpp_components
+component_container`, not `ros2 launch`, so the demo is unaffected
+and does not need a setsid wrap.
+
+Surfaced by Tester-A during v1.0.3 validation (F2).
+
 ## When the user pushes for shortcuts
 
 The user's system prompt asks for mentor-style pushback, not

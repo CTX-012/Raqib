@@ -67,7 +67,7 @@ impl Default for UiConfig {
 // wired (see `src/ui/input.rs`); the field was dropped from `Config`
 // just above this comment.
 
-/// Toggles for the optional [`telemetry::Dispatcher`] samplers
+/// Toggles for the optional [`crate::telemetry::Dispatcher`] samplers
 /// (latest.md cross-cutting requirements + Tier 1.2). All on by
 /// default; sampling is cheap on idle (HTTP scrapers fail fast on
 /// connection refused) and the dispatcher's `applies_to` gate keeps

@@ -1,7 +1,7 @@
 //! L6 / UX_CONTRACT.md §1 region 1, §4 — alert region rendering.
 //!
 //! Up to `ALERT_MAX_VISIBLE` (3) banners stack at the top of the
-//! frame, in priority order resolved by [`AlertState::visible`].
+//! frame, in priority order resolved by [`crate::ui::alerts::AlertState::visible`].
 //! When more alerts are active than fit, a `+N more` line follows.
 //!
 //! Each banner instantiates a contract template (`ux_contract::alerts::*`)

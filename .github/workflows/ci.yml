@@ -45,6 +45,15 @@ jobs:
       - name: cargo clippy
         run: cargo clippy --all-targets -- -D warnings
 
+      # v1.0.4 — doc-warning gate. Rustdoc flags are passed via the
+      # RUSTDOCFLAGS env var; `cargo doc -- -D warnings` does NOT
+      # work because the `--` separator forwards to the built
+      # binary, not to rustdoc.
+      - name: cargo doc (deny warnings)
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --workspace --no-deps
+
   audit:
     name: cargo audit
     runs-on: ubuntu-22.04

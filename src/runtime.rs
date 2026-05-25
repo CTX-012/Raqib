@@ -116,7 +116,7 @@ pub struct ExitAlertEvent {
     pub reason: Option<String>,
 }
 
-/// Map a classified [`ExitReason`] to the §4 alert it should fire,
+/// Map a classified [`crate::storage::run_store::ExitReason`] to the §4 alert it should fire,
 /// if any. Returns `None` for `CleanExit` (per §4 "never on clean
 /// (code 0) exits"). `OutOfMemory` resolves to `OomDetected`;
 /// everything else non-clean resolves to `WorkloadExited` with a

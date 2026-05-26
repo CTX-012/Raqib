@@ -442,6 +442,7 @@ mod tests {
                 .map(|(k, v)| (k.to_string(), v.to_string()))
                 .collect(),
             model_name: None,
+            cpu_pct: 0.0,
         }
     }
 

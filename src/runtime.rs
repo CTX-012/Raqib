@@ -18,8 +18,9 @@ use crate::model::{AICategory, ClassificationResult, WorkloadCategory};
 use crate::platform::{self, GpuSnapshot, PlatformError, PlatformSnapshot};
 use crate::storage::{LogStore, RunRecord, RunStore};
 use crate::telemetry::samplers::{
-    agent_claude::AgentClaudeSource, llama_cpp_server::LlamaCppServerSource,
-    ollama_api::OllamaApiSource, vllm_prometheus::VllmPrometheusSource,
+    agent_claude::AgentClaudeSource, embeddings_cpu::EmbeddingsCpuSource,
+    llama_cpp_server::LlamaCppServerSource, ollama_api::OllamaApiSource,
+    ros2_shellout::Ros2ShelloutSource, vllm_prometheus::VllmPrometheusSource,
 };
 use crate::telemetry::source::{ActivityState, ProcessSnapshot as TelemetryProcessSnapshot};
 use crate::telemetry::{Dispatcher, TelemetrySource};
@@ -1258,8 +1259,22 @@ fn build_dispatcher(config: &Config) -> Option<Dispatcher> {
     if config.telemetry.ollama_api {
         sources.push(Box::new(OllamaApiSource::new()));
     }
+    // Phase 2 / DISPATCH 2A — B2 Agent (claude) sampler. Uses
+    // sample_with_context + ppid filtering for multi-instance
+    // attribution.
     if config.telemetry.agent_claude {
         sources.push(Box::new(AgentClaudeSource::new()));
+    }
+    // Phase 2 / DISPATCH 2B — B3 ROS2 shellout. Default on; falls
+    // silent on hosts without ros2cli (spawn fails, sample returns
+    // Transient, dispatcher logs and retries).
+    if config.telemetry.ros2_shellout {
+        sources.push(Box::new(Ros2ShelloutSource::new()));
+    }
+    // Phase 2 / DISPATCH 2B — B4 embeddings CPU heuristic. Pure
+    // compute, no I/O; cheap to leave on.
+    if config.telemetry.embeddings_cpu {
+        sources.push(Box::new(EmbeddingsCpuSource::new()));
     }
     if sources.is_empty() {
         return None;

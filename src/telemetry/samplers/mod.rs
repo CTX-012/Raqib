@@ -13,7 +13,11 @@
 //! * [`ros2_shellout`] — ROS2 topic-rate via `ros2 topic hz` shellout
 //!   (Phase 2 / DISPATCH 2B / B3). Maps publication rate to
 //!   `ActivityState` per AI-classified ROS2 process.
+//! * [`embeddings_cpu`] — Embeddings-workload activity via
+//!   sustained-CPU heuristic (Phase 2 / DISPATCH 2B / B4). Pure
+//!   compute, no new I/O.
 
+pub mod embeddings_cpu;
 pub mod llama_cpp_server;
 pub mod ollama_api;
 pub mod ros2_shellout;

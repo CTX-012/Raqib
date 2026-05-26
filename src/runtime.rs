@@ -18,8 +18,8 @@ use crate::model::{AICategory, ClassificationResult, WorkloadCategory};
 use crate::platform::{self, GpuSnapshot, PlatformError, PlatformSnapshot};
 use crate::storage::{LogStore, RunRecord, RunStore};
 use crate::telemetry::samplers::{
-    llama_cpp_server::LlamaCppServerSource, ollama_api::OllamaApiSource,
-    ros2_shellout::Ros2ShelloutSource,
+    embeddings_cpu::EmbeddingsCpuSource, llama_cpp_server::LlamaCppServerSource,
+    ollama_api::OllamaApiSource, ros2_shellout::Ros2ShelloutSource,
     vllm_prometheus::VllmPrometheusSource,
 };
 use crate::telemetry::source::{ActivityState, ProcessSnapshot as TelemetryProcessSnapshot};
@@ -1264,6 +1264,11 @@ fn build_dispatcher(config: &Config) -> Option<Dispatcher> {
     // Transient, dispatcher logs and retries).
     if config.telemetry.ros2_shellout {
         sources.push(Box::new(Ros2ShelloutSource::new()));
+    }
+    // Phase 2 / DISPATCH 2B — B4 embeddings CPU heuristic. Pure
+    // compute, no I/O; cheap to leave on.
+    if config.telemetry.embeddings_cpu {
+        sources.push(Box::new(EmbeddingsCpuSource::new()));
     }
     if sources.is_empty() {
         return None;

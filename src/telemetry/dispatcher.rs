@@ -354,6 +354,7 @@ mod tests {
             environ: HashMap::new(),
             model_name: None,
             cpu_pct: 0.0,
+            ppid: None,
         }
     }
 

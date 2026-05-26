@@ -41,6 +41,23 @@ pub struct ProcessSnapshot {
     /// `None` from `compute_cpu_pct` to `0.0` at the builder site
     /// (see `runtime.rs:545`) so this field is never absent.
     pub cpu_pct: f32,
+    /// Phase 2 / DISPATCH 1.6 — parent process ID, as reported by
+    /// `/proc/<pid>/status PPid` (sourced from `ProcessSample::ppid`
+    /// at the builder site). Samplers needing child-process
+    /// detection — B2 Agent (claude) tracks Bash-tool invocations
+    /// via `child.ppid == agent.pid` — read this field.
+    ///
+    /// EMPIRICAL anchor (Tester-A claude capture, 22 concurrent
+    /// agents on the test host): multi-instance attribution
+    /// requires precise ppid filtering or every bash subshell
+    /// in the snapshot gets credited to every agent.
+    ///
+    /// `None` when the source data layer cannot resolve a parent
+    /// (PID 0, kernel threads, transient processes whose
+    /// `/proc/<pid>/stat` race-failed). Samplers consuming this
+    /// field should treat `None` as "unknown parent", not as
+    /// "no parent".
+    pub ppid: Option<u32>,
 }
 
 /// Phase 2 — per-category activity surfacing (DISPATCH 1 foundation).
@@ -247,6 +264,7 @@ mod tests {
             environ: HashMap::new(),
             model_name: None,
             cpu_pct: 0.0,
+            ppid: None,
         }
     }
 

@@ -613,6 +613,14 @@ impl Runtime {
                         // (single-core-pinned ≈ 100.0); see the
                         // doc-comment on `ProcessSnapshot::cpu_pct`.
                         cpu_pct: ann.cpu_pct,
+                        // DISPATCH 1.6 — plumb parent PID so B2
+                        // (Agent claude sampler) can filter
+                        // bash-tool children via
+                        // `child.ppid == agent.pid` in
+                        // multi-instance scenarios. Sourced from
+                        // `ProcessSample::ppid`; `None` for kernel
+                        // threads or transient /proc race losses.
+                        ppid: s.ppid,
                     })
                 })
                 .collect();

@@ -20,6 +20,27 @@ pub struct ProcessSnapshot {
     pub cmdline: Vec<String>,
     pub environ: HashMap<String, String>,
     pub model_name: Option<String>,
+    /// Phase 2 / DISPATCH 1.5 — per-tick CPU% on the **raw
+    /// `0-(100×cores)` scale**, sourced from
+    /// `runtime::Runtime::compute_cpu_pct` (formula:
+    /// `(delta_ticks / USER_HZ / dt) × 100`). A single-core-pinned
+    /// process reads ~100.0; a process saturating 4 cores reads
+    /// ~400.0; a host-normalised reading is NOT what this field
+    /// carries. Phase-2 samplers (B1 Ollama, B4 Embeddings) anchor
+    /// their thresholds to this scale (B1 `OLLAMA_ACTIVE_CPU_PCT
+    /// = 50.0`, B4 `EMBEDDINGS_ACTIVE_CPU_PCT = 60.0`).
+    ///
+    /// Empirical anchor (Tester-B `/api/generate` capture): an
+    /// Ollama runner during generation pins ~1 core sustained
+    /// (raw 99–105% bimodal vs 0–1% idle), validating the
+    /// single-core-pinned ≈ 100.0 mapping.
+    ///
+    /// `0.0` on the cold-start tick (first time this PID is
+    /// observed, no previous reading to delta against) and on
+    /// PID-reuse ticks-counter rewinds — the runtime drops a
+    /// `None` from `compute_cpu_pct` to `0.0` at the builder site
+    /// (see `runtime.rs:545`) so this field is never absent.
+    pub cpu_pct: f32,
 }
 
 /// Phase 2 — per-category activity surfacing (DISPATCH 1 foundation).
@@ -225,6 +246,7 @@ mod tests {
             cmdline: vec![],
             environ: HashMap::new(),
             model_name: None,
+            cpu_pct: 0.0,
         }
     }
 

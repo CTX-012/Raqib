@@ -240,6 +240,7 @@ mod tests {
             cmdline: cmdline.iter().map(|s| s.to_string()).collect(),
             environ: StdMap::new(),
             model_name: None,
+            cpu_pct: 0.0,
         }
     }
 

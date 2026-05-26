@@ -443,6 +443,7 @@ mod tests {
                 .collect(),
             model_name: None,
             cpu_pct: 0.0,
+            ppid: None,
         }
     }
 

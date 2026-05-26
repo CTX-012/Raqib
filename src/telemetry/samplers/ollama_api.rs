@@ -20,6 +20,55 @@
 //!   ]
 //! }
 //! ```
+//!
+//! ## v1.1.0 B1 — ActivityState emission
+//!
+//! Folded empirical findings from Tester-B's pre-work captures:
+//!   - `tests/empirical/v1_1_0_prep/ollama_api_format/`
+//!   - `tests/empirical/v1_1_0_prep/ollama_generate_sidechannel/`
+//!
+//! For each Ollama *runner* subprocess (the one holding VRAM — see
+//! v1.0.3 B-VRAM-ZERO compute-process enumeration), emit
+//! `ActivityState` based on the runner's per-tick CPU% (bimodal at
+//! raw `0-(100×cores)` scale per `ProcessSnapshot::cpu_pct` doc):
+//!
+//! ```text
+//! /api/ps response shape                       → ActivityState
+//! -------------------------------------------------------------
+//! HTTP 200, runner model absent from models[]  → NotDetected
+//! HTTP 200, runner model present, CPU < 5%
+//!   (after 2-sample debounce per CHANGE 12)    → Idle
+//! HTTP 200, runner model present, CPU ≥ 50%    → Active
+//! HTTP 200, runner model present, dead-band    → previous state held
+//!   (5-50% empirically empty per Tester-B)
+//! Connection refused / read timeout            → NotDetected,
+//!   once-log on Up→Down transition
+//! HTTP 5xx                                     → SourceError::Transient
+//! ```
+//!
+//! `Loading` state is NOT emitted in v1.1.0. Empirical absence of a
+//! load-state indicator in `/api/ps` (Tester-B verified no load
+//! timestamp, no state field) means cold-start is invisible to
+//! `/api/ps` polling for the small models this project targets.
+//! Revisit in v1.2+ if side-channel detection becomes worth the
+//! complexity (CHANGE 1).
+//!
+//! ## REJECTED active-detection signals (CHANGE 17)
+//!
+//! - `nvidia-smi --query-gpu=utilization.gpu`: REJECTED.
+//!   Device-wide; conflates concurrent CUDA workloads. Tester-B
+//!   verified: NOVA Python kept GPU util 57–100% while the Ollama
+//!   runner was idle.
+//! - `nvidia-smi --query-compute-apps memory`: REJECTED.
+//!   VRAM size is constant between Active and Idle (not a signal).
+//! - `nvidia-smi pmon -s u` per-PID SM%: REJECTED.
+//!   Bursty + 250 ms scrape cost; no advantage over CPU%.
+//! - `/api/generate` streaming poll: REJECTED.
+//!   Streaming protocol incompatible with the poll model.
+//!
+//! All thresholds in this file are documented `EMPIRICAL` (locked
+//! from Tester-B capture) or `PROVISIONAL: refined post-v1.1.0
+//! sampler validation (v1.1.1)` where Tester-B couldn't pin them.
 
 use std::collections::HashMap;
 use std::sync::OnceLock;
@@ -30,11 +79,30 @@ use regex::Regex;
 use serde::Deserialize;
 
 use crate::telemetry::source::{
-    ProcessSnapshot, SourceError, SourceResult, TelemetryFrame, TelemetrySource,
+    ActivityState, ProcessSnapshot, SourceError, SourceResult, TelemetryFrame, TelemetrySource,
 };
 
 const DEFAULT_PORT: u16 = 11434;
 const SCRAPE_TIMEOUT: Duration = Duration::from_millis(500);
+
+// EMPIRICAL (Tester-B): CPU% is bimodal. Idle 0-1% sustained,
+// active 99-105% sustained, the 5-50% band empirically empty
+// across 220 samples. Threshold of 50% sits in the empty band.
+// NOT PROVISIONAL — empirically locked at the raw `0-(100×cores)`
+// scale per `ProcessSnapshot::cpu_pct` doc-comment.
+const OLLAMA_ACTIVE_CPU_PCT: f32 = 50.0;
+
+// EMPIRICAL (Tester-B): a single transition sample occasionally
+// hit ~10% during Active→Idle decay (<200ms from /api/generate
+// done:true). 2-sample debounce guards against spurious Idle.
+const OLLAMA_IDLE_CPU_PCT: f32 = 5.0;
+const OLLAMA_IDLE_DEBOUNCE_SAMPLES: u8 = 2;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DaemonStatus {
+    Up,
+    Down,
+}
 
 pub struct OllamaApiSource {
     client: reqwest::Client,
@@ -42,6 +110,18 @@ pub struct OllamaApiSource {
     /// samplers; no per-PID identity needed because Ollama runs as
     /// one daemon per host typically.
     endpoint_cache: HashMap<u32, String>,
+    /// v1.1.0 B1 — debounce counter keyed by **model name** so runner
+    /// re-spawn (Ollama silently evicts + recreates the subprocess
+    /// under VRAM pressure per CHANGE 14) preserves the streak
+    /// across the new runner PID.
+    per_model_idle_streak: HashMap<String, u8>,
+    /// v1.1.0 B1 — track previously-emitted state per model so the
+    /// dead band (5-50%, empirically empty but defensively handled)
+    /// holds the prior verdict.
+    per_model_last_state: HashMap<String, ActivityState>,
+    /// v1.1.0 B1 — daemon up/down for once-log on transition.
+    /// `None` until first sample resolves.
+    last_daemon_status: Option<DaemonStatus>,
 }
 
 impl OllamaApiSource {
@@ -56,6 +136,9 @@ impl OllamaApiSource {
         Self {
             client,
             endpoint_cache: HashMap::new(),
+            per_model_idle_streak: HashMap::new(),
+            per_model_last_state: HashMap::new(),
+            last_daemon_status: None,
         }
     }
 
@@ -88,6 +171,69 @@ impl OllamaApiSource {
             "http://127.0.0.1:{}/api/ps",
             Self::discover_port(cmdline, environ)
         )
+    }
+
+    /// v1.1.0 B1 — log-once gate on daemon status transition. Returns
+    /// the resolved status for caller bookkeeping.
+    fn record_daemon_status(&mut self, current: DaemonStatus) {
+        let prior = self.last_daemon_status.replace(current);
+        if prior != Some(current) {
+            match current {
+                DaemonStatus::Down => {
+                    tracing::info!(
+                        "Ollama /api/ps unreachable (connection refused or timeout); \
+                         emitting NotDetected for tracked runners until daemon recovers"
+                    );
+                }
+                DaemonStatus::Up if prior.is_some() => {
+                    tracing::info!("Ollama /api/ps recovered; resuming normal sampling");
+                }
+                DaemonStatus::Up => {}
+            }
+        }
+    }
+
+    /// v1.1.0 B1 — apply the bimodal threshold + 2-sample debounce
+    /// for one runner. `model` keys the per-model state so the
+    /// streak survives runner re-spawn (CHANGE 14). Returns the
+    /// ActivityState to emit this tick.
+    fn classify_runner_activity(&mut self, model: &str, cpu_pct: f32) -> ActivityState {
+        if cpu_pct >= OLLAMA_ACTIVE_CPU_PCT {
+            // Active — reset the idle streak.
+            self.per_model_idle_streak.insert(model.to_string(), 0);
+            self.per_model_last_state
+                .insert(model.to_string(), ActivityState::Active);
+            ActivityState::Active
+        } else if cpu_pct < OLLAMA_IDLE_CPU_PCT {
+            // Idle candidate — increment the streak; only emit Idle
+            // after 2 consecutive sub-5% samples (CHANGE 12).
+            let streak = self
+                .per_model_idle_streak
+                .entry(model.to_string())
+                .and_modify(|n| *n = n.saturating_add(1))
+                .or_insert(1);
+            let state = if *streak >= OLLAMA_IDLE_DEBOUNCE_SAMPLES {
+                ActivityState::Idle
+            } else {
+                // Hold previous state through the debounce window.
+                *self
+                    .per_model_last_state
+                    .get(model)
+                    .unwrap_or(&ActivityState::Active)
+            };
+            self.per_model_last_state.insert(model.to_string(), state);
+            state
+        } else {
+            // 5-50 % dead band (empirically empty per Tester-B). Hold
+            // the previous state; don't perturb the idle streak.
+            let state = *self
+                .per_model_last_state
+                .get(model)
+                .unwrap_or(&ActivityState::Active);
+            // Don't touch idle_streak: the dead band is neither a
+            // confirmed idle sample nor an Active confirmation.
+            state
+        }
     }
 }
 
@@ -134,24 +280,70 @@ impl TelemetrySource for OllamaApiSource {
                 u
             }
         };
-        let body = self
-            .client
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| SourceError::Transient(format!("GET {}: {}", url, e)))?
+        // v1.1.0 B1 — explicit connect/timeout branch lets us emit
+        // NotDetected rather than swallow the error into Transient,
+        // so the accumulator's most-recent-non-None wire is freed of
+        // stale Active state across an outage (CHANGE 6).
+        let resp = match self.client.get(&url).send().await {
+            Ok(r) => r,
+            Err(e) if e.is_connect() || e.is_timeout() => {
+                self.record_daemon_status(DaemonStatus::Down);
+                return Ok(TelemetryFrame {
+                    activity_state: Some(ActivityState::NotDetected),
+                    ..TelemetryFrame::new(proc.pid)
+                });
+            }
+            Err(e) => return Err(SourceError::Transient(format!("GET {}: {}", url, e))),
+        };
+        let resp = resp
             .error_for_status()
-            .map_err(|e| SourceError::Transient(format!("status {}: {}", url, e)))?
+            .map_err(|e| SourceError::Transient(format!("status {}: {}", url, e)))?;
+        let body = resp
             .text()
             .await
             .map_err(|e| SourceError::Transient(format!("body {}: {}", url, e)))?;
+        self.record_daemon_status(DaemonStatus::Up);
 
-        let model_name = parse_loaded_model(&body);
-        Ok(TelemetryFrame {
-            pid: proc.pid,
-            model_name_hint: model_name,
-            ..TelemetryFrame::new(proc.pid)
-        })
+        let loaded = parse_loaded_models(&body);
+
+        // v1.1.0 B1 — runner vs daemon dispatch. The runner sample
+        // carries an annotated model_name (classifier resolves it
+        // from cmdline); the daemon does not. Runners get the
+        // activity_state treatment; the daemon keeps the existing
+        // model_name_hint frame (one per loaded model, but cheap to
+        // emit just the first for `RunRecord` promotion).
+        if let Some(my_model) = proc.model_name.as_deref() {
+            // CHANGE 14: re-resolve runner PID every tick. The dispatcher
+            // already does this — `proc.pid` is the live PID, and a
+            // re-spawned runner appears as a new ProcessSnapshot with the
+            // same `model_name` (idle streak survives via per_model_*).
+            let activity = if loaded.iter().any(|m| m == my_model) {
+                self.classify_runner_activity(my_model, proc.cpu_pct)
+            } else {
+                // CHANGE 5: sub-second unload — model gone from /api/ps
+                // means the runner is no longer hosting it. Clear
+                // per-model state so a future reload starts fresh.
+                self.per_model_idle_streak.remove(my_model);
+                self.per_model_last_state.remove(my_model);
+                ActivityState::NotDetected
+            };
+            Ok(TelemetryFrame {
+                pid: proc.pid,
+                activity_state: Some(activity),
+                model_name_hint: Some(my_model.to_string()),
+                ..TelemetryFrame::new(proc.pid)
+            })
+        } else {
+            // Daemon path — preserve existing model_name_hint behavior.
+            // No activity_state on the daemon row (its activity is
+            // determined by the runner it spawned).
+            let model_name = loaded.first().cloned();
+            Ok(TelemetryFrame {
+                pid: proc.pid,
+                model_name_hint: model_name,
+                ..TelemetryFrame::new(proc.pid)
+            })
+        }
     }
 }
 
@@ -174,14 +366,21 @@ struct PsModel {
 /// because the sampler is opt-in via cmdline detection and a
 /// malformed body is a real misconfiguration the operator should see.
 pub fn parse_loaded_model(body: &str) -> Option<String> {
-    let parsed: PsResponse = serde_json::from_str(body).ok()?;
-    parsed.models.first().and_then(|m| {
-        if m.name.is_empty() {
-            None
-        } else {
-            Some(m.name.clone())
-        }
-    })
+    parse_loaded_models(body).into_iter().next()
+}
+
+/// v1.1.0 B1 — returns every loaded model name from `/api/ps`. Empty
+/// vec for empty / malformed bodies (same strict policy as the legacy
+/// single-model helper).
+pub fn parse_loaded_models(body: &str) -> Vec<String> {
+    let Ok(parsed) = serde_json::from_str::<PsResponse>(body) else {
+        return Vec::new();
+    };
+    parsed
+        .models
+        .into_iter()
+        .filter_map(|m| if m.name.is_empty() { None } else { Some(m.name) })
+        .collect()
 }
 
 #[cfg(test)]
@@ -197,6 +396,18 @@ mod tests {
             environ: StdMap::new(),
             model_name: None,
             cpu_pct: 0.0,
+            ppid: None,
+        }
+    }
+
+    fn runner_snap(model: &str, cpu_pct: f32) -> ProcessSnapshot {
+        ProcessSnapshot {
+            pid: 99,
+            name: "ollama".into(),
+            cmdline: vec!["ollama".into(), "runner".into()],
+            environ: StdMap::new(),
+            model_name: Some(model.into()),
+            cpu_pct,
             ppid: None,
         }
     }
@@ -265,6 +476,166 @@ mod tests {
         assert!(parse_loaded_model("not json").is_none());
     }
 
+    // ────────────────────────────────────────────────────────────
+    // v1.1.0 B1 — state-mapping tests.
+    // ────────────────────────────────────────────────────────────
+
+    /// CHANGE 8 schema guard: parse Tester-B's captured /api/ps poll
+    /// shape. If Ollama bumps the schema (model key rename, models[]
+    /// wrapper change), this test fails first — surfacing the
+    /// trigger from CHANGE 8 before any drift escapes into production.
+    #[test]
+    fn schema_matches_tester_b_captured_format() {
+        // Inner-poll shape from
+        // tests/empirical/v1_1_0_prep/ollama_api_format/raw/
+        // ollama_ps_active_generation.json. Trimmed to the fields the
+        // parser actually consumes plus a representative neighbour
+        // (size_vram) so a field rename is caught.
+        let body = r#"{
+            "models": [
+                {
+                    "name": "tinyllama:latest",
+                    "model": "tinyllama:latest",
+                    "size": 800454656,
+                    "size_vram": 800454656
+                }
+            ]
+        }"#;
+        let parsed = parse_loaded_models(body);
+        assert_eq!(parsed, vec!["tinyllama:latest".to_string()]);
+    }
+
+    /// Empty `/api/ps` response → previously-tracked runners should
+    /// resolve to NotDetected on next sample. Pins CHANGE 5.
+    #[test]
+    fn empty_models_yields_not_detected_for_known_runner() {
+        let mut s = OllamaApiSource::new();
+        // Seed prior state for the model (as if a previous tick saw
+        // it Active). Force the model into per_model_last_state so the
+        // "not in /api/ps" branch is exercised against a real cleanup.
+        s.per_model_last_state
+            .insert("tinyllama:latest".into(), ActivityState::Active);
+        s.per_model_idle_streak
+            .insert("tinyllama:latest".into(), 0);
+
+        let loaded = parse_loaded_models(r#"{"models":[]}"#);
+        assert!(loaded.is_empty());
+        // Simulate the runner branch of sample().
+        let runner = runner_snap("tinyllama:latest", 0.0);
+        let my_model = runner.model_name.as_deref().unwrap();
+        let activity = if loaded.iter().any(|m| m == my_model) {
+            s.classify_runner_activity(my_model, runner.cpu_pct)
+        } else {
+            s.per_model_idle_streak.remove(my_model);
+            s.per_model_last_state.remove(my_model);
+            ActivityState::NotDetected
+        };
+        assert_eq!(activity, ActivityState::NotDetected);
+        assert!(!s.per_model_last_state.contains_key(my_model));
+        assert!(!s.per_model_idle_streak.contains_key(my_model));
+    }
+
+    /// Populated `models[]` with high CPU → Active. Threshold is
+    /// `>= 50.0` on the raw `0-(100×cores)` scale per EMPIRICAL
+    /// (Tester-B): bimodal 99-105% active.
+    #[test]
+    fn populated_models_with_high_cpu_yields_active() {
+        let mut s = OllamaApiSource::new();
+        // 100.0 is the empirical "1 core pinned" reading.
+        assert_eq!(
+            s.classify_runner_activity("tinyllama:latest", 100.0),
+            ActivityState::Active,
+        );
+        // Threshold boundary exactly at 50.0.
+        assert_eq!(
+            s.classify_runner_activity("tinyllama:latest", 50.0),
+            ActivityState::Active,
+        );
+    }
+
+    /// Populated `models[]` with sub-5% CPU + 2-sample debounce →
+    /// Idle on the second consecutive sub-5% sample. The first
+    /// sub-5% sample HOLDS the previous Active state (CHANGE 12).
+    #[test]
+    fn populated_models_with_low_cpu_emits_idle_only_after_debounce() {
+        let mut s = OllamaApiSource::new();
+        // Seed prior Active (e.g. /api/generate just finished).
+        s.per_model_last_state
+            .insert("tinyllama:latest".into(), ActivityState::Active);
+
+        // First sub-5% sample — hold Active through debounce.
+        assert_eq!(
+            s.classify_runner_activity("tinyllama:latest", 1.0),
+            ActivityState::Active,
+            "single sub-5% sample must not flip to Idle (CHANGE 12 debounce)",
+        );
+        // Second sub-5% sample — debounce reached, emit Idle.
+        assert_eq!(
+            s.classify_runner_activity("tinyllama:latest", 0.5),
+            ActivityState::Idle,
+        );
+    }
+
+    /// 5-50% dead band → hold previous state (CHANGE 11).
+    /// Empirically empty per Tester-B but defensively handled so a
+    /// transient sample in that band doesn't perturb the streak.
+    #[test]
+    fn dead_band_holds_previous_state() {
+        let mut s = OllamaApiSource::new();
+        s.per_model_last_state
+            .insert("tinyllama:latest".into(), ActivityState::Active);
+        // Mid-band sample (empirically empty zone).
+        assert_eq!(
+            s.classify_runner_activity("tinyllama:latest", 25.0),
+            ActivityState::Active,
+        );
+        // Streak unchanged (no entry created from a dead-band sample).
+        assert!(!s.per_model_idle_streak.contains_key("tinyllama:latest"));
+    }
+
+    /// Active resets the idle streak so a subsequent burst of activity
+    /// re-arms the 2-sample debounce from scratch.
+    #[test]
+    fn active_resets_idle_streak() {
+        let mut s = OllamaApiSource::new();
+        // One sub-5% sample (streak = 1, still Active per debounce).
+        s.per_model_last_state
+            .insert("tinyllama:latest".into(), ActivityState::Active);
+        s.classify_runner_activity("tinyllama:latest", 0.0);
+        assert_eq!(s.per_model_idle_streak.get("tinyllama:latest"), Some(&1));
+        // Burst → streak reset to 0.
+        s.classify_runner_activity("tinyllama:latest", 100.0);
+        assert_eq!(s.per_model_idle_streak.get("tinyllama:latest"), Some(&0));
+    }
+
+    /// Daemon up→down transition logs once; subsequent samples in
+    /// the same Down state must NOT re-log.
+    #[test]
+    fn daemon_transition_log_is_once() {
+        let mut s = OllamaApiSource::new();
+        // First transition None → Up: no log expected (start-up).
+        s.record_daemon_status(DaemonStatus::Up);
+        assert_eq!(s.last_daemon_status, Some(DaemonStatus::Up));
+        // Up → Down: would log.
+        s.record_daemon_status(DaemonStatus::Down);
+        // Down → Down: must not log again (idempotent within a state).
+        s.record_daemon_status(DaemonStatus::Down);
+        assert_eq!(s.last_daemon_status, Some(DaemonStatus::Down));
+        // Down → Up: would log recovery.
+        s.record_daemon_status(DaemonStatus::Up);
+        assert_eq!(s.last_daemon_status, Some(DaemonStatus::Up));
+    }
+
+    /// Bimodal threshold constants are at the documented EMPIRICAL
+    /// values. Pinned so a casual refactor doesn't silently lower the
+    /// threshold into Tester-B's empty band.
+    #[test]
+    fn bimodal_thresholds_match_empirical_values() {
+        assert_eq!(OLLAMA_ACTIVE_CPU_PCT, 50.0);
+        assert_eq!(OLLAMA_IDLE_CPU_PCT, 5.0);
+        assert_eq!(OLLAMA_IDLE_DEBOUNCE_SAMPLES, 2);
+    }
+
     #[tokio::test]
     async fn end_to_end_scrape_emits_model_hint() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -298,5 +669,7 @@ mod tests {
         // No throughput yet — that's the spec'd division of labour
         // between Ollama and stdout parsing.
         assert!(frame.tokens_per_sec.is_none());
+        // Daemon row: no activity_state (runner row carries that).
+        assert!(frame.activity_state.is_none());
     }
 }

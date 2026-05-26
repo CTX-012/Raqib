@@ -18,8 +18,8 @@ use crate::model::{AICategory, ClassificationResult, WorkloadCategory};
 use crate::platform::{self, GpuSnapshot, PlatformError, PlatformSnapshot};
 use crate::storage::{LogStore, RunRecord, RunStore};
 use crate::telemetry::samplers::{
-    llama_cpp_server::LlamaCppServerSource, ollama_api::OllamaApiSource,
-    vllm_prometheus::VllmPrometheusSource,
+    agent_claude::AgentClaudeSource, llama_cpp_server::LlamaCppServerSource,
+    ollama_api::OllamaApiSource, vllm_prometheus::VllmPrometheusSource,
 };
 use crate::telemetry::source::{ActivityState, ProcessSnapshot as TelemetryProcessSnapshot};
 use crate::telemetry::{Dispatcher, TelemetrySource};
@@ -1257,6 +1257,9 @@ fn build_dispatcher(config: &Config) -> Option<Dispatcher> {
     }
     if config.telemetry.ollama_api {
         sources.push(Box::new(OllamaApiSource::new()));
+    }
+    if config.telemetry.agent_claude {
+        sources.push(Box::new(AgentClaudeSource::new()));
     }
     if sources.is_empty() {
         return None;

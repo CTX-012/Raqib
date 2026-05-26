@@ -6,6 +6,147 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project aims to adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 once `v1.0.0` is tagged. Until then, minor versions may include breaking changes.
 
+## [1.1.0] — 2026-05-24
+
+Phase 2: per-category activity surfacing. v1.0.x told operators
+which workload was alive on the box; v1.1.0 tells them whether
+each workload is **doing observable work right now**
+(`Active` / `Idle` / `Loading` / `NotDetected`).
+
+Four new per-category samplers + the foundation surface they
+plug into. Wire schema is additive at the field level — every
+v1.0.x `RunRecord` JSON round-trips through a v1.1 reader.
+
+### Foundation (DISPATCH 1 + 1.5 + 1.6)
+
+- **`ActivityState` enum** — `Active` / `Idle` / `Loading` /
+  `NotDetected`. Local to edge_monitor for v1.1.0; CAR-candidate
+  for `ux_contract` v0.3.12 once Phase-2 sampler validation
+  (P5) confirms the four-variant taxonomy holds. Foundation
+  commit on `phase2-foundation` (merged at `9db8639`).
+- **`TelemetryFrame::activity_state: Option<ActivityState>`** —
+  additive wire field with `#[serde(default)]` so a v1.0
+  reader round-trips a v1.1 frame and vice versa.
+- **`TelemetrySource::sample_with_context`** — additive trait
+  method with a default polyfill that delegates to `sample`.
+  Lets B2 inspect the full per-tick process list to detect
+  Bash-tool subprocesses without breaking the existing
+  single-PID `sample` contract for every other sampler
+  (Inspector #12 Option (i) + operator Q3 lock).
+- **`ProcessSnapshot::cpu_pct: f32`** — DISPATCH 1.5
+  (`5b448dd`). Raw `0-(100×cores)` scale documented inline at
+  `src/telemetry/source.rs:23-43`. Empirical anchor from
+  Tester-B's `/api/generate` capture: an Ollama runner during
+  generation pins ~1 core sustained (bimodal 99-105% vs
+  0-1% idle).
+- **`ProcessSnapshot::ppid: Option<u32>`** — DISPATCH 1.6
+  (`526555f`). Surfaced during DISPATCH 2A B2 work as a second
+  foundation gap with the same shape as `cpu_pct`. Enables B2's
+  multi-instance attribution: without it, 22 concurrent claude
+  agents would each be credited with every bash in the
+  snapshot.
+- **`Dispatcher::activity_for(pid)`** accessor on the
+  per-PID accumulator.
+- **TUI workloads column** — 8-char text-label only per
+  Inspector #8 V1 + L21 §14. No per-state colors or spinners
+  in v1.1.0; those land in v1.1.x once P5 validates the four
+  state semantics.
+
+### Per-category samplers (4)
+
+- **B1 — Ollama activity** (DISPATCH 2A; `OllamaApiSource`
+  extended in place per Inspector #12 + operator Q2). Bimodal
+  CPU% detection on the Ollama runner subprocess:
+  `OLLAMA_ACTIVE_CPU_PCT = 50.0` (EMPIRICAL — Tester-B's
+  220-sample 5-50% empty band), 2-sample idle debounce
+  (`OLLAMA_IDLE_DEBOUNCE_SAMPLES = 2`). Runner PID re-resolved
+  every tick (no caching — Ollama silently evicts and
+  re-spawns runners under VRAM pressure). Connection-refused
+  emits `NotDetected` (not `Transient`) to suppress stale
+  Active state during daemon outages; once-log on Up↔Down
+  transitions. `Loading` state explicitly NOT emitted in
+  v1.1.0 — `/api/ps` carries no load timestamp; Tester-B
+  verified models go absent → present in a single ~1.4 s
+  tick for small models. Rejected signals (nvidia-smi GPU
+  util, `--query-compute-apps` memory, `pmon -s u`,
+  `/api/generate` poll) documented in source.
+- **B2 — Agent (claude)** (DISPATCH 2A; new
+  `AgentClaudeSource`). Uses `sample_with_context` +
+  `child.ppid == agent_pid` filtering to detect Bash-tool
+  subprocesses. `applies_to` is two-factor + two-reject:
+  `basename(argv[0]) == "claude"` AND argv contains the
+  two-token `--output-format` `stream-json`; rejects
+  `.claude/shell-snapshots/` (Bash-tool subshells) and any
+  match relying on `comm` or `/proc/exe` (multi-call binary
+  recursion guard — Tester-A verified 1 of 22 claude-binary
+  processes had `argv[0] = ugrep` and would have false-fired
+  a non-argv\[0\] check). `AGENT_IDLE_WINDOW = 60s`
+  (PROVISIONAL).
+- **B3 — ROS2 (shellout)** (DISPATCH 2B; new
+  `Ros2ShelloutSource`). `tokio::process` shellout to `ros2
+  topic list` + `ros2 topic hz <topic>`. Two-line
+  TAB-indented Hz parser; 5 s inner `tokio::time::timeout`;
+  WARNING-line fast-fail when a topic has no publisher.
+  Carries an `EDGE_MONITOR_SAMPLER` env-var marker on
+  spawned subprocesses so a future classifier-side
+  recursion guard can recognise B3's own probes.
+- **B4 — Embeddings (CPU heuristic)** (DISPATCH 2B; new
+  `EmbeddingsCpuSource`). Sustained-CPU window over
+  `ProcessSnapshot::cpu_pct`; `max(window) ≥
+  EMBEDDINGS_ACTIVE_CPU_PCT = 60.0` → Active.
+  `EMBEDDINGS_WINDOW_SAMPLES = 3` rolling buffer absorbs
+  burstiness (sentence-transformers / BGE / GTE / E5
+  workloads encode in 100-300 ms then idle). PROVISIONAL
+  thresholds — no empirical capture yet.
+
+### Empirical data
+
+Pre-implementation captures preserved under
+`tests/empirical/v1_1_0_prep/`:
+
+- `ros2_shellout_format/` (Tester-A; anchors B3)
+- `claude_agent_format/` (Tester-A; anchors B2 — verified
+  the ugrep-symlink recursion case and the two-token
+  `--output-format stream-json` form)
+- `ollama_api_format/` (Tester-B; anchors B1's schema-guard
+  test)
+- `ollama_generate_sidechannel/` (Tester-B; anchors B1's
+  bimodal CPU threshold)
+
+### Known limitations (PROVISIONAL v1.1.1 refinements)
+
+- B1 / B2 / B4 thresholds are locked from one host's
+  empirical data; P5 sampler validation will refine.
+- B2 and B4 per-PID HashMaps (`last_active_at`,
+  `per_pid_cpu_window`) are bounded slow leaks. The
+  dispatcher does not invoke a per-PID cleanup hook on
+  `SourceError::Permanent`; growth is bounded by observed
+  PID count (~50 bytes/PID, dozens concurrent empirically).
+  Dispatcher cleanup hook deferred to v1.1.1.
+- `Loading` state is NOT emitted by B1 in v1.1.0. Side-channel
+  detection of cold-start (runner subprocess appearance,
+  nvidia-smi compute-app appearance, `/api/generate`
+  correlation) deferred to v1.2+ if it becomes worth the
+  complexity for larger models.
+- B3 and B4 cmdline-detect only — library-signal-only ROS2
+  nodes (C++ nodes spawned without `ros2 run` and without
+  `ROS_DOMAIN_ID`) and library-signal-only embeddings
+  workloads classify in the panel but get no Phase-2
+  sampling. Acceptable v1.1.0 gap; v1.1.1+ can plumb
+  `workload_category` onto `ProcessSnapshot` to close.
+
+### Wire schema
+
+`TelemetryFrame.activity_state` is additive with
+`#[serde(default)]`. Schema version unchanged.
+
+### Test count: 833 → 876 (+43)
+
+- B1: +8 in `ollama_api`
+- B2: +12 in `agent_claude`
+- B3: +13 in `ros2_shellout`
+- B4: +10 in `embeddings_cpu`
+
 ## [1.0.4] — 2026-05-23
 
 Documentation-only release closing the 7 pre-existing `cargo doc`

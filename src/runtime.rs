@@ -607,6 +607,13 @@ impl Runtime {
                         cmdline: s.cmdline.clone(),
                         environ: s.environ.clone(),
                         model_name: ann.model_name.clone(),
+                        // DISPATCH 1.5 — plumb CPU% so Phase-2
+                        // samplers (B1 Ollama, B4 Embeddings) can
+                        // anchor activity-state thresholds without
+                        // re-reading /proc/<pid>/stat. Raw scale
+                        // (single-core-pinned ≈ 100.0); see the
+                        // doc-comment on `ProcessSnapshot::cpu_pct`.
+                        cpu_pct: ann.cpu_pct,
                     })
                 })
                 .collect();

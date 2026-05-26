@@ -353,6 +353,7 @@ mod tests {
             cmdline: vec!["x".into()],
             environ: HashMap::new(),
             model_name: None,
+            cpu_pct: 0.0,
         }
     }
 

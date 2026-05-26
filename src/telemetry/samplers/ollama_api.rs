@@ -408,6 +408,7 @@ mod tests {
             environ: StdMap::new(),
             model_name: Some(model.into()),
             cpu_pct,
+            ppid: None,
         }
     }
 

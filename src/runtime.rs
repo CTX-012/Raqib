@@ -19,6 +19,7 @@ use crate::platform::{self, GpuSnapshot, PlatformError, PlatformSnapshot};
 use crate::storage::{LogStore, RunRecord, RunStore};
 use crate::telemetry::samplers::{
     llama_cpp_server::LlamaCppServerSource, ollama_api::OllamaApiSource,
+    ros2_shellout::Ros2ShelloutSource,
     vllm_prometheus::VllmPrometheusSource,
 };
 use crate::telemetry::source::{ActivityState, ProcessSnapshot as TelemetryProcessSnapshot};
@@ -1242,6 +1243,12 @@ fn build_dispatcher(config: &Config) -> Option<Dispatcher> {
     }
     if config.telemetry.ollama_api {
         sources.push(Box::new(OllamaApiSource::new()));
+    }
+    // Phase 2 / DISPATCH 2B — B3 ROS2 shellout. Default on; falls
+    // silent on hosts without ros2cli (spawn fails, sample returns
+    // Transient, dispatcher logs and retries).
+    if config.telemetry.ros2_shellout {
+        sources.push(Box::new(Ros2ShelloutSource::new()));
     }
     if sources.is_empty() {
         return None;

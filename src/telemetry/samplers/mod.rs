@@ -10,8 +10,12 @@
 //! * [`vllm_prometheus`] — vLLM `/metrics` scrape (1.2a).
 //! * [`llama_cpp_server`] — llama.cpp server `/metrics` scrape (1.2b).
 //! * [`ollama_api`] — Ollama `/api/ps` for model identification (1.2c).
+//! * [`ros2_shellout`] — ROS2 topic-rate via `ros2 topic hz` shellout
+//!   (Phase 2 / DISPATCH 2B / B3). Maps publication rate to
+//!   `ActivityState` per AI-classified ROS2 process.
 
 pub mod llama_cpp_server;
 pub mod ollama_api;
+pub mod ros2_shellout;
 pub mod stdout_parser;
 pub mod vllm_prometheus;

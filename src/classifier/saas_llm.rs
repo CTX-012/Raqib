@@ -42,11 +42,23 @@ use crate::model::{AICategory, ClassificationResult, ProcessSample, WorkloadCate
 /// Add new entries here as the SaaS-LLM CLI category expands.
 pub(crate) const SAAS_LLM_CLI_PATTERNS: &[(&str, &str)] = &[
     // Claude Code (Anthropic's VS Code extension + CLI).
+    //
+    // Two install layouts: the VS Code Remote-SSH layout (extensions
+    // host on the remote, under `.vscode-server/`) and the local
+    // VS Code layout (extensions on the workstation, under
+    // `.vscode/`). The pre-v1.1.1 patterns covered only the
+    // Remote-SSH layout, so DISPATCH 4 validation on a local VS Code
+    // host (`~/.vscode/extensions/anthropic.claude-code/`) saw the
+    // claude agent fall through the classifier entirely — B2 could
+    // never validate. Both layouts now covered.
     ("vscode-server/extensions/anthropic.claude-code", "claude-code"),
+    (".vscode/extensions/anthropic.claude-code", "claude-code"),
     // Cursor (forked VS Code distribution; their extension folder).
     ("vscode-server/extensions/cursor", "cursor"),
+    (".vscode/extensions/cursor", "cursor"),
     // Continue.dev (open-source autocomplete + chat extension).
     ("vscode-server/extensions/continue.continue", "continue"),
+    (".vscode/extensions/continue.continue", "continue"),
     // Aider — runs out of a pip package directory rather than VS
     // Code, so the path fragment looks like `site-packages/aider`
     // or the standalone binary name `aider-chat`. Either signal is
@@ -121,6 +133,58 @@ mod tests {
             "evidence should name the matched label: {}",
             r.evidence
         );
+    }
+
+    /// v1.1.1 DISPATCH 5 STEP 4 — local VS Code install layout
+    /// (`~/.vscode/extensions/`) must also classify, not just the
+    /// Remote-SSH layout (`~/.vscode-server/extensions/`).
+    /// Pre-v1.1.1 the patterns covered only the Remote-SSH layout,
+    /// so DISPATCH 4 validation on a local VS Code host saw the
+    /// claude agent fall through to NotAi → B2 could never
+    /// validate.
+    #[test]
+    fn claude_code_via_local_vscode_path_classified_as_ai() {
+        let s = sample(
+            "node",
+            &[
+                "node",
+                "/home/faiz/.vscode/extensions/anthropic.claude-code-2.1.0/cli.js",
+            ],
+        );
+        let r = classify(&s).expect("local claude-code path must fire");
+        assert_eq!(r.category, AICategory::Inference);
+        assert_eq!(r.workload_category, WorkloadCategory::Agent);
+        assert!(
+            r.evidence.contains("claude-code"),
+            "evidence should name the matched label: {}",
+            r.evidence,
+        );
+    }
+
+    /// v1.1.1 STEP 4 — symmetric coverage for cursor + continue.
+    /// If a future install moves to the local layout, the new
+    /// pattern fires.
+    #[test]
+    fn cursor_and_continue_via_local_vscode_paths_classified_as_ai() {
+        let cursor = sample(
+            "node",
+            &[
+                "node",
+                "/home/u/.vscode/extensions/cursor-1.2.3/dist/main.js",
+            ],
+        );
+        let r = classify(&cursor).expect("local cursor path must fire");
+        assert_eq!(r.workload_category, WorkloadCategory::Agent);
+
+        let cont = sample(
+            "node",
+            &[
+                "node",
+                "/home/u/.vscode/extensions/continue.continue-0.9.0/out/extension.js",
+            ],
+        );
+        let r = classify(&cont).expect("local continue path must fire");
+        assert_eq!(r.workload_category, WorkloadCategory::Agent);
     }
 
     #[test]

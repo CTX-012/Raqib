@@ -34,3 +34,13 @@ pub mod vision_probe;
 pub use accumulator::TelemetryAccumulator;
 pub use dispatcher::Dispatcher;
 pub use source::{ProcessSnapshot, TelemetryFrame, TelemetrySource, safe_sample};
+
+/// v1.1.1 — module-level default for
+/// [`TelemetrySource::sample_timeout`]. Moved out of the
+/// dispatcher's private constant so trait impls (in `source.rs`)
+/// can reference it without a back-channel.
+///
+/// 1 s suits HTTP-scrape samplers (vLLM, llama.cpp, Ollama) and
+/// pure-CPU heuristics (B4). Samplers needing longer (B3 ROS2)
+/// override [`TelemetrySource::sample_timeout`].
+pub const DEFAULT_SAMPLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);

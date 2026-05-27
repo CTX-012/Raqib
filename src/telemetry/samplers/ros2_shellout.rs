@@ -97,11 +97,19 @@ const ROS2_TOPIC_LIST_INTERVAL: Duration = Duration::from_secs(30);
 // activity reading" against "subprocess churn."
 const ROS2_TOPIC_HZ_INTERVAL: Duration = Duration::from_secs(60);
 
-// EMPIRICAL: Tester-A confirmed `ros2 topic hz` needs ≥3 messages
-// before first emit (~3 s at 1 Hz). 2 s would clip healthy 1 Hz
-// topics. 5 s is the conservative floor; scale per expected min
-// rate if a future deployment cares.
-const ROS2_SHELLOUT_TIMEOUT: Duration = Duration::from_secs(5);
+// EMPIRICAL (P5 DISPATCH 9A): `ros2 topic hz` needs ≥3 messages
+// before its first emit. Measured first-emit times: 1 Hz topics
+// complete at ~4.90 s (only 0.10 s headroom under the v1.1.2
+// 5 s ceiling — empirically marginal); 0.5 Hz topics need
+// ~6.83 s. 8 s provides a 1.6× refinement margin over 5 s and
+// clears the 0.5 Hz case.
+//
+// NOTE: sub-Hz topics (≤ 0.5 Hz, i.e. one message every ≥ 2 s)
+// remain structurally unobservable even at 8 s for the lowest
+// rates — see BUG-P5-2 (deferred to v1.1.4; the real fix is
+// windowing / streaming the hz output, not a still-larger
+// timeout).
+const ROS2_SHELLOUT_TIMEOUT: Duration = Duration::from_secs(8);
 
 /// WARNING-line prefix emitted by `ros2 topic hz` when the named
 /// topic has no publisher (Tester-A CHANGE 3). Stable across
@@ -302,16 +310,19 @@ impl TelemetrySource for Ros2ShelloutSource {
 
     /// v1.1.1 (DISPATCH 5) — outer dispatcher timeout for ros2
     /// shellout samples. Pre-v1.1.1 the dispatcher used a single
-    /// global 1 s wrap that cancelled B3's inner 5 s
-    /// `ROS2_SHELLOUT_TIMEOUT` four seconds early, so `ros2 topic
-    /// hz` never observed the ≥ 3 published messages it needs to
-    /// emit a rate. Every ROS2 row locked to `NotDetected`.
+    /// global 1 s wrap that cancelled B3's inner
+    /// `ROS2_SHELLOUT_TIMEOUT` early, so `ros2 topic hz` never
+    /// observed the ≥ 3 published messages it needs to emit a
+    /// rate. Every ROS2 row locked to `NotDetected`.
     ///
-    /// 6 s gives the inner 5 s `ROS2_SHELLOUT_TIMEOUT` ~1 s of
-    /// headroom for the subprocess kill-signal propagation when
-    /// a probe genuinely hangs.
+    /// v1.1.3 (P5 DISPATCH 9A) — tracks the inner+1s convention:
+    /// inner `ROS2_SHELLOUT_TIMEOUT` is now 8 s (was 5 s), so the
+    /// outer dispatcher ceiling is 9 s (was 6 s). The +1 s is
+    /// headroom for subprocess kill-signal propagation when a
+    /// probe genuinely hangs. The outer wrap must always exceed
+    /// the inner timeout — see `b3_sample_timeout_exceeds_inner_shellout_timeout`.
     fn sample_timeout(&self) -> Duration {
-        Duration::from_secs(6)
+        Duration::from_secs(9)
     }
 
     /// Applies to processes the classifier would surface as ROS2 via
@@ -446,13 +457,15 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
-    /// v1.1.1 DISPATCH 5 STEP 2 — pin B3's `sample_timeout` override
-    /// at 6 s. Pre-v1.1.1 the dispatcher's fixed 1 s ceiling
-    /// cancelled the inner 5 s `ROS2_SHELLOUT_TIMEOUT` 4 seconds
-    /// early; every ROS2 row locked to NotDetected. The 6 s value
-    /// gives the inner timeout 1 s of headroom for kill-signal
-    /// propagation. A refactor that lowers the override below the
-    /// inner timeout reintroduces the v1.1.0 bug — fail loud first.
+    /// v1.1.1 DISPATCH 5 — pin the inner < outer invariant.
+    /// v1.1.3 (P5 DISPATCH 9A) — refined values: inner
+    /// `ROS2_SHELLOUT_TIMEOUT` 5 s → 8 s, outer `sample_timeout`
+    /// 6 s → 9 s (inner+1s convention). The strict `outer > inner`
+    /// assertion is the load-bearing invariant — if a refactor
+    /// lowers the override below the inner timeout, `ros2 topic
+    /// hz` is cancelled before it can emit and every ROS2 row
+    /// re-locks to NotDetected (the v1.1.0 B3 root cause). The
+    /// exact-value asserts pin the P5 refinement.
     #[test]
     fn b3_sample_timeout_exceeds_inner_shellout_timeout() {
         let s = Ros2ShelloutSource::new();
@@ -464,7 +477,9 @@ mod tests {
              — otherwise `ros2 topic hz` is cancelled before it can \
              emit a rate. This was the v1.1.0 B3 root cause.",
         );
-        assert_eq!(outer, Duration::from_secs(6));
+        // P5 refinement values (v1.1.3).
+        assert_eq!(ROS2_SHELLOUT_TIMEOUT, Duration::from_secs(8));
+        assert_eq!(outer, Duration::from_secs(9));
     }
 
     fn proc(pid: u32, name: &str, cmdline: &[&str], env: &[(&str, &str)]) -> ProcessSnapshot {

@@ -6,6 +6,73 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project aims to adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 once `v1.0.0` is tagged. Until then, minor versions may include breaking changes.
 
+## [1.1.3] — 2026-05-24 — P5 refinements + integration harness (CI deferred)
+
+Phase 2 closeout. Empirically-anchored sampler refinements from P5
+sampler validation (DISPATCH 9A + 9B). The production-shape
+integration harnesses Tester-A built during P5 are promoted into
+the tracked repo at `tests/integration/sampler_harnesses/` for
+local developer use; CI smoke-stage wiring is deferred pending
+self-hosted runner infrastructure (stock CI lacks ollama / claude /
+ROS2).
+
+### Refined (P5 empirical data)
+
+- **B3 `ROS2_SHELLOUT_TIMEOUT`: 5 s → 8 s.** P5 measured `ros2
+  topic hz` first-emit at ~4.90 s for 1 Hz topics (only 0.10 s
+  headroom under the old 5 s ceiling — empirically marginal) and
+  ~6.83 s for 0.5 Hz. 8 s gives a 1.6× margin and clears 0.5 Hz.
+- **B3 `sample_timeout()`: 6 s → 9 s** (inner+1s convention; +1 s
+  for subprocess kill-signal propagation). The `outer > inner`
+  invariant — the v1.1.0 B3 root-cause guard — is unchanged.
+- **B4 `EMBEDDINGS_WINDOW_SAMPLES` (3 samples) →
+  `EMBEDDINGS_IDLE_WINDOW` (12 s).** Tester-B confirmed the
+  CPU-percent signal is correct (idle ~0% vs active 170-800%), so
+  the 60.0 threshold is PRESERVED; the count-based ~3 s window was
+  too short to bridge embeddings' ~5 s inter-burst gaps and
+  flickered Active↔Idle. The 12 s duration hold-window (HashMap
+  `last_active_at` pattern mirroring B2's `AGENT_IDLE_WINDOW`)
+  bridges the gaps without false-Active for genuinely-idle
+  workloads.
+
+### Added
+
+- **`tests/integration/sampler_harnesses/`** — production-shape
+  integration harnesses for B1 / B2 / B3. They spawn / inspect
+  *real* workloads through a running `edge_monitor` and assert the
+  sampler's identity assumption against the *real* data slice,
+  reproducing the v1.1.0 B1 (digest-vs-name) and v1.1.1 B2 (bash
+  child filtered out of `ai_procs`) historical bugs that
+  hand-built symmetric fixtures could not. Local-run only; see the
+  directory README for the procedure and host dependencies.
+
+### Deferred
+
+- **CI smoke-stage wiring for the harnesses** — stock CI runners
+  lack the production deps (ollama / claude / ROS2); an
+  unconditional job would red-flag every PR. The structural fix is
+  the harness *availability* for local pre-PR runs; CI automation
+  is a multiplier deferred to a self-hosted-runner dispatch.
+  `.github/workflows/ci.yml` is unchanged this release.
+
+### Carried forward to v1.1.4 (bug surface from P5)
+
+- **BUG-P5-2** — sub-Hz ROS2 topics (≤ 0.5 Hz at the lowest rates)
+  remain structurally unobservable even at the 8 s timeout; the
+  real fix is windowing / streaming the hz output, not a larger
+  timeout.
+- **BUG-P5-1** — ROS2 daemon helpers / CLI over-classify.
+- **P5-B4-CLASSIFY** — B4 misses non-argv model identifiers.
+- **P5-ENV-ROS** — `ROS_DOMAIN_ID` env inheritance misclassifies
+  non-ROS workloads (medium-high; relevant to the Jetson Orin
+  deployment target).
+
+### Test count: 885 → 888 (+3)
+
+- B3 timeout refinement: 0 net (existing pin test updated in place).
+- B4 hold-window: +3 net (removed 2 count-window tests, added 5
+  hold-window tests).
+
 ## [1.1.2] — 2026-05-24 — B2 active-detection fix + trait expansion
 
 Hotfix for the B2 active-detection bug surfaced by DISPATCH 6B

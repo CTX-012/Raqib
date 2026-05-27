@@ -10,32 +10,39 @@
 //! Heuristic: embeddings work is **bursty**. A short batch encodes
 //! in ~100-300 ms and the process goes idle between requests.
 //! Sampling once per 1 Hz tick and gating on a single point would
-//! miss many active windows. Instead we keep a rolling window of
-//! the last `EMBEDDINGS_WINDOW_SAMPLES` CPU% readings per PID and
-//! report:
+//! flicker Active↔Idle on every inter-burst gap. Instead we hold
+//! Active for a duration-based window after the last
+//! above-threshold reading per PID:
 //!
 //! ```text
-//! max(window) ≥ EMBEDDINGS_ACTIVE_CPU_PCT  → ActivityState::Active
-//! otherwise                                → ActivityState::Idle
+//! cpu_pct ≥ EMBEDDINGS_ACTIVE_CPU_PCT            → Active (refresh window)
+//! else, within EMBEDDINGS_IDLE_WINDOW of last    → Active (burst-tolerance)
+//!   above-threshold reading
+//! else                                           → Idle
 //! ```
 //!
 //! ## Thresholds
 //!
-//! `EMBEDDINGS_ACTIVE_CPU_PCT = 60.0` — PROVISIONAL: refined
-//! post-v1.1.0 sampler validation (v1.1.1). Foundation-pinned in
-//! the `ProcessSnapshot::cpu_pct` doc-comment (`src/telemetry/
-//! source.rs:31`) ahead of B4 implementation. No Tester-B-style
-//! empirical capture exists for embeddings at v1.1.0 — the
-//! threshold is calibrated against the assumption that a busy
-//! embeddings inference loop pins ≥0.6 cores during the burst.
-//! Adjust in v1.1.1 if P5 validation surfaces a different band.
+//! `EMBEDDINGS_ACTIVE_CPU_PCT = 60.0` — VALIDATED (P5 DISPATCH 9B).
+//! Tester-B confirmed the CPU-percent signal is correct: idle
+//! embeddings workloads read ~0% and active ones read 170-800% on
+//! the raw `0-(100×cores)` scale, so 60.0 sits well inside the
+//! empty band between idle and active. Foundation-pinned in the
+//! `ProcessSnapshot::cpu_pct` doc-comment (`src/telemetry/
+//! source.rs`). Preserved unchanged from v1.1.2.
 //!
-//! `EMBEDDINGS_WINDOW_SAMPLES = 3` — PROVISIONAL. The original
-//! DISPATCH 2A draft called for "any of last 3 ticks" Active
-//! detection because embeddings bursts are typically short. At
-//! 1 Hz that's a 3-second window. A future deployment with shorter
-//! bursts may need a longer (5-tick) window or per-PID adaptive
-//! sizing — surfaced as a CAR-candidate alongside the threshold.
+//! `EMBEDDINGS_IDLE_WINDOW = 12 s` — v1.1.3 (P5 DISPATCH 9B),
+//! replaces the v1.1.2 `EMBEDDINGS_WINDOW_SAMPLES = 3` count-based
+//! window. EMPIRICAL: bursty embeddings workloads show ~0.4 s
+//! active spikes with ~5 s inter-burst gaps. The 3-sample (~3 s
+//! at 1 Hz) window could not bridge a 5 s gap, so it flickered
+//! Active↔Idle every gap. A 12 s duration hold-window bridges the
+//! realistic burst cadence while still transitioning to Idle for
+//! genuinely-idle workloads. Shape borrowed from B2's
+//! `AGENT_IDLE_WINDOW` (60 s for claude tool-call patterns; 12 s
+//! here for embeddings' tighter cadence). PROVISIONAL only insofar
+//! as a future deployment with a different burst rhythm may want a
+//! different window — the signal + magnitude are validated.
 //!
 //! ## Detection (`applies_to`)
 //!
@@ -51,19 +58,18 @@
 //! to close this gap — same acceptance note as B3's
 //! ROS_DOMAIN_ID-free workloads.
 //!
-//! ## Per-PID state lifecycle (v1.1.1 candidate)
+//! ## Per-PID state lifecycle (v1.1.x candidate)
 //!
 //! Same shape as B2: the dispatcher does not invoke a per-PID
-//! cleanup hook on `SourceError::Permanent`, so `per_pid_cpu_window`
+//! cleanup hook on `SourceError::Permanent`, so `last_active_at`
 //! entries accumulate until the source struct is dropped. Bounded
-//! by ring-buffer size (`EMBEDDINGS_WINDOW_SAMPLES * 4 bytes` per
-//! observed embeddings PID) plus HashMap overhead; not a memory
-//! crisis. PROVISIONAL: refined post-v1.1.0 sampler validation
-//! (v1.1.1).
+//! slow leak: ~50 bytes per observed embeddings PID; not a memory
+//! crisis. Deferred to the same dispatcher-cleanup-hook refinement
+//! tracked for B2.
 
 use std::collections::HashMap;
-use std::collections::VecDeque;
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 
@@ -71,14 +77,18 @@ use crate::telemetry::source::{
     ActivityState, ProcessSnapshot, SourceResult, TelemetryFrame, TelemetrySource,
 };
 
-/// PROVISIONAL: refined post-v1.1.0 sampler validation (v1.1.1).
-/// Foundation-pinned in `ProcessSnapshot::cpu_pct` doc-comment at
-/// raw `0-(100×cores)` scale.
+/// VALIDATED (P5 DISPATCH 9B). Raw `0-(100×cores)` scale; idle
+/// embeddings ~0%, active 170-800%, so 60.0 is firmly in the empty
+/// band. Preserved unchanged from v1.1.2.
 const EMBEDDINGS_ACTIVE_CPU_PCT: f32 = 60.0;
 
-/// PROVISIONAL: refined post-v1.1.0 sampler validation (v1.1.1).
-/// Rolling-window size used to absorb burstiness.
-const EMBEDDINGS_WINDOW_SAMPLES: usize = 3;
+/// v1.1.3 (P5 DISPATCH 9B) — duration hold-window. After an
+/// above-threshold reading, Active is held for this long so the
+/// ~5 s inter-burst gaps in real embeddings workloads don't
+/// flicker the row to Idle. Replaces the v1.1.2 count-based
+/// `EMBEDDINGS_WINDOW_SAMPLES = 3` (~3 s at 1 Hz, too short to
+/// bridge the gaps). Shape mirrors B2's `AGENT_IDLE_WINDOW`.
+const EMBEDDINGS_IDLE_WINDOW: Duration = Duration::from_secs(12);
 
 /// Cmdline substring markers indicating an embeddings workload.
 /// Lowercased + substring-matched against the joined cmdline. Kept
@@ -96,29 +106,39 @@ const EMBEDDINGS_CMDLINE_MARKERS: &[&str] = &[
 ];
 
 pub struct EmbeddingsCpuSource {
-    /// PID → ring buffer of the last
-    /// `EMBEDDINGS_WINDOW_SAMPLES` CPU% readings. Pushed at every
-    /// `sample` invocation; older readings drop off the front.
-    per_pid_cpu_window: HashMap<u32, VecDeque<f32>>,
+    /// PID → last `Instant` the workload read at or above
+    /// `EMBEDDINGS_ACTIVE_CPU_PCT`. Active is held for
+    /// `EMBEDDINGS_IDLE_WINDOW` after this timestamp so burst gaps
+    /// don't flicker the row. Same shape as B2's `last_active_at`.
+    last_active_at: HashMap<u32, Instant>,
 }
 
 impl EmbeddingsCpuSource {
     pub fn new() -> Self {
         Self {
-            per_pid_cpu_window: HashMap::new(),
+            last_active_at: HashMap::new(),
         }
     }
 
-    /// Push `cpu_pct` onto the window for `pid`, evicting the
-    /// oldest reading when the window is full. Returns the
-    /// window's `max` after the push.
-    fn push_and_max(&mut self, pid: u32, cpu_pct: f32) -> f32 {
-        let window = self.per_pid_cpu_window.entry(pid).or_default();
-        if window.len() == EMBEDDINGS_WINDOW_SAMPLES {
-            window.pop_front();
+    /// v1.1.3 — apply the bimodal threshold + duration hold-window
+    /// for one PID at time `now`. Split out (with an injectable
+    /// `now`) so the burst-pattern tests can drive simulated time
+    /// without real sleeps, the same way B2's idle-window tests
+    /// backdate `last_active_at`.
+    fn classify_at(&mut self, pid: u32, cpu_pct: f32, now: Instant) -> ActivityState {
+        if cpu_pct >= EMBEDDINGS_ACTIVE_CPU_PCT {
+            self.last_active_at.insert(pid, now);
+            ActivityState::Active
+        } else {
+            match self.last_active_at.get(&pid) {
+                Some(last) if now.saturating_duration_since(*last) < EMBEDDINGS_IDLE_WINDOW => {
+                    // Below threshold but inside the hold-window —
+                    // a burst gap, not genuine idle.
+                    ActivityState::Active
+                }
+                _ => ActivityState::Idle,
+            }
         }
-        window.push_back(cpu_pct);
-        window.iter().copied().fold(0.0_f32, f32::max)
     }
 }
 
@@ -180,12 +200,7 @@ impl TelemetrySource for EmbeddingsCpuSource {
     }
 
     async fn sample(&mut self, proc: &ProcessSnapshot) -> SourceResult<TelemetryFrame> {
-        let max_in_window = self.push_and_max(proc.pid, proc.cpu_pct);
-        let activity = if max_in_window >= EMBEDDINGS_ACTIVE_CPU_PCT {
-            ActivityState::Active
-        } else {
-            ActivityState::Idle
-        };
+        let activity = self.classify_at(proc.pid, proc.cpu_pct, Instant::now());
         Ok(TelemetryFrame {
             pid: proc.pid,
             activity_state: Some(activity),
@@ -276,76 +291,6 @@ mod tests {
         assert_eq!(frame.activity_state, Some(ActivityState::Idle));
     }
 
-    /// Burst absorption: a single spike inside the last 3 ticks
-    /// keeps the row Active even after the spike returns to idle.
-    /// This is the design rationale for the rolling window — a
-    /// single-point gate would have flipped to Idle on the second
-    /// tick.
-    #[tokio::test]
-    async fn sample_burst_held_active_through_window() {
-        let mut s = EmbeddingsCpuSource::new();
-        let cmdline = &["python3", "-m", "sentence_transformers"];
-
-        // Tick 1: burst (95% — well above threshold).
-        let f = s
-            .sample(&snap(100, 95.0, cmdline))
-            .await
-            .expect("burst sample");
-        assert_eq!(f.activity_state, Some(ActivityState::Active));
-
-        // Tick 2: idle (0.5%) — but window still has the burst.
-        let f = s
-            .sample(&snap(100, 0.5, cmdline))
-            .await
-            .expect("idle after burst");
-        assert_eq!(
-            f.activity_state,
-            Some(ActivityState::Active),
-            "single-burst Active must persist while the spike is in window",
-        );
-
-        // Tick 3: still idle — the burst is at the front of the
-        // 3-sample window. Next tick will evict it.
-        let f = s
-            .sample(&snap(100, 0.5, cmdline))
-            .await
-            .expect("second idle");
-        assert_eq!(f.activity_state, Some(ActivityState::Active));
-
-        // Tick 4: the burst rolls off → Idle.
-        let f = s
-            .sample(&snap(100, 0.5, cmdline))
-            .await
-            .expect("burst rolled off");
-        assert_eq!(f.activity_state, Some(ActivityState::Idle));
-    }
-
-    /// Per-PID isolation: window state for PID A does NOT bleed
-    /// into PID B. Two concurrent embeddings workloads.
-    #[tokio::test]
-    async fn sample_per_pid_window_isolation() {
-        let mut s = EmbeddingsCpuSource::new();
-        let cmdline = &["python3", "-m", "sentence_transformers"];
-
-        // PID 100 bursts.
-        let f = s
-            .sample(&snap(100, 95.0, cmdline))
-            .await
-            .expect("PID A burst");
-        assert_eq!(f.activity_state, Some(ActivityState::Active));
-
-        // PID 200 idles — must NOT be infected by PID 100's burst.
-        let f = s
-            .sample(&snap(200, 0.5, cmdline))
-            .await
-            .expect("PID B idle");
-        assert_eq!(
-            f.activity_state,
-            Some(ActivityState::Idle),
-            "PID B's window must not inherit PID A's burst",
-        );
-    }
-
     /// Threshold boundary: exactly at the locked
     /// `EMBEDDINGS_ACTIVE_CPU_PCT` (60.0) fires Active.
     #[tokio::test]
@@ -356,13 +301,119 @@ mod tests {
         assert_eq!(frame.activity_state, Some(ActivityState::Active));
     }
 
-    /// Constants pin: foundation doc-comment named
-    /// `EMBEDDINGS_ACTIVE_CPU_PCT = 60.0`. A casual refactor that
-    /// lowers the threshold without re-pinning the doc-comment
-    /// trips this test first.
+    /// Constants pin: `EMBEDDINGS_ACTIVE_CPU_PCT = 60.0` (VALIDATED,
+    /// preserved) + `EMBEDDINGS_IDLE_WINDOW = 12 s` (v1.1.3 P5
+    /// refinement). A refactor that drifts either trips this first.
     #[test]
-    fn locked_constants_match_doc_comment_anchor() {
+    fn locked_constants_match_p5_refinement() {
         assert_eq!(EMBEDDINGS_ACTIVE_CPU_PCT, 60.0);
-        assert_eq!(EMBEDDINGS_WINDOW_SAMPLES, 3);
+        assert_eq!(EMBEDDINGS_IDLE_WINDOW, Duration::from_secs(12));
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // v1.1.3 (P5 DISPATCH 9B) — duration hold-window tests. These
+    // drive `classify_at` with a simulated `now` so burst patterns
+    // spanning many seconds run without real sleeps (same approach
+    // as B2's idle-window tests backdating `last_active_at`).
+    // ─────────────────────────────────────────────────────────────
+
+    /// Test 1 — Active held across burst gaps inside the 12 s
+    /// window. Burst at t=0, then sub-threshold at t=2/5/10 s — all
+    /// still Active because each is within 12 s of the t=0 burst.
+    #[tokio::test]
+    async fn sample_active_during_burst_window() {
+        let mut s = EmbeddingsCpuSource::new();
+        let t0 = Instant::now();
+        // Burst.
+        assert_eq!(s.classify_at(100, 200.0, t0), ActivityState::Active);
+        // Gaps within the 12 s hold-window.
+        for secs in [2u64, 5, 10] {
+            let t = t0 + Duration::from_secs(secs);
+            assert_eq!(
+                s.classify_at(100, 0.0, t),
+                ActivityState::Active,
+                "t={secs}s is within the 12 s hold-window — must stay Active",
+            );
+        }
+    }
+
+    /// Test 2 — Idle after the hold-window expires. Burst at t=0,
+    /// sustained idle, checked at t=15 s (> 12 s) → Idle.
+    #[tokio::test]
+    async fn sample_idle_after_hold_window() {
+        let mut s = EmbeddingsCpuSource::new();
+        let t0 = Instant::now();
+        assert_eq!(s.classify_at(100, 200.0, t0), ActivityState::Active);
+        let t15 = t0 + Duration::from_secs(15);
+        assert_eq!(
+            s.classify_at(100, 0.0, t15),
+            ActivityState::Idle,
+            "15 s > 12 s hold-window — must transition to Idle",
+        );
+    }
+
+    /// Test 3 — continuous Active. Sustained high CPU for 30 s
+    /// always reads Active (threshold magnitude check still works).
+    #[tokio::test]
+    async fn sample_continuous_active() {
+        let mut s = EmbeddingsCpuSource::new();
+        let t0 = Instant::now();
+        for secs in [0u64, 5, 10, 15, 20, 25, 30] {
+            let t = t0 + Duration::from_secs(secs);
+            assert_eq!(
+                s.classify_at(100, 400.0, t),
+                ActivityState::Active,
+                "sustained 400% must always be Active (t={secs}s)",
+            );
+        }
+    }
+
+    /// Test 4 — REGRESSION-PIN for v1.1.2 → v1.1.3. Five burst
+    /// cycles (200% spike, then 0% two seconds later) over ~25 s.
+    /// Must emit Active throughout — NEVER Idle during the bursts.
+    ///
+    /// With the v1.1.2 3-sample (~3 s) window, the 0% reading 2 s
+    /// after each spike, followed by the next sample, rolled the
+    /// spike off the window and flickered the row to Idle in each
+    /// ~5 s gap. With the v1.1.3 12 s hold-window, the row holds
+    /// Active across the whole burst train.
+    #[tokio::test]
+    async fn sample_no_flicker_under_burst_pattern() {
+        let mut s = EmbeddingsCpuSource::new();
+        let t0 = Instant::now();
+        // 5 cycles, each: spike at 5k seconds, idle at 5k+2 seconds.
+        for cycle in 0u64..5 {
+            let spike_t = t0 + Duration::from_secs(cycle * 5);
+            let gap_t = t0 + Duration::from_secs(cycle * 5 + 2);
+            assert_eq!(
+                s.classify_at(100, 200.0, spike_t),
+                ActivityState::Active,
+                "spike at cycle {cycle} must be Active",
+            );
+            assert_eq!(
+                s.classify_at(100, 0.0, gap_t),
+                ActivityState::Active,
+                "gap at cycle {cycle} (2 s after spike, well inside 12 s \
+                 hold-window) must stay Active — v1.1.2's 3-sample window \
+                 flickered to Idle here",
+            );
+        }
+    }
+
+    /// Per-PID isolation under the new hold-window: PID A's burst
+    /// must not hold PID B Active. (Preserved invariant from v1.1.2,
+    /// re-expressed against `classify_at`.)
+    #[tokio::test]
+    async fn hold_window_is_per_pid() {
+        let mut s = EmbeddingsCpuSource::new();
+        let t0 = Instant::now();
+        assert_eq!(s.classify_at(100, 200.0, t0), ActivityState::Active);
+        // PID 200 idle at the same instant — no prior burst of its
+        // own → Idle.
+        assert_eq!(
+            s.classify_at(200, 0.0, t0),
+            ActivityState::Idle,
+            "PID B has no burst of its own — A's hold-window must not leak",
+        );
     }
 }

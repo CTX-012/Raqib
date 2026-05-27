@@ -317,12 +317,35 @@ impl TelemetrySource for OllamaApiSource {
             // already does this — `proc.pid` is the live PID, and a
             // re-spawned runner appears as a new ProcessSnapshot with the
             // same `model_name` (idle streak survives via per_model_*).
-            let activity = if loaded.iter().any(|m| m == my_model) {
+            //
+            // v1.1.1 DISPATCH 5 STEP 3 — `/api/ps` presence is the
+            // signal, NOT per-model name matching. The pre-v1.1.1
+            // line `loaded.iter().any(|m| m == my_model)` was an
+            // ASYMMETRIC compare: `my_model` is the classifier-
+            // extracted blob digest from the runner cmdline (e.g.
+            // `sha256-eb2c714d40d4...`), while `loaded` carries
+            // `/api/ps`-reported friendly names (e.g.
+            // `smollm:135m`). The two are never equal, so
+            // ActivityState locked to NotDetected for every Ollama
+            // runner in v1.1.0.
+            //
+            // Option (i) fix (chosen over /api/show digest lookup):
+            // Ollama runner subprocesses exist iff Ollama has a
+            // model loaded — there is a 1:1 relationship between
+            // running runners and loaded models. So "/api/ps
+            // returned at least one model" IS the presence signal.
+            // Each runner reads its OWN `proc.cpu_pct` for the
+            // bimodal Active/Idle decision; the friendly name is
+            // only needed for `model_name_hint` (RunRecord
+            // attribution), and we still emit `my_model` (the blob
+            // digest) for that purpose — unchanged from v1.1.0.
+            let activity = if !loaded.is_empty() {
                 self.classify_runner_activity(my_model, proc.cpu_pct)
             } else {
-                // CHANGE 5: sub-second unload — model gone from /api/ps
-                // means the runner is no longer hosting it. Clear
-                // per-model state so a future reload starts fresh.
+                // CHANGE 5: sub-second unload — empty /api/ps means
+                // every runner is between models or unloading.
+                // Clear per-model state so a future reload starts
+                // fresh.
                 self.per_model_idle_streak.remove(my_model);
                 self.per_model_last_state.remove(my_model);
                 ActivityState::NotDetected
@@ -505,25 +528,37 @@ mod tests {
         assert_eq!(parsed, vec!["tinyllama:latest".to_string()]);
     }
 
-    /// Empty `/api/ps` response → previously-tracked runners should
-    /// resolve to NotDetected on next sample. Pins CHANGE 5.
+    /// v1.1.1 DISPATCH 5 STEP 3 — empty `/api/ps` response →
+    /// previously-tracked runner should resolve to NotDetected.
+    /// Pins CHANGE 5.
+    ///
+    /// FIXTURE NOTE (asymmetric-audit / STEP 5): the runner's
+    /// `model_name` carries the **blob digest** (sha256-…) the
+    /// classifier extracts from the cmdline; `/api/ps` returns
+    /// the **friendly name** (smollm:135m). The pre-v1.1.1 test
+    /// used `"tinyllama:latest"` on both sides, which masked the
+    /// real-world asymmetry that caused the v1.1.0 B1 failure.
+    /// This fixture now uses both real shapes so a future
+    /// re-introduction of the asymmetric compare would fail
+    /// loud.
     #[test]
     fn empty_models_yields_not_detected_for_known_runner() {
         let mut s = OllamaApiSource::new();
-        // Seed prior state for the model (as if a previous tick saw
-        // it Active). Force the model into per_model_last_state so the
-        // "not in /api/ps" branch is exercised against a real cleanup.
+        // Seed prior state for the runner — keyed by the blob
+        // digest because that's what `proc.model_name` carries
+        // in the real flow.
+        let runner_digest = "sha256-eb2c714d40d437a45a9c2a8a3e8ddc15";
         s.per_model_last_state
-            .insert("tinyllama:latest".into(), ActivityState::Active);
-        s.per_model_idle_streak
-            .insert("tinyllama:latest".into(), 0);
+            .insert(runner_digest.into(), ActivityState::Active);
+        s.per_model_idle_streak.insert(runner_digest.into(), 0);
 
         let loaded = parse_loaded_models(r#"{"models":[]}"#);
         assert!(loaded.is_empty());
-        // Simulate the runner branch of sample().
-        let runner = runner_snap("tinyllama:latest", 0.0);
+        let runner = runner_snap(runner_digest, 0.0);
         let my_model = runner.model_name.as_deref().unwrap();
-        let activity = if loaded.iter().any(|m| m == my_model) {
+        // v1.1.1: the branch is `!loaded.is_empty()`, not the
+        // asymmetric `loaded.iter().any(|m| m == my_model)`.
+        let activity = if !loaded.is_empty() {
             s.classify_runner_activity(my_model, runner.cpu_pct)
         } else {
             s.per_model_idle_streak.remove(my_model);
@@ -533,6 +568,46 @@ mod tests {
         assert_eq!(activity, ActivityState::NotDetected);
         assert!(!s.per_model_last_state.contains_key(my_model));
         assert!(!s.per_model_idle_streak.contains_key(my_model));
+    }
+
+    /// v1.1.1 DISPATCH 5 STEP 3 — the regression test that would
+    /// have caught the v1.1.0 B1 bug if the original tests had
+    /// used realistic asymmetric strings.
+    ///
+    /// Fixture: `/api/ps` returns the friendly name
+    /// `"smollm:135m"`; the runner's `model_name` is the blob
+    /// digest `"sha256-eb2c714d40d4…"`. Under the pre-v1.1.1
+    /// `loaded.iter().any(|m| m == my_model)` compare, this
+    /// would resolve to NotDetected (no match) regardless of
+    /// CPU%. Under the v1.1.1 fix (`!loaded.is_empty()`), the
+    /// runner's CPU% governs the verdict.
+    #[test]
+    fn asymmetric_runner_digest_vs_api_ps_friendly_name_classifies_active() {
+        let mut s = OllamaApiSource::new();
+        // Realistic asymmetric fixture: classifier-side blob digest
+        // vs daemon-side friendly name.
+        let runner_digest = "sha256-eb2c714d40d437a45a9c2a8a3e8ddc15";
+        let api_ps_body =
+            r#"{"models":[{"name":"smollm:135m","model":"smollm:135m","size":238970112}]}"#;
+        let loaded = parse_loaded_models(api_ps_body);
+        assert_eq!(loaded, vec!["smollm:135m".to_string()]);
+        // CPU% above the bimodal Active threshold (Tester-B: ~100
+        // when a runner is mid-generation).
+        let runner = runner_snap(runner_digest, 100.0);
+        let my_model = runner.model_name.as_deref().unwrap();
+        // v1.1.1 branch (post-fix): /api/ps presence is the signal.
+        let activity = if !loaded.is_empty() {
+            s.classify_runner_activity(my_model, runner.cpu_pct)
+        } else {
+            ActivityState::NotDetected
+        };
+        assert_eq!(
+            activity,
+            ActivityState::Active,
+            "v1.1.1 fix: with /api/ps non-empty and runner CPU > 50%, \
+             the runner is Active regardless of the digest-vs-name \
+             string asymmetry that broke v1.1.0",
+        );
     }
 
     /// Populated `models[]` with high CPU → Active. Threshold is

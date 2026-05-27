@@ -208,6 +208,35 @@ pub trait TelemetrySource: Send + Sync {
     ) -> SourceResult<TelemetryFrame> {
         self.sample(proc).await
     }
+
+    /// v1.1.1 — per-source upper bound on a single `sample` call.
+    /// The dispatcher wraps `sample_with_context` in a
+    /// `tokio::time::timeout(self.sample_timeout(), ...)` so a
+    /// stuck sampler can't block the tick loop.
+    ///
+    /// Default: [`crate::telemetry::DEFAULT_SAMPLE_TIMEOUT`] (1 s)
+    /// — fits HTTP-scrape samplers (vLLM, llama.cpp, Ollama) and
+    /// pure-CPU heuristics (B4). Samplers with empirically longer
+    /// signal acquisition (B3 ROS2 needs ≥ 3 s for `ros2 topic hz`
+    /// to publish its first rate after observing 3 messages)
+    /// override this method to widen the dispatcher's outer wrap.
+    ///
+    /// Constraint: returning a long timeout does not speed the
+    /// sampler up — it only buys it room to finish. Samplers
+    /// should still cap any internal I/O wait at their declared
+    /// `sample_timeout` minus a small kill-signal headroom, so
+    /// the dispatcher's outer wrap never has to cancel a healthy
+    /// sample mid-flight.
+    ///
+    /// B3 root-cause (DISPATCH 5 STEP 2): pre-v1.1.1 the
+    /// dispatcher used a single global 1 s outer wrap. B3's
+    /// inner `ROS2_SHELLOUT_TIMEOUT = 5 s` was always cancelled
+    /// at 1 s, so `ros2 topic hz` never observed enough messages
+    /// to emit a rate. ActivityState locked to `NotDetected` for
+    /// every ROS2 row in v1.1.0.
+    fn sample_timeout(&self) -> std::time::Duration {
+        crate::telemetry::DEFAULT_SAMPLE_TIMEOUT
+    }
 }
 
 /// Crash-isolated wrapper around `TelemetrySource::sample`. A

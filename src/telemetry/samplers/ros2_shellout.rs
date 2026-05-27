@@ -300,6 +300,20 @@ impl TelemetrySource for Ros2ShelloutSource {
         "ros2-shellout"
     }
 
+    /// v1.1.1 (DISPATCH 5) — outer dispatcher timeout for ros2
+    /// shellout samples. Pre-v1.1.1 the dispatcher used a single
+    /// global 1 s wrap that cancelled B3's inner 5 s
+    /// `ROS2_SHELLOUT_TIMEOUT` four seconds early, so `ros2 topic
+    /// hz` never observed the ≥ 3 published messages it needs to
+    /// emit a rate. Every ROS2 row locked to `NotDetected`.
+    ///
+    /// 6 s gives the inner 5 s `ROS2_SHELLOUT_TIMEOUT` ~1 s of
+    /// headroom for the subprocess kill-signal propagation when
+    /// a probe genuinely hangs.
+    fn sample_timeout(&self) -> Duration {
+        Duration::from_secs(6)
+    }
+
     /// Applies to processes the classifier would surface as ROS2 via
     /// env or cmdline signals. Library-signal-only ROS2 nodes (rare
     /// — C++ nodes spawned without `ros2 run` and without
@@ -431,6 +445,27 @@ fn activity_frame(pid: u32, state: ActivityState) -> TelemetryFrame {
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    /// v1.1.1 DISPATCH 5 STEP 2 — pin B3's `sample_timeout` override
+    /// at 6 s. Pre-v1.1.1 the dispatcher's fixed 1 s ceiling
+    /// cancelled the inner 5 s `ROS2_SHELLOUT_TIMEOUT` 4 seconds
+    /// early; every ROS2 row locked to NotDetected. The 6 s value
+    /// gives the inner timeout 1 s of headroom for kill-signal
+    /// propagation. A refactor that lowers the override below the
+    /// inner timeout reintroduces the v1.1.0 bug — fail loud first.
+    #[test]
+    fn b3_sample_timeout_exceeds_inner_shellout_timeout() {
+        let s = Ros2ShelloutSource::new();
+        let outer = TelemetrySource::sample_timeout(&s);
+        assert!(
+            outer > ROS2_SHELLOUT_TIMEOUT,
+            "B3 outer dispatcher timeout ({outer:?}) must exceed \
+             the inner ROS2_SHELLOUT_TIMEOUT ({ROS2_SHELLOUT_TIMEOUT:?}) \
+             — otherwise `ros2 topic hz` is cancelled before it can \
+             emit a rate. This was the v1.1.0 B3 root cause.",
+        );
+        assert_eq!(outer, Duration::from_secs(6));
+    }
 
     fn proc(pid: u32, name: &str, cmdline: &[&str], env: &[(&str, &str)]) -> ProcessSnapshot {
         ProcessSnapshot {

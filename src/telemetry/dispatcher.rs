@@ -37,10 +37,10 @@ use crate::telemetry::source::{
 };
 use crate::telemetry::vision_probe::VisionProbe;
 
-/// Default per-sample timeout. Long enough for a slow vLLM scrape
-/// (default reqwest timeout is 500 ms) plus jitter; short enough that
-/// a hung sampler doesn't fall many ticks behind.
-const DEFAULT_SAMPLE_TIMEOUT: Duration = Duration::from_secs(1);
+// Default per-sample timeout moved to `crate::telemetry::
+// DEFAULT_SAMPLE_TIMEOUT` (1 s) so trait impls in `source.rs` can
+// reference it from `TelemetrySource::sample_timeout`'s default
+// body without a back-channel.
 
 /// Aliases keep Clippy happy and document intent.
 type SharedSource = Arc<Mutex<Box<dyn TelemetrySource>>>;
@@ -51,7 +51,12 @@ pub struct Dispatcher {
     frame_tx: mpsc::UnboundedSender<TelemetryFrame>,
     frame_rx: mpsc::UnboundedReceiver<TelemetryFrame>,
     accumulator: TelemetryAccumulator,
-    sample_timeout: Duration,
+    /// v1.1.1 — `None` means "use per-source
+    /// `TelemetrySource::sample_timeout`"; `Some(t)` is an
+    /// operator-wide override (also used by the
+    /// `with_sample_timeout` test helper to force-shorten the
+    /// dispatch ceiling below any sampler's default).
+    sample_timeout: Option<Duration>,
     /// Tier 2.1 — RAPL package-power reader. Stateful across ticks
     /// to compute Δ-based wattage.
     rapl: RaplReader,
@@ -85,7 +90,7 @@ impl Dispatcher {
             frame_tx,
             frame_rx,
             accumulator: TelemetryAccumulator::new(),
-            sample_timeout: DEFAULT_SAMPLE_TIMEOUT,
+            sample_timeout: None,
             rapl: RaplReader::new(),
             cold_load: ColdLoadTracker::new(),
             exporter_snapshot: None,
@@ -139,8 +144,14 @@ impl Dispatcher {
         }
     }
 
+    /// v1.1.1 — force every sampler to a single outer timeout
+    /// regardless of its `TelemetrySource::sample_timeout` value.
+    /// Used by the `dispatcher_timeout_protects_against_slow_samplers`
+    /// test to drop the ceiling below the slow sampler's natural
+    /// completion time, and available to operators who want a
+    /// host-wide ceiling for debugging.
     pub fn with_sample_timeout(mut self, t: Duration) -> Self {
-        self.sample_timeout = t;
+        self.sample_timeout = Some(t);
         self
     }
 
@@ -170,7 +181,9 @@ impl Dispatcher {
                 let proc = proc.clone();
                 let all_procs = all_procs.clone();
                 let tx = self.frame_tx.clone();
-                let timeout = self.sample_timeout;
+                // v1.1.1 — Some(t) is the operator/test override;
+                // None means "ask the sampler under the lock".
+                let timeout_override = self.sample_timeout;
                 self.runtime.spawn(async move {
                     let mut guard = source.lock().await;
                     if !guard.applies_to(&proc) {
@@ -178,6 +191,7 @@ impl Dispatcher {
                     }
                     let name = guard.name().to_string();
                     let pid = proc.pid;
+                    let timeout = timeout_override.unwrap_or_else(|| guard.sample_timeout());
                     let fut = guard.sample_with_context(&proc, &all_procs);
                     match tokio::time::timeout(timeout, fut).await {
                         Ok(Ok(frame)) => {
@@ -475,6 +489,108 @@ mod tests {
         std::thread::sleep(StdDuration::from_millis(150));
         d.tick(&[]);
         // Timed out → no frame recorded.
+        assert!(d.metrics_for(1).is_none());
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // v1.1.1 DISPATCH 5 STEP 2 — sample_timeout trait extension
+    // ─────────────────────────────────────────────────────────────
+
+    /// Default trait body returns `DEFAULT_SAMPLE_TIMEOUT` (1 s).
+    /// Pinned so a refactor that drops the default body doesn't
+    /// silently regress every sampler that relies on it.
+    #[test]
+    fn default_sample_timeout_is_one_second() {
+        struct Defaulted;
+        #[async_trait]
+        impl TelemetrySource for Defaulted {
+            fn name(&self) -> &str {
+                "defaulted"
+            }
+            fn applies_to(&self, _: &ProcessSnapshot) -> bool {
+                true
+            }
+            async fn sample(&mut self, _: &ProcessSnapshot) -> SourceResult<TelemetryFrame> {
+                Ok(TelemetryFrame::new(0))
+            }
+        }
+        assert_eq!(
+            Defaulted.sample_timeout(),
+            crate::telemetry::DEFAULT_SAMPLE_TIMEOUT,
+        );
+        assert_eq!(Defaulted.sample_timeout(), StdDuration::from_secs(1));
+    }
+
+    /// Sampler-side override wins when the dispatcher carries no
+    /// host-wide override. This is the B3 path: B3 returns 6 s
+    /// from its `sample_timeout`, and a `SlowSampler`-style
+    /// reading just below 6 s should now succeed where it would
+    /// have failed under the pre-v1.1.1 fixed-1-s cap.
+    #[test]
+    fn dispatcher_uses_per_source_sample_timeout() {
+        // A sampler that needs 100 ms and declares 200 ms. With
+        // the dispatcher default (no override), the per-source
+        // 200 ms applies — the 100 ms sleep finishes inside it.
+        struct WideSampler;
+        #[async_trait]
+        impl TelemetrySource for WideSampler {
+            fn name(&self) -> &str {
+                "wide"
+            }
+            fn applies_to(&self, _: &ProcessSnapshot) -> bool {
+                true
+            }
+            async fn sample(&mut self, _: &ProcessSnapshot) -> SourceResult<TelemetryFrame> {
+                tokio::time::sleep(StdDuration::from_millis(100)).await;
+                Ok(TelemetryFrame {
+                    tokens_per_sec: Some(11.0),
+                    ..TelemetryFrame::new(1)
+                })
+            }
+            fn sample_timeout(&self) -> StdDuration {
+                StdDuration::from_millis(200)
+            }
+        }
+        let mut d = Dispatcher::new(vec![Box::new(WideSampler)]).unwrap();
+        d.tick(&[snap(1)]);
+        let m = wait_for_frame(&mut d, 1, StdDuration::from_secs(2)).unwrap();
+        assert!((m.tokens_per_sec_avg.unwrap() - 11.0).abs() < 1e-3);
+    }
+
+    /// `with_sample_timeout` still works as a host-wide ceiling
+    /// even when a sampler declares a wider per-source timeout.
+    /// This is the test that locked the pre-v1.1.1 semantics for
+    /// `SlowSampler` and the slow-sampler protection.
+    #[test]
+    fn host_wide_override_still_clamps_per_source_timeout() {
+        // Sampler declares a generous 10 s but actually needs
+        // 500 ms. The host-wide override of 50 ms wins (it's
+        // shorter), so the 500 ms sample times out.
+        struct LyingSampler;
+        #[async_trait]
+        impl TelemetrySource for LyingSampler {
+            fn name(&self) -> &str {
+                "lying"
+            }
+            fn applies_to(&self, _: &ProcessSnapshot) -> bool {
+                true
+            }
+            async fn sample(&mut self, _: &ProcessSnapshot) -> SourceResult<TelemetryFrame> {
+                tokio::time::sleep(StdDuration::from_millis(500)).await;
+                Ok(TelemetryFrame::new(1))
+            }
+            fn sample_timeout(&self) -> StdDuration {
+                StdDuration::from_secs(10)
+            }
+        }
+        let mut d = Dispatcher::new(vec![Box::new(LyingSampler)])
+            .unwrap()
+            .with_sample_timeout(StdDuration::from_millis(50));
+        d.tick(&[snap(1)]);
+        std::thread::sleep(StdDuration::from_millis(200));
+        d.tick(&[]);
+        // Host override (50 ms) clamped the per-source 10 s
+        // declaration → no frame recorded.
         assert!(d.metrics_for(1).is_none());
     }
 

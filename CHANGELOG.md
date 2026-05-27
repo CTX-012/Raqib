@@ -6,7 +6,114 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project aims to adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 once `v1.0.0` is tagged. Until then, minor versions may include breaking changes.
 
-## [1.1.0] — 2026-05-24
+## [1.1.1] — 2026-05-24 — first usable Phase 2 release
+
+v1.1.0 was tagged but did NOT validate (DISPATCH 4 + Tester-2
+corroboration: B1 Ollama and B3 ROS2 both locked to
+`NotDetected`; B2 Agent could not be validated due to a
+classifier coverage gap). v1.1.0 tag retracted from origin
+before this release. **v1.1.1 is the first shippable Phase 2
+release.**
+
+### Fixed (root causes)
+
+- **B3 timeout architecture — pre-v1.1.1 dispatcher cancelled
+  long-running samplers.** The dispatcher used a single global
+  1 s outer timeout on every `sample_with_context`. B3's inner
+  `ROS2_SHELLOUT_TIMEOUT = 5 s` was always cancelled at 1 s, so
+  `ros2 topic hz` never observed the ≥ 3 published messages it
+  needs to emit a rate. Every ROS2 row locked to NotDetected.
+
+  Fix: new `TelemetrySource::sample_timeout(&self) -> Duration`
+  trait method with a default body returning
+  `DEFAULT_SAMPLE_TIMEOUT` (1 s). Existing samplers (vLLM,
+  llama.cpp, Ollama, B2, B4) inherit the default — no behaviour
+  change. B3 overrides to `Duration::from_secs(6)` (5 s inner +
+  ~1 s kill-signal headroom).
+
+  Dispatcher's `sample_timeout` field became `Option<Duration>`;
+  `None` (default) means "ask the sampler under the lock"; the
+  existing `with_sample_timeout` helper still works as a
+  host-wide override and is exercised by the slow-sampler
+  protection test.
+
+- **B1 Ollama match — pre-v1.1.1 asymmetric compare locked
+  every runner to NotDetected.** At `ollama_api.rs:320` the
+  runner branch tested `loaded.iter().any(|m| m == my_model)`,
+  where `loaded` carried friendly names from `/api/ps`
+  (`"smollm:135m"`) and `my_model` carried the classifier-
+  extracted blob digest (`"sha256-eb2c714d40d4..."`). Never
+  matched. The original unit test used `"tinyllama:latest"` on
+  both sides — a same-string fixture that masked the real-world
+  asymmetry.
+
+  Fix (option (i)): replace per-model matching with
+  `!loaded.is_empty()`. Ollama runner subprocesses exist iff
+  Ollama has a model loaded — 1:1 relationship — so `/api/ps`
+  non-empty IS the presence signal. Each runner reads its OWN
+  `proc.cpu_pct` for the bimodal verdict. Per-model state still
+  keyed by `my_model` (blob digest) so CHANGE 14 (runner
+  re-spawn under VRAM pressure preserves streak) holds.
+
+  Option (ii) (`/api/show` digest lookup) rejected: adds an
+  HTTP call per loaded model per tick for granularity the
+  per-runner CPU% decision doesn't need.
+
+- **B2 Agent classifier — local VS Code install layout not
+  matched.** `SAAS_LLM_CLI_PATTERNS` covered only the VS Code
+  Remote-SSH layout (`vscode-server/extensions/...`).
+  DISPATCH 4 ran on a host with a local install
+  (`~/.vscode/extensions/anthropic.claude-code/`); classifier
+  fell through to NotAi, so B2's `applies_to` never fired and
+  the sampler could not be validated.
+
+  Fix: extend the allowlist with the local-install pattern for
+  each currently-supported tool. Eight entries total (was five).
+  No change to B2 itself; B2 code may work and validation
+  unblocks in DISPATCH 6.
+
+### Discipline (STEP 5)
+
+- Asymmetric-fixture audit: 121 sampler-area tests reviewed,
+  1 rewritten (B1's `empty_models_yields_not_detected_for_known_runner`
+  now uses realistic asymmetric strings; new regression pin
+  `asymmetric_runner_digest_vs_api_ps_friendly_name_classifies_active`
+  added). Other samplers use single-source fixtures or
+  compare symmetric-in-real-world types — no rewriting needed.
+  Discipline note + `// SYMMETRIC: real-world is also symmetric`
+  idiom documented above `src/telemetry/samplers/ollama_api.rs`'s
+  test module.
+
+### Carried forward
+
+- B1, B2, B4 thresholds remain PROVISIONAL; P5 sampler
+  validation will refine.
+- B2 and B4 per-PID HashMaps are still bounded slow leaks;
+  dispatcher cleanup hook deferred to v1.1.2.
+- B1 still does not emit `Loading` (`/api/ps` has no load
+  timestamp); v1.2+ revisit for larger models.
+
+### Test count: 876 → 883 (+7)
+
+- STEP 2 (B3 timeout): +4 (3 dispatcher tests + 1 B3 pin)
+- STEP 3 (B1 match): +1 net (1 rewritten in place + 1 new
+  regression pin)
+- STEP 4 (B2 classifier): +2
+- STEP 5 (audit): 0 (documentation-only)
+
+### v1.1.0 retraction
+
+v1.1.0 tag (commit a7a3169) was deleted from origin before
+v1.1.1 was tagged. Downstream consumers that fetched v1.1.0
+keep their local copy; the remote tag list shows only v1.1.1+
+going forward.
+
+## [1.1.0] — RETRACTED (see v1.1.1)
+
+This release was tagged on 2026-05-24 but did not validate
+under DISPATCH 4 + Tester-2 corroboration. The entry below is
+preserved for audit traceability; the tag has been removed
+from the remote. v1.1.1 is the first shippable Phase 2 release.
 
 Phase 2: per-category activity surfacing. v1.0.x told operators
 which workload was alive on the box; v1.1.0 tells them whether

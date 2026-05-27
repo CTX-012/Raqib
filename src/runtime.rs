@@ -625,7 +625,35 @@ impl Runtime {
                     })
                 })
                 .collect();
-            d.tick(&live_ai);
+            // v1.1.2 (DISPATCH 7) — UNFILTERED process list for
+            // child-detecting samplers. B2 agent_claude looks for
+            // bash tool-children via `child.ppid == agent.pid`, but
+            // bash is NotAi and would be stripped from `live_ai`
+            // above — the v1.1.1 B2 active-detection bug. The
+            // dispatcher iterates `live_ai` to choose which sources
+            // fire, but hands each sampler `all_live` for
+            // child-process detection. Same field plumbing as
+            // `live_ai`; `model_name` is `None` for non-AI rows
+            // (the classifier resolved none) and `cpu_pct` rides
+            // along from the annotated entry (0.0 for cold-start /
+            // race-failed PIDs per the field doc).
+            let all_live: Vec<TelemetryProcessSnapshot> = snapshot
+                .processes
+                .iter()
+                .filter_map(|s| {
+                    let ann = annotated.iter().find(|a| a.pid == s.pid)?;
+                    Some(TelemetryProcessSnapshot {
+                        pid: s.pid,
+                        name: s.name.clone(),
+                        cmdline: s.cmdline.clone(),
+                        environ: s.environ.clone(),
+                        model_name: ann.model_name.clone(),
+                        cpu_pct: ann.cpu_pct,
+                        ppid: s.ppid,
+                    })
+                })
+                .collect();
+            d.tick(&live_ai, &all_live);
             d.record_system_power(&live_ai, &snapshot.gpu);
             d.record_disk_io(&live_ai);
         }

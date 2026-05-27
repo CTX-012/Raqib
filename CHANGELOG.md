@@ -6,6 +6,66 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project aims to adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 once `v1.0.0` is tagged. Until then, minor versions may include breaking changes.
 
+## [1.1.2] — 2026-05-24 — B2 active-detection fix + trait expansion
+
+Hotfix for the B2 active-detection bug surfaced by DISPATCH 6B
+paired Tester validation of v1.1.1. v1.1.1 fixed B2 *classifier*
+coverage (the local `.vscode/extensions/` path), but the
+*sampler* still couldn't detect bash tool-children: the runtime
+filters NotAi processes (including bash) out of the process list
+before passing it to the dispatcher, so B2's child scan always
+came up empty and activity locked to Idle.
+
+### Fixed
+
+- **B2 Agent (claude) active-detection.** bash tool-children are
+  `NotAi`-classified and were excluded from the runtime's filtered
+  process list, so `has_bash_child` was always false and the
+  sampler emitted Idle even while the agent was actively running
+  a Bash tool. Fix: expand `TelemetrySource::sample_with_context`
+  with separate `ai_procs` (filtered) and `all_procs` (unfiltered)
+  parameters; B2 reads `all_procs` for child detection.
+
+  This is the same defect class as the B1 v1.1.0 asymmetric
+  compare and the cpu_pct / ppid foundation gaps: the data
+  existed, the plumbing landed (DISPATCH 1.6 added
+  `ProcessSnapshot.ppid` specifically for this check), but the
+  consumer was reading a list that excluded the relevant ppids.
+
+### Trait API change (additive; default polyfill preserves backward-compat)
+
+- `TelemetrySource::sample_with_context` signature gains an
+  `all_procs: &[ProcessSnapshot]` parameter (the previous
+  `all_procs` is renamed `ai_procs`). The default polyfill still
+  discards both lists and delegates to `sample`, so a sampler
+  that doesn't override the method is unaffected.
+- `Dispatcher::tick` gains a second `all_procs` parameter; the
+  runtime builds an unfiltered `all_live` list (the existing
+  `live_ai` builder minus the NotAi skip) and passes both.
+- Existing samplers (B1, B3, B4, vLLM, llama.cpp) do NOT override
+  `sample_with_context` — they inherit the polyfill and needed no
+  change. Only B2 reads the new `all_procs`.
+
+### Discipline
+
+- Asymmetric-fixture discipline applied to this bug class: the
+  new `sample_with_context_active_via_unfiltered_bash_child` test
+  uses an `ai_procs` that EXCLUDES the bash child and an
+  `all_procs` that INCLUDES it. It would have FAILED on v1.1.1
+  and PASSES on v1.1.2 — the regression pin for the DISPATCH 6B
+  finding. Companion negative
+  (`sample_with_context_idle_when_bash_child_absent_from_all_procs`)
+  confirms the Active verdict is driven by bash-child presence.
+
+### Carried forward to v1.1.3 via P5
+
+- B4 PROVISIONAL thresholds still need an embeddings-specific
+  empirical anchor.
+- All other PROVISIONAL items from v1.1.1 carry forward (per-PID
+  HashMap slow leaks, B1 no `Loading` state).
+
+### Test count: 883 → 885 (+2)
+
 ## [1.1.1] — 2026-05-24 — first usable Phase 2 release
 
 v1.1.0 was tagged but did NOT validate (DISPATCH 4 + Tester-2

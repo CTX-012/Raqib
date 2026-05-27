@@ -406,6 +406,31 @@ pub fn parse_loaded_models(body: &str) -> Vec<String> {
         .collect()
 }
 
+// v1.1.1 DISPATCH 5 STEP 5 — asymmetric-fixture audit reference.
+//
+// The pre-v1.1.1 B1 bug arose because a unit test used the SAME
+// string on both sides of a compare whose real-world counterparts
+// are DIFFERENT shapes — `/api/ps` returned the friendly model
+// name while the classifier-tagged `proc.model_name` carried the
+// blob digest. The B1 fix lives in `sample_with_context` at the
+// `!loaded.is_empty()` branch; the regression-pin test is
+// `asymmetric_runner_digest_vs_api_ps_friendly_name_classifies_active`
+// below.
+//
+// Future samplers that bridge two systems (HTTP scrape + /proc,
+// shellout + classifier, etc.) should pick test fixture values
+// from EACH real-world source's natural shape, not a same-string
+// shortcut. If both sides produce the same shape in the real
+// world (PID == PID, "bash" == "bash"), a same-string fixture is
+// correct — `// SYMMETRIC: real-world is also symmetric` is the
+// idiomatic note.
+//
+// STEP 5 audit covered 121 sampler-area tests across
+// src/telemetry/. B1 was the only bug; the others use
+// single-source fixtures (parse-then-assert) or compare
+// symmetric-in-real-world types. Detail in the v1.1.1 audit
+// commit body.
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -221,6 +221,7 @@ impl TelemetrySource for AgentClaudeSource {
     async fn sample_with_context(
         &mut self,
         proc: &ProcessSnapshot,
+        _ai_procs: &[ProcessSnapshot],
         all_procs: &[ProcessSnapshot],
     ) -> SourceResult<TelemetryFrame> {
         let agent_pid = proc.pid;
@@ -230,9 +231,18 @@ impl TelemetrySource for AgentClaudeSource {
         // filter (added by DISPATCH 1.6) we would credit every
         // bash in the snapshot to every agent — broken for the
         // 22-concurrent-agent case CHANGE 6 documents.
-        let has_bash_child = all_procs.iter().any(|child| {
-            child.ppid == Some(agent_pid) && is_bash_basename(child)
-        });
+        //
+        // v1.1.2 (DISPATCH 7) — read `all_procs` (UNFILTERED), NOT
+        // `_ai_procs`. bash tool-children are `NotAi`-classified
+        // and the runtime strips them from the AI-filtered list
+        // before `Dispatcher::tick`. v1.1.1 read the filtered list
+        // here, so `has_bash_child` was ALWAYS false and B2 locked
+        // to Idle (DISPATCH 6B). The ppid plumbing (DISPATCH 1.6)
+        // and the classifier coverage (v1.1.1) were both correct;
+        // the consumer was just reading the wrong list.
+        let has_bash_child = all_procs
+            .iter()
+            .any(|child| child.ppid == Some(agent_pid) && is_bash_basename(child));
 
         let now = Instant::now();
         let activity = if has_bash_child {
@@ -395,7 +405,7 @@ mod tests {
         let bash_child = snap_with_ppid(101, Some(100), "bash", &["bash", "-c", "ls -la"]);
         let all = vec![agent.clone(), bash_child];
         let frame = s
-            .sample_with_context(&agent, &all)
+            .sample_with_context(&agent, &all, &all)
             .await
             .expect("sample should succeed");
         assert_eq!(frame.activity_state, Some(ActivityState::Active));
@@ -427,7 +437,7 @@ mod tests {
         let mut all = vec![agent.clone()];
         all.extend(lwps);
         let frame = s
-            .sample_with_context(&agent, &all)
+            .sample_with_context(&agent, &all, &all)
             .await
             .expect("sample should succeed");
         assert_eq!(
@@ -453,7 +463,7 @@ mod tests {
         s.last_active_at.insert(100, Instant::now());
         let all = vec![agent.clone()];
         let frame = s
-            .sample_with_context(&agent, &all)
+            .sample_with_context(&agent, &all, &all)
             .await
             .expect("sample should succeed");
         assert_eq!(
@@ -466,7 +476,7 @@ mod tests {
         let stale = Instant::now() - (AGENT_IDLE_WINDOW + Duration::from_secs(1));
         s.last_active_at.insert(100, stale);
         let frame = s
-            .sample_with_context(&agent, &all)
+            .sample_with_context(&agent, &all, &all)
             .await
             .expect("sample should succeed");
         assert_eq!(frame.activity_state, Some(ActivityState::Idle));
@@ -484,7 +494,7 @@ mod tests {
         );
         let all = vec![agent.clone()];
         let frame = s
-            .sample_with_context(&agent, &all)
+            .sample_with_context(&agent, &all, &all)
             .await
             .expect("sample should succeed");
         assert_eq!(frame.activity_state, Some(ActivityState::Idle));
@@ -519,11 +529,11 @@ mod tests {
         let all = vec![agent_a.clone(), agent_b.clone(), bash_a];
 
         let frame_a = s
-            .sample_with_context(&agent_a, &all)
+            .sample_with_context(&agent_a, &all, &all)
             .await
             .expect("sample A should succeed");
         let frame_b = s
-            .sample_with_context(&agent_b, &all)
+            .sample_with_context(&agent_b, &all, &all)
             .await
             .expect("sample B should succeed");
         assert_eq!(frame_a.activity_state, Some(ActivityState::Active));
@@ -544,5 +554,78 @@ mod tests {
     #[test]
     fn agent_idle_window_is_60s() {
         assert_eq!(AGENT_IDLE_WINDOW, Duration::from_secs(60));
+    }
+
+    /// v1.1.2 DISPATCH 7 — the regression test for the v1.1.1 B2
+    /// active-detection bug (DISPATCH 6B dual-Tester finding).
+    ///
+    /// ASYMMETRIC FIXTURE (Lesson 25 / asymmetric-fixture
+    /// discipline applied to this bug class): `ai_procs` EXCLUDES
+    /// the bash tool-child (bash is NotAi and the runtime filters
+    /// it out before `Dispatcher::tick`), while `all_procs`
+    /// INCLUDES it. The bug was that B2 read the AI-filtered list,
+    /// so `has_bash_child` was ALWAYS false → activity locked to
+    /// Idle even while the agent was actively running a Bash tool.
+    ///
+    /// This test would have FAILED on v1.1.1 (the sampler read the
+    /// filtered list, found no bash child, emitted Idle) and
+    /// PASSES on v1.1.2 (the sampler reads `all_procs`, finds the
+    /// bash child, emits Active). If a future refactor points B2
+    /// back at `ai_procs`, this test fails loud.
+    #[tokio::test]
+    async fn sample_with_context_active_via_unfiltered_bash_child() {
+        let mut s = AgentClaudeSource::new();
+        let agent_pid = 100;
+        let agent = snap(
+            agent_pid,
+            "claude",
+            &["claude", "--output-format", "stream-json"],
+        );
+        // ai_procs: only the AI-classified agent (matches the
+        // runtime's `AICategory != NotAi` filter — bash is NotAi).
+        let ai_procs = vec![agent.clone()];
+        // all_procs: the UNFILTERED kernel list — includes the
+        // bash tool-child whose ppid points back at the agent.
+        let bash_child = snap_with_ppid(101, Some(agent_pid), "bash", &["bash", "-c", "grep -rn x"]);
+        let all_procs = vec![agent.clone(), bash_child];
+
+        let frame = s
+            .sample_with_context(&agent, &ai_procs, &all_procs)
+            .await
+            .expect("sample should succeed");
+        assert_eq!(
+            frame.activity_state,
+            Some(ActivityState::Active),
+            "v1.1.2 fix: B2 must read all_procs (which includes the \
+             NotAi bash child), not ai_procs (which the runtime \
+             strips bash from). Reading ai_procs was the v1.1.1 bug \
+             that locked B2 to Idle (DISPATCH 6B).",
+        );
+        assert!(s.last_active_at.contains_key(&agent_pid));
+    }
+
+    /// v1.1.2 DISPATCH 7 — companion negative: the SAME agent, the
+    /// SAME ai_procs, but an all_procs that does NOT contain the
+    /// bash child → Idle. Pins that the Active verdict above is
+    /// genuinely driven by the bash child's presence in all_procs,
+    /// not by some unconditional path.
+    #[tokio::test]
+    async fn sample_with_context_idle_when_bash_child_absent_from_all_procs() {
+        let mut s = AgentClaudeSource::new();
+        let agent_pid = 100;
+        let agent = snap(
+            agent_pid,
+            "claude",
+            &["claude", "--output-format", "stream-json"],
+        );
+        let ai_procs = vec![agent.clone()];
+        // all_procs has the agent but no bash child this tick.
+        let all_procs = vec![agent.clone()];
+        let frame = s
+            .sample_with_context(&agent, &ai_procs, &all_procs)
+            .await
+            .expect("sample should succeed");
+        assert_eq!(frame.activity_state, Some(ActivityState::Idle));
+        assert!(!s.last_active_at.contains_key(&agent_pid));
     }
 }

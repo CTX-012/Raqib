@@ -193,17 +193,39 @@ pub trait TelemetrySource: Send + Sync {
     /// not propagate them up to the tick loop.
     async fn sample(&mut self, proc: &ProcessSnapshot) -> SourceResult<TelemetryFrame>;
 
-    /// Phase 2 / DISPATCH 1 — `sample` variant that receives the full
-    /// process list this tick. Used by samplers that need parent /
+    /// Phase 2 / DISPATCH 1 — `sample` variant that receives the
+    /// process lists this tick. Used by samplers that need parent /
     /// child tree visibility (B2 agent-claude needs to see siblings
-    /// to distinguish "agent CLI alone" from "agent CLI with a model
-    /// subprocess running"). Default polyfill delegates to `sample`
+    /// to distinguish "agent CLI alone" from "agent CLI with a Bash
+    /// tool-child running"). Default polyfill delegates to `sample`
     /// so every existing impl keeps working unchanged; the dispatcher
     /// calls `sample_with_context` on the tick path. Additive trait
     /// extension per Inspector #12 Option (i).
+    ///
+    /// `ai_procs`: AI-classified workloads only (matches the
+    /// classifier `AICategory != NotAi` filter the runtime applies
+    /// before `Dispatcher::tick`). Use this for sampler-to-sampler
+    /// correlation between known workloads.
+    ///
+    /// `all_procs`: the UNFILTERED kernel process list. Necessary for
+    /// samplers that detect NON-AI children of an AI process — e.g.
+    /// B2 agent_claude detecting Bash tool-children, where `bash`
+    /// itself is `NotAi` and would be absent from `ai_procs`.
+    /// EMPIRICAL (DISPATCH 6B): `runtime.rs` filters to AI workloads
+    /// before `tick`, so a sampler doing child-process detection MUST
+    /// read `all_procs` — reading `ai_procs` was the v1.1.1 B2
+    /// active-detection bug (bash children filtered out → activity
+    /// locked to Idle). Same defect class as the B1 v1.1.0 asymmetric
+    /// compare and the cpu_pct / ppid foundation gaps: the data
+    /// exists and the plumbing landed, but the consumer couldn't
+    /// reach it.
+    ///
+    /// New samplers should default to `ai_procs` unless they
+    /// specifically need bash / utility children.
     async fn sample_with_context(
         &mut self,
         proc: &ProcessSnapshot,
+        _ai_procs: &[ProcessSnapshot],
         _all_procs: &[ProcessSnapshot],
     ) -> SourceResult<TelemetryFrame> {
         self.sample(proc).await
@@ -374,7 +396,9 @@ mod tests {
         let mut s = StubSource { called: 0 };
         let p = proc(11);
         let all = vec![p.clone(), proc(12), proc(13)];
-        let frame = s.sample_with_context(&p, &all).await.unwrap();
+        // v1.1.2 — polyfill ignores both ai_procs + all_procs and
+        // delegates to `sample`; pass the same slice for both.
+        let frame = s.sample_with_context(&p, &all, &all).await.unwrap();
         assert_eq!(frame.pid, 11);
         assert_eq!(frame.tokens_per_sec, Some(42.0));
         // Default polyfill went through `sample` exactly once.

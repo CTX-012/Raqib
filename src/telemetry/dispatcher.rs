@@ -156,9 +156,18 @@ impl Dispatcher {
     }
 
     /// Run one tick: drain completed frames into the accumulator,
-    /// then schedule new samples for `processes`. Non-blocking;
+    /// then schedule new samples for `ai_procs`. Non-blocking;
     /// returns as soon as tasks are queued.
-    pub fn tick(&mut self, processes: &[ProcessSnapshot]) {
+    ///
+    /// v1.1.2 (DISPATCH 7) — takes BOTH the AI-filtered list (which
+    /// processes to sample) and the unfiltered kernel list (the
+    /// `all_procs` a child-detecting sampler like B2 needs). The
+    /// dispatcher iterates `ai_procs` to decide which sources fire,
+    /// but hands each sampler `all_procs` for child-process
+    /// detection. Pre-v1.1.2 it only had the filtered list and
+    /// cloned it as the sampler's "all_procs" — which excluded the
+    /// bash tool-children B2 looks for, locking B2 to Idle.
+    pub fn tick(&mut self, ai_procs: &[ProcessSnapshot], all_procs: &[ProcessSnapshot]) {
         // 1. Drain already-completed frames.
         while let Ok(frame) = self.frame_rx.try_recv() {
             self.accumulator.record(frame);
@@ -171,15 +180,18 @@ impl Dispatcher {
         //
         // Phase 2 / DISPATCH 1 — the spawned task calls
         // `sample_with_context` (the additive trait method), passing
-        // the full snapshot list so samplers like B2 agent-claude can
-        // see parent / child trees. Existing samplers inherit the
-        // default polyfill that delegates to `sample`.
-        let all_procs: Vec<ProcessSnapshot> = processes.to_vec();
-        for proc in processes {
+        // both the AI-filtered and the unfiltered snapshot lists so
+        // samplers like B2 agent-claude can see parent / child trees
+        // (including NotAi bash children). Existing samplers inherit
+        // the default polyfill that delegates to `sample`.
+        let all_procs_owned: Vec<ProcessSnapshot> = all_procs.to_vec();
+        let ai_procs_owned: Vec<ProcessSnapshot> = ai_procs.to_vec();
+        for proc in ai_procs {
             for source in &self.sources {
                 let source = source.clone();
                 let proc = proc.clone();
-                let all_procs = all_procs.clone();
+                let ai_procs_clone = ai_procs_owned.clone();
+                let all_procs_clone = all_procs_owned.clone();
                 let tx = self.frame_tx.clone();
                 // v1.1.1 — Some(t) is the operator/test override;
                 // None means "ask the sampler under the lock".
@@ -192,7 +204,8 @@ impl Dispatcher {
                     let name = guard.name().to_string();
                     let pid = proc.pid;
                     let timeout = timeout_override.unwrap_or_else(|| guard.sample_timeout());
-                    let fut = guard.sample_with_context(&proc, &all_procs);
+                    let fut =
+                        guard.sample_with_context(&proc, &ai_procs_clone, &all_procs_clone);
                     match tokio::time::timeout(timeout, fut).await {
                         Ok(Ok(frame)) => {
                             let _ = tx.send(frame);
@@ -445,7 +458,7 @@ mod tests {
     fn wait_for_frame(d: &mut Dispatcher, pid: u32, timeout: StdDuration) -> Option<RunMetrics> {
         let start = std::time::Instant::now();
         while start.elapsed() < timeout {
-            d.tick(&[]); // drain pending frames
+            d.tick(&[], &[]); // drain pending frames
             if let Some(m) = d.metrics_for(pid) {
                 return Some(m);
             }
@@ -462,7 +475,7 @@ mod tests {
             tps: 42.0,
         })])
         .unwrap();
-        d.tick(&[snap(1)]);
+        d.tick(&[snap(1)], &[snap(1)]);
         let m = wait_for_frame(&mut d, 1, StdDuration::from_secs(2)).unwrap();
         assert!((m.tokens_per_sec_avg.unwrap() - 42.0).abs() < 1e-3);
         assert!(called.load(Ordering::SeqCst) >= 1);
@@ -474,9 +487,9 @@ mod tests {
         // honoured, no panic surfaces. We schedule, drain, observe
         // no metrics for the PID.
         let mut d = Dispatcher::new(vec![Box::new(NeverApplies)]).unwrap();
-        d.tick(&[snap(1)]);
+        d.tick(&[snap(1)], &[snap(1)]);
         std::thread::sleep(StdDuration::from_millis(100));
-        d.tick(&[]);
+        d.tick(&[], &[]);
         assert!(d.metrics_for(1).is_none());
     }
 
@@ -485,9 +498,9 @@ mod tests {
         let mut d = Dispatcher::new(vec![Box::new(SlowSampler)])
             .unwrap()
             .with_sample_timeout(StdDuration::from_millis(50));
-        d.tick(&[snap(1)]);
+        d.tick(&[snap(1)], &[snap(1)]);
         std::thread::sleep(StdDuration::from_millis(150));
-        d.tick(&[]);
+        d.tick(&[], &[]);
         // Timed out → no frame recorded.
         assert!(d.metrics_for(1).is_none());
     }
@@ -552,7 +565,7 @@ mod tests {
             }
         }
         let mut d = Dispatcher::new(vec![Box::new(WideSampler)]).unwrap();
-        d.tick(&[snap(1)]);
+        d.tick(&[snap(1)], &[snap(1)]);
         let m = wait_for_frame(&mut d, 1, StdDuration::from_secs(2)).unwrap();
         assert!((m.tokens_per_sec_avg.unwrap() - 11.0).abs() < 1e-3);
     }
@@ -586,9 +599,9 @@ mod tests {
         let mut d = Dispatcher::new(vec![Box::new(LyingSampler)])
             .unwrap()
             .with_sample_timeout(StdDuration::from_millis(50));
-        d.tick(&[snap(1)]);
+        d.tick(&[snap(1)], &[snap(1)]);
         std::thread::sleep(StdDuration::from_millis(200));
-        d.tick(&[]);
+        d.tick(&[], &[]);
         // Host override (50 ms) clamped the per-source 10 s
         // declaration → no frame recorded.
         assert!(d.metrics_for(1).is_none());
@@ -608,7 +621,7 @@ mod tests {
             }),
         ])
         .unwrap();
-        d.tick(&[snap(1)]);
+        d.tick(&[snap(1)], &[snap(1)]);
         let m = wait_for_frame(&mut d, 1, StdDuration::from_secs(2)).unwrap();
         // The good sampler still produced a frame.
         assert!((m.tokens_per_sec_avg.unwrap() - 7.0).abs() < 1e-3);
@@ -618,7 +631,7 @@ mod tests {
     fn forget_drops_per_pid_state() {
         let called = Arc::new(AtomicU32::new(0));
         let mut d = Dispatcher::new(vec![Box::new(AlwaysApplies { called, tps: 1.0 })]).unwrap();
-        d.tick(&[snap(1)]);
+        d.tick(&[snap(1)], &[snap(1)]);
         wait_for_frame(&mut d, 1, StdDuration::from_secs(2)).unwrap();
         d.forget(1);
         assert!(d.metrics_for(1).is_none());
@@ -660,7 +673,7 @@ mod tests {
     ) -> Option<ActivityState> {
         let start = std::time::Instant::now();
         while start.elapsed() < timeout {
-            d.tick(&[]);
+            d.tick(&[], &[]);
             if let Some(a) = d.activity_for(pid) {
                 return Some(a);
             }
@@ -675,7 +688,7 @@ mod tests {
             state: ActivityState::Active,
         })])
         .unwrap();
-        d.tick(&[snap(1)]);
+        d.tick(&[snap(1)], &[snap(1)]);
         let observed = wait_for_activity(&mut d, 1, StdDuration::from_secs(2));
         assert_eq!(observed, Some(ActivityState::Active));
     }
@@ -692,7 +705,7 @@ mod tests {
             state: ActivityState::Loading,
         })])
         .unwrap();
-        d.tick(&[snap(1)]);
+        d.tick(&[snap(1)], &[snap(1)]);
         wait_for_activity(&mut d, 1, StdDuration::from_secs(2)).unwrap();
         d.forget(1);
         assert_eq!(d.activity_for(1), None);

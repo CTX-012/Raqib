@@ -55,11 +55,14 @@ import json,sys
 d=json.load(sys.stdin)
 print(d['models'][0]['name'] if d.get('models') else 'NONE')
 ")
-# the runner's activity state (the v1.1.1 fix signal)
+# the runner's activity state (the v1.1.1 fix signal). DISPATCH 11B:
+# guard on model_name so we read the RUNNER row (has a model, carries
+# activity) and not the daemon row (no model, activity None) when both
+# are present — mirrors the classified-name filter above.
 activity=$(echo "$snap" | python3 -c "
 import json,sys
 d=json.load(sys.stdin)
-r=[w for w in d.get('workloads',[]) if w.get('workload_category')=='llm' and w.get('name')=='ollama']
+r=[w for w in d.get('workloads',[]) if w.get('workload_category')=='llm' and w.get('name')=='ollama' and w.get('model_name')]
 print(r[0].get('activity') or 'NONE' if r else 'NONE')
 ")
 

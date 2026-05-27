@@ -91,6 +91,50 @@ const ROS2_CMDLINE_MARKERS: &[&str] = &[
     "rclpy",
 ];
 
+/// v1.1.4 BUG-P5-1 — read-only `ros2` CLI introspection invocations
+/// and the daemon helper. These are short-lived query commands (or a
+/// background helper), NOT ROS2 graph participants the operator wants
+/// on the workloads panel. The `ros2` CLI is itself a Python process
+/// that imports `rclpy` and therefore loads `librcl.so`, so the
+/// library signal ([`ROS2_LIBRARY_MARKERS`]) over-classifies them as
+/// ROS2 workloads (visible as transient `ros2` rows in the operator's
+/// screenshot). Guarded out in [`classify`] before any signal check,
+/// the same shape as the v1.0.2 tooling-name and shell-wrapper guards.
+///
+/// Substring-matched (lowercased) against the joined cmdline so the
+/// `python3 /opt/ros/humble/bin/ros2 topic hz …` shape matches the
+/// same way a bare `ros2 topic hz …` does. Node-SPAWNING verbs
+/// (`ros2 run` / `ros2 launch`) and traffic-GENERATING verbs
+/// (`ros2 topic pub`, `ros2 service call`) are deliberately NOT here
+/// — those represent real ROS2 activity and keep classifying.
+///
+/// Also catches B3's own `ros2 topic hz` sampler probe (the
+/// self-classification feedback the EDGE_MONITOR_SAMPLER env marker
+/// guards against from the other direction).
+const ROS2_CLI_INTROSPECTION_MARKERS: &[&str] = &[
+    "ros2 topic hz",
+    "ros2 topic list",
+    "ros2 topic echo",
+    "ros2 topic info",
+    "ros2 topic bw",
+    "ros2 topic find",
+    "ros2 node list",
+    "ros2 node info",
+    "ros2 service list",
+    "ros2 service type",
+    "ros2 service find",
+    "ros2 action list",
+    "ros2 action info",
+    "ros2 param ",
+    "ros2 interface ",
+    "ros2 pkg ",
+    "ros2 doctor",
+    "ros2 wtf",
+    // The ROS2 daemon helper — a long-lived Python process that
+    // links librcl but is infrastructure, not a workload.
+    "_ros2_daemon",
+];
+
 /// Library basenames that signal ROS2 linkage. Looked up as
 /// substrings of `/proc/<pid>/maps` lines so the absolute install
 /// path doesn't matter.
@@ -182,24 +226,47 @@ pub(crate) fn classify(sample: &ProcessSample) -> Option<ClassificationResult> {
     if is_shell_wrapped_ros2_invocation(&sample.cmdline) {
         return None;
     }
-    if let Some(var) = ros2_runtime_env_signal(sample) {
-        let evidence = format!("ROS2 runtime env var present: {var}");
-        return Some(make_ros2_result(evidence));
+    // v1.1.4 BUG-P5-1 — read-only `ros2` CLI queries + the daemon
+    // helper load librcl (the CLI imports rclpy) and would otherwise
+    // fire the library signal below. Guard them out before any signal
+    // check.
+    if is_ros2_cli_introspection(&sample.cmdline) {
+        return None;
     }
+    // cmdline + library are the standalone-trustworthy positive
+    // signals. Checked first so a genuine ROS2 node classifies on
+    // its node-spawn verb (`ros2 run`/`ros2 launch`/`rclpy`) or its
+    // linked libraries (librcl / librmw_implementation /
+    // _rclpy_pybind11 — v1.0.3 made these comprehensive).
     if let Some(marker) = ros2_cmdline_signal(&sample.cmdline) {
-        let evidence = format!("cmdline matches ROS2 marker {marker:?}");
+        let mut evidence = format!("cmdline matches ROS2 marker {marker:?}");
+        if let Some(var) = ros2_runtime_env_signal(sample) {
+            evidence = format!("{evidence} (corroborated by {var})");
+        }
         return Some(make_ros2_result(evidence));
     }
     if let Some(lib) = ros2_library_signal(sample.pid) {
-        let evidence = format!("/proc/{}/maps links {}", sample.pid, lib);
+        let mut evidence = format!("/proc/{}/maps links {}", sample.pid, lib);
+        if let Some(var) = ros2_runtime_env_signal(sample) {
+            evidence = format!("{evidence} (corroborated by {var})");
+        }
         return Some(make_ros2_result(evidence));
     }
-    // Fix-1 — a shell-set env signal (RMW_IMPLEMENTATION et al.)
-    // alone is not enough; if we got here, no cmdline or library
-    // signal backed it up, so the process is most likely a regular
-    // user-shell process that just inherited the env. Fall through
-    // to the AI classifiers (most of which will return None for a
-    // non-AI process, which is exactly what we want).
+    // v1.1.4 P5-ENV-ROS — `ROS_DOMAIN_ID` alone is NO LONGER a
+    // standalone classifier signal. Pre-v1.1.4 a bare runtime-env
+    // match returned ROS2 here; Tester-B (P5 DISPATCH 9B) verified
+    // empirically that ANY process launched from a ROS-sourced
+    // shell INHERITS `ROS_DOMAIN_ID` and was false-classified as
+    // ROS2 — an embeddings process classified ROS2 until
+    // `env -u ROS_DOMAIN_ID` restored it. On the Jetson deployment
+    // target (ROS env globally sourced) every inheriting process —
+    // non-ROS AI workloads, system utilities, monitors — would
+    // misclassify. So `ROS_DOMAIN_ID` is now necessary-but-not-
+    // sufficient: it only enriches evidence when a cmdline or
+    // library signal already fired (above). A shell-set env signal
+    // (RMW_IMPLEMENTATION et al.) was never load-bearing (Fix-1).
+    // With no cmdline / library corroboration we fall through to the
+    // AI classifiers.
     None
 }
 
@@ -242,6 +309,21 @@ pub(crate) fn is_shell_wrapped_ros2_invocation(cmdline: &[String]) -> bool {
         .iter()
         .skip(dash_c_idx + 1)
         .any(|arg| arg.to_ascii_lowercase().contains("ros2"))
+}
+
+/// v1.1.4 BUG-P5-1 — true when the cmdline is a read-only `ros2` CLI
+/// introspection query or the `_ros2_daemon` helper. Substring match
+/// (lowercased) against the joined cmdline; see
+/// [`ROS2_CLI_INTROSPECTION_MARKERS`] for the rationale and the
+/// deliberate exclusions (node-spawning + traffic-generating verbs).
+pub(crate) fn is_ros2_cli_introspection(cmdline: &[String]) -> bool {
+    if cmdline.is_empty() {
+        return false;
+    }
+    let joined = cmdline.join(" ").to_ascii_lowercase();
+    ROS2_CLI_INTROSPECTION_MARKERS
+        .iter()
+        .any(|m| joined.contains(m))
 }
 
 fn make_ros2_result(evidence: String) -> ClassificationResult {
@@ -652,20 +734,64 @@ mod tests {
     // Top-level classify
     // ────────────────────────────────────────────────────────────
 
+    /// v1.1.4 P5-ENV-ROS — `ROS_DOMAIN_ID` alone NO LONGER
+    /// classifies as ROS2. Pre-v1.1.4 this returned ROS2 on the
+    /// runtime-env signal alone; Tester-B verified that inheritance
+    /// from a ROS-sourced shell false-classified non-ROS workloads.
+    /// With no cmdline marker and no library signal (fake pid →
+    /// /proc read fails), env-alone must now fall through to None.
     #[test]
-    fn classify_fires_ros2_on_env_signal() {
+    fn ros_domain_id_env_alone_no_longer_classifies() {
         let s = sample_with_env(
             "python3",
             &["python3", "perception_node.py"],
             &[("ROS_DOMAIN_ID", "0")],
         );
-        let result = classify(&s).expect("should classify");
-        assert_eq!(result.workload_category, WorkloadCategory::ROS2);
-        assert_eq!(result.category, AICategory::Inference);
         assert!(
-            result.evidence.contains("ROS_DOMAIN_ID"),
-            "evidence: {}",
-            result.evidence
+            classify(&s).is_none(),
+            "ROS_DOMAIN_ID inherited from a ROS-sourced shell must not \
+             classify a process as ROS2 without a cmdline or library \
+             corroborating signal (P5-ENV-ROS)",
+        );
+    }
+
+    /// v1.1.4 P5-ENV-ROS — the dispatch's verify case: an embeddings
+    /// process launched from a ROS-sourced shell (so it inherits
+    /// ROS_DOMAIN_ID) must NOT classify as ROS2. The ROS2 classifier
+    /// returns None for it, leaving the embeddings classifier free to
+    /// claim it downstream.
+    #[test]
+    fn embeddings_with_inherited_ros_domain_id_not_ros2() {
+        let s = sample_with_env(
+            "python3",
+            &["python3", "-m", "sentence_transformers", "encode"],
+            &[("ROS_DOMAIN_ID", "0"), ("ROS_DISTRO", "humble")],
+        );
+        assert!(
+            classify(&s).is_none(),
+            "an embeddings process that merely inherited ROS_DOMAIN_ID \
+             must not be stolen by the ROS2 classifier (P5-ENV-ROS)",
+        );
+    }
+
+    /// v1.1.4 P5-ENV-ROS — when a real ROS2 signal IS present
+    /// (cmdline marker here), ROS_DOMAIN_ID enriches the evidence
+    /// rather than being the sole basis. Confirms env is
+    /// necessary-but-not-sufficient, not dropped entirely.
+    #[test]
+    fn ros_domain_id_corroborates_cmdline_signal_in_evidence() {
+        let s = sample_with_env(
+            "ros2",
+            &["ros2", "run", "demo_nodes_cpp", "talker"],
+            &[("ROS_DOMAIN_ID", "0")],
+        );
+        let result = classify(&s).expect("ros2 run must classify");
+        assert_eq!(result.workload_category, WorkloadCategory::ROS2);
+        assert!(
+            result.evidence.contains("cmdline") && result.evidence.contains("ROS_DOMAIN_ID"),
+            "evidence should cite the cmdline marker AND note the env \
+             corroboration: {}",
+            result.evidence,
         );
     }
 
@@ -887,17 +1013,88 @@ mod tests {
         assert_eq!(result.workload_category, WorkloadCategory::ROS2);
     }
 
+    // v1.1.4 P5-ENV-ROS — the former `classify_fires_ros2_on_runtime_
+    // env_alone` test (asserting ROS_DOMAIN_ID alone classifies as
+    // ROS2) was REMOVED: that behaviour is exactly the
+    // env-inheritance false-positive this release fixes. The
+    // corrected behaviour is pinned by
+    // `ros_domain_id_env_alone_no_longer_classifies`,
+    // `embeddings_with_inherited_ros_domain_id_not_ros2`, and
+    // `ros_domain_id_corroborates_cmdline_signal_in_evidence`.
+
+    // ────────────────────────────────────────────────────────────
+    // v1.1.4 BUG-P5-1 — `ros2` CLI introspection + daemon must NOT
+    // classify as ROS2 workloads. The CLI imports rclpy → loads
+    // librcl, so the library signal would otherwise over-classify
+    // them (transient `ros2` rows in the operator's screenshot).
+    // ────────────────────────────────────────────────────────────
+
     #[test]
-    fn classify_fires_ros2_on_runtime_env_alone() {
-        // Mirror of the env-only positive case: ROS_DOMAIN_ID is the
-        // runtime signal and remains standalone-trustworthy.
-        let s = sample_with_env(
-            "perception_node",
-            &["perception_node"],
-            &[("ROS_DOMAIN_ID", "0")],
+    fn ros2_topic_hz_cli_does_not_classify() {
+        // The exact shape B3's own sampler shells out, AND what an
+        // operator running `ros2 topic hz` by hand looks like. The
+        // real process is python3 running the ros2 CLI entrypoint.
+        let s = sample(
+            "ros2",
+            &[
+                "/usr/bin/python3",
+                "/opt/ros/humble/bin/ros2",
+                "topic",
+                "hz",
+                "/chatter",
+            ],
         );
-        let result = classify(&s).expect("should classify");
+        assert!(
+            classify(&s).is_none(),
+            "ros2 topic hz is a read-only CLI query, not a ROS2 workload",
+        );
+    }
+
+    #[test]
+    fn ros2_node_list_cli_does_not_classify() {
+        let s = sample("ros2", &["ros2", "node", "list"]);
+        assert!(classify(&s).is_none());
+    }
+
+    #[test]
+    fn ros2_daemon_helper_does_not_classify() {
+        let s = sample(
+            "_ros2_daemon",
+            &["/usr/bin/python3", "/opt/ros/humble/bin/_ros2_daemon"],
+        );
+        assert!(
+            classify(&s).is_none(),
+            "_ros2_daemon is infrastructure, not a workload",
+        );
+    }
+
+    #[test]
+    fn ros2_run_still_classifies_after_introspection_guard() {
+        // Node-spawning verb must keep classifying — the introspection
+        // guard must not catch `ros2 run`.
+        let s = sample("ros2", &["ros2", "run", "demo_nodes_cpp", "talker"]);
+        let result = classify(&s).expect("ros2 run must still classify");
         assert_eq!(result.workload_category, WorkloadCategory::ROS2);
-        assert!(result.evidence.contains("ROS_DOMAIN_ID"));
+    }
+
+    #[test]
+    fn ros2_topic_pub_not_caught_by_introspection_guard() {
+        // Traffic-generating verb is NOT introspection — `ros2 topic
+        // pub` actively publishes and must NOT be guarded out (it's
+        // deliberately absent from the introspection marker list).
+        // In production it loads librcl and classifies via the
+        // library signal; the unit fixture can't exercise that
+        // (fake pid), so we assert the guard predicate directly
+        // rather than full classification.
+        let cmdline: Vec<String> =
+            ["ros2", "topic", "pub", "/chatter", "std_msgs/String"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+        assert!(
+            !is_ros2_cli_introspection(&cmdline),
+            "ros2 topic pub is traffic-generating, not introspection — \
+             the guard must not swallow it",
+        );
     }
 }

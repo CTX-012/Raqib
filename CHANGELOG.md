@@ -6,6 +6,72 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project aims to adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 once `v1.0.0` is tagged. Until then, minor versions may include breaking changes.
 
+## [1.1.4] — 2026-05-24 — bug-surface fixes (P5 + DISPATCH 11 carry-forward)
+
+Narrow-scope hotfix closing the carry-forward items from P5 +
+DISPATCH 11. Four fixed; one (sub-Hz ROS2) surfaced as
+architectural and deferred to v1.1.5.
+
+### Fixed
+
+- **DISPATCH 11B — b1 harness model_name filter.** The b1
+  integration harness read its activity signal with a filter that
+  could select the ollama *daemon* row (no model, activity None)
+  instead of the *runner* row, producing a false-negative exit
+  against a working B1. Added the `model_name` guard, mirroring
+  the classified-name filter. Harness-only.
+- **BUG-P5-1 — ROS2 daemon / CLI over-classify.** Read-only `ros2`
+  CLI introspection commands (`ros2 topic hz`, `ros2 node list`,
+  …) and the `_ros2_daemon` helper were classifying as ROS2
+  workloads (transient `ros2` rows in the operator's screenshot)
+  because the `ros2` CLI imports rclpy → loads librcl → fires the
+  library signal. New `is_ros2_cli_introspection` early-return
+  guard (same shape as the v1.0.2 tooling-name / shell-wrapper
+  guards). Node-spawning (`ros2 run`/`launch`) and
+  traffic-generating (`ros2 topic pub`) verbs deliberately keep
+  classifying.
+- **P5-B4-CLASSIFY — embeddings classifier coverage.** Embeddings
+  workloads whose model family wasn't `sentence-transformers` /
+  `bge-` fell through to Unknown. Broadened the classifier (and
+  the B4 sampler markers, kept in sync) with high-confidence
+  family / library substrings: FlagEmbedding, gte-,
+  e5-{base,large,small}, multilingual-e5, nomic-embed, all-MiniLM,
+  jina-embeddings, plus FlagEmbedding source imports in
+  script-sniff. Chose name/cmdline coverage over a /proc/maps
+  library signal (embeddings share libtorch — no unique .so) and
+  over a CPU-magnitude heuristic (would false-positive on training
+  jobs). A no-import CPU-only proxy remains Unknown by design.
+- **P5-ENV-ROS — `ROS_DOMAIN_ID` necessary-but-not-sufficient.**
+  A process launched from a ROS-sourced shell inherits
+  `ROS_DOMAIN_ID` and was false-classified as ROS2 (Tester-B:
+  an embeddings process classified ROS2 until `env -u
+  ROS_DOMAIN_ID`). MEDIUM-HIGH: on the Jetson target (ROS env
+  globally sourced) every inheriting process would misclassify.
+  `classify()` now requires a standalone-trustworthy signal
+  (cmdline marker or `/proc/maps` library link) to classify ROS2;
+  `ROS_DOMAIN_ID` only enriches evidence when such a signal
+  already fired. Genuine ROS2 nodes are unaffected (they load
+  librcl / carry a node-spawn marker).
+
+### Surfaced — deferred to v1.1.5 (architectural)
+
+- **BUG-P5-2 — sub-Hz ROS2 topics.** Topics ≤ 0.5 Hz (0.1 Hz needs
+  ~29 s probe) remain structurally unobservable; raising the
+  timeout further punishes healthy 1 Hz cases. All three fix
+  approaches (streaming hz monitor, direct DDS/rclrs subscription,
+  message-timestamp observation) redesign how B3 acquires its rate
+  signal — the DDS approach would also need a new dependency
+  (foundation no-new-deps lock). STOP-AND-SURFACED per the
+  dispatch's architectural trigger; routed to a v1.1.5
+  architectural dispatch.
+
+### Test count: 888 → 896 (+8)
+
+- ITEM 2 (ROS2 introspection guard): +5
+- ITEM 3 (embeddings coverage): +2
+- ITEM 5 (ROS_DOMAIN_ID): +1 net (3 new ros2.rs tests, 2 replaced;
+  3 classifier/mod.rs tests flipped in place)
+
 ## [1.1.3] — 2026-05-24 — P5 refinements + integration harness (CI deferred)
 
 Phase 2 closeout. Empirically-anchored sampler refinements from P5

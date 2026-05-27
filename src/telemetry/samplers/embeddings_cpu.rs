@@ -97,12 +97,24 @@ const EMBEDDINGS_IDLE_WINDOW: Duration = Duration::from_secs(12);
 /// these are the cmdline-observable subset reachable at sampler
 /// dispatch time without a `workload_category` field on
 /// `ProcessSnapshot`.
+// v1.1.4 P5-B4-CLASSIFY — kept in sync with the classifier's
+// embeddings keyword coverage (src/classifier/keyword_match.rs) so a
+// process the classifier tags as Embeddings is also one this sampler
+// will sample. Added flagembedding / nomic-embed / all-minilm /
+// jina-embeddings to match the classifier.
 const EMBEDDINGS_CMDLINE_MARKERS: &[&str] = &[
     "sentence_transformers",
     "sentence-transformers",
+    "flagembedding",
     "bge-",
     "gte-",
-    "e5-",
+    "e5-base",
+    "e5-large",
+    "e5-small",
+    "multilingual-e5",
+    "nomic-embed",
+    "all-minilm",
+    "jina-embeddings",
 ];
 
 pub struct EmbeddingsCpuSource {

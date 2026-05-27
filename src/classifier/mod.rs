@@ -435,16 +435,25 @@ mod tests {
     // first in dispatch. The L11a "no leakage" defensive guard is
     // retired; the tests below cover the real signals.
 
+    // v1.1.4 P5-ENV-ROS — flip of the prior "ROS_DOMAIN_ID alone
+    // classifies as ROS2" test, mirroring the Fix-1 flip done for
+    // RMW_IMPLEMENTATION just below. Tester-B verified (P5 DISPATCH
+    // 9B) that a process merely INHERITING ROS_DOMAIN_ID from a
+    // ROS-sourced shell was false-classified ROS2. With no cmdline
+    // marker and no library signal, ROS_DOMAIN_ID alone must no
+    // longer classify — it's now necessary-but-not-sufficient.
     #[test]
-    fn ros2_process_with_ros_domain_id_env_classified_as_ros2() {
+    fn ros_domain_id_env_alone_does_not_classify_as_ros2() {
         let s = sample_with_env(
             "python3",
             &["python3", "perception_node.py"],
             &[("ROS_DOMAIN_ID", "0")],
         );
-        assert_eq!(
+        assert_ne!(
             classify_process(&s).workload_category,
-            WorkloadCategory::ROS2
+            WorkloadCategory::ROS2,
+            "ROS_DOMAIN_ID inherited from a ROS-sourced shell must not \
+             classify a bare python script as ROS2 (P5-ENV-ROS)",
         );
     }
 
@@ -572,12 +581,19 @@ mod tests {
         // A perception node that ALSO has torch loaded in the
         // process — without ROS2 priority, the script-sniff
         // classifier would pick up a generic torch signal and
-        // mis-classify as Unknown. With ROS2 detection running
-        // first in dispatch, the ROS_DOMAIN_ID env signal wins
-        // and the row groups under ROS2 in the workloads panel.
+        // mis-classify. With ROS2 detection running first in
+        // dispatch and a REAL ROS2 signal present (the `rclpy`
+        // cmdline marker), the row groups under ROS2.
+        //
+        // v1.1.4 P5-ENV-ROS — the fixture now carries a real
+        // cmdline signal (`-m rclpy.node`) instead of relying on
+        // ROS_DOMAIN_ID alone, which no longer classifies. This
+        // still exercises the dispatch-order contract (ROS2 before
+        // the torch/script-sniff classifier) — the point of the
+        // test — without depending on the removed env-alone path.
         let s = sample_with_env(
             "python3",
-            &["python3", "perception_node.py"],
+            &["python3", "-m", "rclpy.node", "perception_node.py"],
             &[
                 ("ROS_DOMAIN_ID", "0"),
                 ("PYTHONPATH", "/opt/ros/humble/lib/python3.10/site-packages"),
@@ -736,13 +752,17 @@ mod tests {
         );
     }
 
+    // v1.1.4 P5-ENV-ROS — flip of the prior "ROS2 env priority beats
+    // saas_llm" test. The old fixture (a claude-code agent that
+    // merely INHERITED ROS_DOMAIN_ID from a ROS-sourced shell
+    // classifying as ROS2) was EXACTLY the env-inheritance
+    // false-positive this release fixes — and exactly the dispatch's
+    // severity rationale ("non-ROS AI workloads inheriting the env
+    // misclassify"). A claude agent with only inherited ROS_DOMAIN_ID
+    // and no real ROS2 signal must now classify as the Agent
+    // (saas_llm) workload, NOT ROS2.
     #[test]
-    fn saas_llm_does_not_override_ros2_priority() {
-        // ROS2 detection sits at priority 0; even a process whose
-        // cmdline mentions a SaaS-LLM extension path must group as
-        // ROS2 if the ROS_DOMAIN_ID env signal is present. Pins
-        // the dispatch-order contract so a future reorder doesn't
-        // silently regress ROS2 grouping.
+    fn saas_llm_wins_over_inherited_ros_domain_id() {
         let s = sample_with_env(
             "node",
             &[
@@ -754,8 +774,9 @@ mod tests {
         let r = classify_process(&s);
         assert_eq!(
             r.workload_category,
-            WorkloadCategory::ROS2,
-            "ROS2 priority must beat saas_llm: {r:?}"
+            WorkloadCategory::Agent,
+            "a claude agent that merely inherited ROS_DOMAIN_ID must \
+             classify as Agent, not ROS2 (P5-ENV-ROS): {r:?}",
         );
     }
 

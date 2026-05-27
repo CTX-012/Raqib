@@ -49,6 +49,14 @@ static AI_PATTERNS: &[(&str, AICategory, WorkloadCategory)] = &[
     ("from sentence_transformers", AICategory::Inference, WorkloadCategory::Embeddings),
     ("import sentence_transformers", AICategory::Inference, WorkloadCategory::Embeddings),
     ("SentenceTransformer(", AICategory::Inference, WorkloadCategory::Embeddings),
+    // v1.1.4 P5-B4-CLASSIFY — FlagEmbedding (BAAI's BGE library) is
+    // a common embeddings entry point the operator's workloads use;
+    // its source imports are caught here when the process runs a
+    // readable .py script.
+    ("from FlagEmbedding", AICategory::Inference, WorkloadCategory::Embeddings),
+    ("import FlagEmbedding", AICategory::Inference, WorkloadCategory::Embeddings),
+    ("FlagModel(", AICategory::Inference, WorkloadCategory::Embeddings),
+    ("FlagAutoModel(", AICategory::Inference, WorkloadCategory::Embeddings),
     // ONNX Runtime — agnostic; could be LLM, Vision, or Embeddings.
     ("onnxruntime.InferenceSession", AICategory::Inference, WorkloadCategory::Unknown),
     ("import onnxruntime", AICategory::Inference, WorkloadCategory::Unknown),

@@ -62,10 +62,32 @@ static CMDLINE_KEYWORDS: &[KeywordEntry] = &[
     ("comfyui", AICategory::Inference, WorkloadCategory::Vision),
     ("ultralytics", AICategory::Inference, WorkloadCategory::Vision),
     ("yolo", AICategory::Inference, WorkloadCategory::Vision),
-    // Embeddings — sentence-transformers and BAAI/bge models.
+    // Embeddings — sentence-transformers + the common open
+    // embedding-model families. v1.1.4 P5-B4-CLASSIFY: the prior
+    // list (sentence-transformers + bge-) was narrower than the B4
+    // sampler's own markers and missed gte-/e5- plus FlagEmbedding
+    // and other families real embeddings workloads carry in their
+    // cmdline (HF repo id, `python -m`, or inline `-c` import —
+    // all reachable via the joined-cmdline substring match below).
+    // High-confidence substrings only; no CPU-magnitude heuristic
+    // (that would false-positive on training / data jobs).
     ("sentence-transformers", AICategory::Inference, WorkloadCategory::Embeddings),
     ("sentence_transformers", AICategory::Inference, WorkloadCategory::Embeddings),
+    ("flagembedding", AICategory::Inference, WorkloadCategory::Embeddings),
     ("bge-", AICategory::Inference, WorkloadCategory::Embeddings),
+    ("gte-", AICategory::Inference, WorkloadCategory::Embeddings),
+    // e5 family: the bare "e5-" is only 3 chars and would trip the
+    // ≤BOUNDARY_MAX_LEN word-boundary rule (the trailing '-' is part
+    // of the keyword, so the matcher still demands a boundary AFTER
+    // it). Use the ≥4-char model-name suffixes instead — substring-
+    // safe and still covers the real e5 model ids.
+    ("e5-base", AICategory::Inference, WorkloadCategory::Embeddings),
+    ("e5-large", AICategory::Inference, WorkloadCategory::Embeddings),
+    ("e5-small", AICategory::Inference, WorkloadCategory::Embeddings),
+    ("multilingual-e5", AICategory::Inference, WorkloadCategory::Embeddings),
+    ("nomic-embed", AICategory::Inference, WorkloadCategory::Embeddings),
+    ("all-minilm", AICategory::Inference, WorkloadCategory::Embeddings),
+    ("jina-embeddings", AICategory::Inference, WorkloadCategory::Embeddings),
     // Training
     ("deepspeed", AICategory::Training, WorkloadCategory::Unknown),
     ("torchrun", AICategory::Training, WorkloadCategory::Unknown),
@@ -292,5 +314,60 @@ mod tests {
     fn non_ai_cmdline_returns_none() {
         let cmdline = vec!["nginx".into(), "-c".into(), "/etc/nginx/nginx.conf".into()];
         assert!(classify_by_cmdline(&cmdline).is_none());
+    }
+
+    // ── v1.1.4 P5-B4-CLASSIFY — broadened embeddings coverage ──────────────────
+
+    /// Embedding-model families + libraries the operator's workloads
+    /// carry in cmdline (HF repo id, `python -m`, or inline `-c`
+    /// import) must classify as Embeddings — not fall through to
+    /// Unknown. The joined-cmdline substring match reaches all three
+    /// invocation shapes.
+    #[test]
+    fn embedding_families_classify_as_embeddings() {
+        let cases: &[&[&str]] = &[
+            // HF repo id in argv (the B4 calibration proxy shape).
+            &["python3", "encode.py", "--model", "BAAI/bge-small-en-v1.5"],
+            &["python3", "encode.py", "--model", "thenlper/gte-large"],
+            &["python3", "encode.py", "--model", "intfloat/e5-base-v2"],
+            &["python3", "encode.py", "--model", "nomic-ai/nomic-embed-text-v1"],
+            &["python3", "encode.py", "--model", "sentence-transformers/all-MiniLM-L6-v2"],
+            &["python3", "encode.py", "--model", "jinaai/jina-embeddings-v2-base-en"],
+            // FlagEmbedding library via `python -m` (dispatch-named).
+            &["python3", "-m", "FlagEmbedding.server"],
+            // Inline `-c` import — reachable via the joined cmdline.
+            &["python3", "-c", "from sentence_transformers import SentenceTransformer"],
+        ];
+        for cmdline in cases {
+            let argv: Vec<String> = cmdline.iter().map(|s| s.to_string()).collect();
+            let r = classify_by_cmdline(&argv)
+                .unwrap_or_else(|| panic!("expected a classification for {cmdline:?}"));
+            assert_eq!(
+                r.workload_category,
+                WorkloadCategory::Embeddings,
+                "expected Embeddings for {cmdline:?}, got {:?}",
+                r.workload_category,
+            );
+        }
+    }
+
+    /// Guard against over-reach: a non-embeddings heavy-CPU python
+    /// job (e.g. a training run) must NOT be swept into Embeddings by
+    /// the broadened coverage. Embeddings detection is substring-on-
+    /// family-name, not a CPU-magnitude heuristic.
+    #[test]
+    fn broadened_embeddings_does_not_catch_unrelated_python() {
+        let cmdline = vec![
+            "python3".to_string(),
+            "train.py".to_string(),
+            "--epochs".to_string(),
+            "50".to_string(),
+        ];
+        // No embedding family token → not classified Embeddings (it
+        // may match nothing, or match a generic framework, but never
+        // Embeddings).
+        if let Some(r) = classify_by_cmdline(&cmdline) {
+            assert_ne!(r.workload_category, WorkloadCategory::Embeddings);
+        }
     }
 }

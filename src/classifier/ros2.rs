@@ -91,6 +91,50 @@ const ROS2_CMDLINE_MARKERS: &[&str] = &[
     "rclpy",
 ];
 
+/// v1.1.4 BUG-P5-1 — read-only `ros2` CLI introspection invocations
+/// and the daemon helper. These are short-lived query commands (or a
+/// background helper), NOT ROS2 graph participants the operator wants
+/// on the workloads panel. The `ros2` CLI is itself a Python process
+/// that imports `rclpy` and therefore loads `librcl.so`, so the
+/// library signal ([`ROS2_LIBRARY_MARKERS`]) over-classifies them as
+/// ROS2 workloads (visible as transient `ros2` rows in the operator's
+/// screenshot). Guarded out in [`classify`] before any signal check,
+/// the same shape as the v1.0.2 tooling-name and shell-wrapper guards.
+///
+/// Substring-matched (lowercased) against the joined cmdline so the
+/// `python3 /opt/ros/humble/bin/ros2 topic hz …` shape matches the
+/// same way a bare `ros2 topic hz …` does. Node-SPAWNING verbs
+/// (`ros2 run` / `ros2 launch`) and traffic-GENERATING verbs
+/// (`ros2 topic pub`, `ros2 service call`) are deliberately NOT here
+/// — those represent real ROS2 activity and keep classifying.
+///
+/// Also catches B3's own `ros2 topic hz` sampler probe (the
+/// self-classification feedback the EDGE_MONITOR_SAMPLER env marker
+/// guards against from the other direction).
+const ROS2_CLI_INTROSPECTION_MARKERS: &[&str] = &[
+    "ros2 topic hz",
+    "ros2 topic list",
+    "ros2 topic echo",
+    "ros2 topic info",
+    "ros2 topic bw",
+    "ros2 topic find",
+    "ros2 node list",
+    "ros2 node info",
+    "ros2 service list",
+    "ros2 service type",
+    "ros2 service find",
+    "ros2 action list",
+    "ros2 action info",
+    "ros2 param ",
+    "ros2 interface ",
+    "ros2 pkg ",
+    "ros2 doctor",
+    "ros2 wtf",
+    // The ROS2 daemon helper — a long-lived Python process that
+    // links librcl but is infrastructure, not a workload.
+    "_ros2_daemon",
+];
+
 /// Library basenames that signal ROS2 linkage. Looked up as
 /// substrings of `/proc/<pid>/maps` lines so the absolute install
 /// path doesn't matter.
@@ -182,6 +226,13 @@ pub(crate) fn classify(sample: &ProcessSample) -> Option<ClassificationResult> {
     if is_shell_wrapped_ros2_invocation(&sample.cmdline) {
         return None;
     }
+    // v1.1.4 BUG-P5-1 — read-only `ros2` CLI queries + the daemon
+    // helper load librcl (the CLI imports rclpy) and would otherwise
+    // fire the library signal below. Guard them out before any signal
+    // check.
+    if is_ros2_cli_introspection(&sample.cmdline) {
+        return None;
+    }
     if let Some(var) = ros2_runtime_env_signal(sample) {
         let evidence = format!("ROS2 runtime env var present: {var}");
         return Some(make_ros2_result(evidence));
@@ -242,6 +293,21 @@ pub(crate) fn is_shell_wrapped_ros2_invocation(cmdline: &[String]) -> bool {
         .iter()
         .skip(dash_c_idx + 1)
         .any(|arg| arg.to_ascii_lowercase().contains("ros2"))
+}
+
+/// v1.1.4 BUG-P5-1 — true when the cmdline is a read-only `ros2` CLI
+/// introspection query or the `_ros2_daemon` helper. Substring match
+/// (lowercased) against the joined cmdline; see
+/// [`ROS2_CLI_INTROSPECTION_MARKERS`] for the rationale and the
+/// deliberate exclusions (node-spawning + traffic-generating verbs).
+pub(crate) fn is_ros2_cli_introspection(cmdline: &[String]) -> bool {
+    if cmdline.is_empty() {
+        return false;
+    }
+    let joined = cmdline.join(" ").to_ascii_lowercase();
+    ROS2_CLI_INTROSPECTION_MARKERS
+        .iter()
+        .any(|m| joined.contains(m))
 }
 
 fn make_ros2_result(evidence: String) -> ClassificationResult {
@@ -899,5 +965,76 @@ mod tests {
         let result = classify(&s).expect("should classify");
         assert_eq!(result.workload_category, WorkloadCategory::ROS2);
         assert!(result.evidence.contains("ROS_DOMAIN_ID"));
+    }
+
+    // ────────────────────────────────────────────────────────────
+    // v1.1.4 BUG-P5-1 — `ros2` CLI introspection + daemon must NOT
+    // classify as ROS2 workloads. The CLI imports rclpy → loads
+    // librcl, so the library signal would otherwise over-classify
+    // them (transient `ros2` rows in the operator's screenshot).
+    // ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn ros2_topic_hz_cli_does_not_classify() {
+        // The exact shape B3's own sampler shells out, AND what an
+        // operator running `ros2 topic hz` by hand looks like. The
+        // real process is python3 running the ros2 CLI entrypoint.
+        let s = sample(
+            "ros2",
+            &[
+                "/usr/bin/python3",
+                "/opt/ros/humble/bin/ros2",
+                "topic",
+                "hz",
+                "/chatter",
+            ],
+        );
+        assert!(
+            classify(&s).is_none(),
+            "ros2 topic hz is a read-only CLI query, not a ROS2 workload",
+        );
+    }
+
+    #[test]
+    fn ros2_node_list_cli_does_not_classify() {
+        let s = sample("ros2", &["ros2", "node", "list"]);
+        assert!(classify(&s).is_none());
+    }
+
+    #[test]
+    fn ros2_daemon_helper_does_not_classify() {
+        let s = sample(
+            "_ros2_daemon",
+            &["/usr/bin/python3", "/opt/ros/humble/bin/_ros2_daemon"],
+        );
+        assert!(
+            classify(&s).is_none(),
+            "_ros2_daemon is infrastructure, not a workload",
+        );
+    }
+
+    #[test]
+    fn ros2_run_still_classifies_after_introspection_guard() {
+        // Node-spawning verb must keep classifying — the introspection
+        // guard must not catch `ros2 run`.
+        let s = sample("ros2", &["ros2", "run", "demo_nodes_cpp", "talker"]);
+        let result = classify(&s).expect("ros2 run must still classify");
+        assert_eq!(result.workload_category, WorkloadCategory::ROS2);
+    }
+
+    #[test]
+    fn ros2_topic_pub_still_classifies_after_introspection_guard() {
+        // Traffic-generating verb is NOT introspection — `ros2 topic
+        // pub` actively publishes, so it should keep classifying via
+        // the library/env signals (it's deliberately absent from the
+        // introspection marker list). Here it carries ROS_DOMAIN_ID
+        // so it classifies via the runtime env signal.
+        let s = sample_with_env(
+            "ros2",
+            &["ros2", "topic", "pub", "/chatter", "std_msgs/String"],
+            &[("ROS_DOMAIN_ID", "0")],
+        );
+        let result = classify(&s).expect("ros2 topic pub must still classify");
+        assert_eq!(result.workload_category, WorkloadCategory::ROS2);
     }
 }

@@ -286,8 +286,8 @@ pub trait TelemetrySource: Send + Sync {
     /// per-PID and have nothing to forget. B3 ROS2 shellout
     /// (`Ros2ShelloutSource`) overrides this to drop its
     /// `PerPidState` map entry — pre-v1.1.7 B3 relied on a 5-min
-    /// time-based GC sweep ([`Ros2ShelloutSource::sample`]'s
-    /// `ROS2_CACHE_GC_THRESHOLD`) which bounded the leak in time
+    /// time-based GC sweep at the top of B3's `sample` body
+    /// (`ROS2_CACHE_GC_THRESHOLD`) which bounded the leak in time
     /// but kept ghost entries for that whole window after PID
     /// death. The `on_forget` hook makes the clear prompt.
     ///

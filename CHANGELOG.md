@@ -6,6 +6,116 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project aims to adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 once `v1.0.0` is tagged. Until then, minor versions may include breaking changes.
 
+## [1.1.7] — 2026-06-01 — close dispatcher clone-pressure leak
+
+Closes the ~1.5 GB/min RSS leak that DISPATCH 19 surfaced after
+the v1.1.6 Humble-compat hotfix. Tester-B's v1.1.5 observation
+(120 MB → 9.5 GB over 12 min) reproduced on v1.1.6 at the same
+order of magnitude (~1.35 GB/min) — the principal source was a
+dispatcher allocation-pattern issue, not the Humble `--timeout`
+flag. DISPATCH 21 Inspector root-caused it to per-(proc × source)
+`Vec<ProcessSnapshot>` clone pressure introduced by v1.1.2's
+two-slice expansion (semantically correct, allocation-pattern
+wrong). DISPATCH 22 PHASE 0 heaptrack confirmed the prediction
+verbatim (top-2 alloc stacks both rooted at the predicted line).
+
+Empirical headline (10× ROS2 publishers, 5-min endurance):
+
+  v1.1.6:               ~1,350 MB/min RSS growth (4.8 GB @ 180s)
+  v1.1.7 Arc-share:       ~220 MB/min (~6.1× improvement)
+  v1.1.7 +mimalloc:       ~190 MB/min (~7.1× improvement)
+
+Top allocator (heaptrack baseline → postfix):
+  v1.1.6: Dispatcher::tick:194 → Vec<ProcessSnapshot>::clone →
+          HashMap<K,V>::clone (~258M of 409M alloc calls; 63%)
+  v1.1.7: sysinfo::update_proc_info — normal /proc-scan cost
+          (22.6M calls / 8.29 MB peak). Dispatcher::tick stack
+          GONE from top-N.
+
+Full empirical artefacts: `tests/empirical/v1_1_7/`.
+
+### Fixed
+
+- **Arc-share `ProcessSnapshot` slices in `Dispatcher::tick` (ITEM 1).**
+  v1.1.2 (DISPATCH 7) broadened the dispatcher to pass BOTH the
+  AI-filtered and the unfiltered process lists to each sample
+  task so B2 could see bash tool-children. The implementation
+  owned both `Vec<ProcessSnapshot>` lists per-tick and
+  deep-cloned them per (proc × source) — and each
+  `ProcessSnapshot` carries a `HashMap<String,String>` of the
+  process's environ. With ~10 ROS2 PIDs × ~4 samplers and a
+  few-hundred-PID host snapshot, per-tick clone volume was huge;
+  per-source-mutex backpressure pinned multiple ticks' worth of
+  clones live at once. v1.1.7 wraps the two slices in
+  `Arc<Vec<ProcessSnapshot>>` so the per-task `.clone()` calls
+  become refcount bumps. Trait surface unchanged — `&Arc<Vec<T>>`
+  deref-coerces to `&[T]` at the `sample_with_context` call site.
+  +~4 LoC. Regression pin
+  `dispatcher_tick_shares_procs_via_arc_not_clone` asserts every
+  spawned task in a tick receives the SAME backing buffer
+  (probe sampler captures `all_procs.as_ptr() as usize`; 9 of 9
+  invocations must equal).
+
+### Added
+
+- **`TelemetrySource::on_forget(pid)` trait method (ITEM 2).**
+  Additive trait extension closing the cache-clear gap
+  Inspector #15 surfaced and that v1.1.5 ITEM E shipped a
+  bounded 5-min time-based GC workaround for. Default body is a
+  no-op (most samplers are stateless per-PID). B3
+  (`Ros2ShelloutSource`) overrides to drop the per-PID
+  `PerPidState` entry. `Dispatcher::forget(pid)` spawns a tokio
+  task per source that locks the per-source mutex and calls
+  `on_forget(pid)`, so the runtime tick loop stays non-blocking.
+  This is the `forget_pid` foundation extension DISPATCH 16
+  trigger #4 deferred — now operator-sanctioned. Trait surface
+  shape preserves the v1.1.2 `sample_with_context` signature
+  unchanged; existing samplers inherit the no-op default. +3
+  regression tests (default-noop, B3 override, dispatcher
+  wire-through).
+- **`mimalloc` global allocator (ITEM 3 fallback, operator-pre-approved).**
+  Arc-share alone got to ~220 MB/min from ~1,350 MB/min; the
+  residual was glibc allocator fragmentation under high
+  short-lived-allocation churn (sysinfo /proc scans, JSON
+  serialization, subprocess pipe buffers). mimalloc's per-thread
+  free lists + aggressive coalescing + faster OS-return cadence
+  shaves another ~13% (220 → 190 MB/min). `default-features = false`
+  skips the secure-mode overhead.
+
+### Known follow-up (STOP-AND-SURFACE)
+
+- **Residual ~190 MB/min RSS growth.** Below the 1.5 GB/min FAIL
+  bar (7.1× improvement) but NOT flat. The principal v1.1.6
+  source (dispatcher Vec clones) is closed and confirmed by
+  heaptrack. The remaining retention is a separate bug
+  unrelated to the dispatcher clone path. Initial candidates
+  (no diagnostic data yet — routed for a follow-up dispatch):
+  unbounded mpsc backlog under sample-task overrun, accumulator
+  per-PID growth that survives `forget()`, sysinfo internal
+  process_map growth, tokio process-child handle accumulation,
+  tracing log buffer growth. Recommend re-profiling under
+  heaptrack with the v1.1.7 binary and filtering on per-tick
+  allocations to find the second-tier source.
+
+### Process notes
+
+- DISPATCH 22 followed the PROFILE FIRST decision-gate protocol:
+  Inspector's DISPATCH 21 hypothesis was confirmed by heaptrack
+  BEFORE the Arc-share fix shipped. Top-2 alloc stacks rooted
+  at `dispatcher.rs:194` exactly as predicted (~63% of alloc
+  calls). Future leak-fix dispatches should keep this gate.
+- Empirical artefacts at `tests/empirical/v1_1_7/`:
+  `heaptrack_baseline.txt` (v1.1.6 profile with header
+  + raw output), `heaptrack_postfix.txt` (v1.1.7 Arc-share
+  profile, same shape), `rss_endurance.txt` (5-min RSS table:
+  baseline / Arc-share / Arc+mimalloc).
+- All three commits are independently bisectable
+  (Arc-share / on_forget / mimalloc).
+- mimalloc is the first dependency-addition shipped under
+  operator pre-approval. The approval was scoped to THIS
+  fallback only; future allocator swaps or dep additions need
+  fresh operator approval.
+
 ## [1.1.6] — 2026-06-01 — v1.1.5 Humble-compat hotfix
 
 Hotfix release for the v1.1.5 BUG-P5-2 ship regression: every

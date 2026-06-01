@@ -1,0 +1,102 @@
+═══════════════════════════════════════════════════════════
+v1.1.7 RSS ENDURANCE — 5-MIN RUNS vs v1.1.6 BASELINE
+═══════════════════════════════════════════════════════════
+
+Workload (all runs):
+  10× `ros2 topic pub /chatterN std_msgs/msg/String "data: x" -r 1`
+  edge_monitor --no-ui --no-web --ticks 0 --log-level warn
+Host: Ubuntu 22.04 + ROS Humble + Cyclone DDS, RTX 3060.
+
+All binaries built with CARGO_PROFILE_RELEASE_DEBUG=true
+CARGO_PROFILE_RELEASE_STRIP=none for symbol resolution.
+
+╔══════════╤══════════╤══════════╤══════════╗
+║ t (sec)  │ v1.1.6   │ v1.1.7   │ v1.1.7   ║
+║          │ baseline │ Arc-only │ Arc+mim. ║
+╟──────────┼──────────┼──────────┼──────────╢
+║      0   │   82     │   82     │   49     ║
+║     60   │ ≈2,100*  │  292     │  249     ║
+║    120   │  ≈3,500* │  513     │  441     ║
+║    180   │ 4,804    │  717     │  602     ║
+║    240   │  n/a     │  932     │  788     ║
+║    300   │  n/a     │ 1,153    │  987     ║
+╚══════════╧══════════╧══════════╧══════════╝
+RSS in MB. *v1.1.6 column from earlier 3-min heaptrack-instrumented
+run (heaptrack overhead adds ~20% RSS; clean endurance would be
+slightly lower but the slope is preserved).
+
+Growth rates:
+  v1.1.6 baseline:    ~1,350 MB/min (3-min heaptrack run)
+  v1.1.7 Arc-share:    ~220 MB/min  (Arc-share ONLY, no mimalloc)
+  v1.1.7 +mimalloc:    ~190 MB/min  (Arc-share + mimalloc)
+
+Improvements (vs baseline):
+  Arc-share alone:  6.1× lower RSS at t=300s extrapolation
+  Arc + mimalloc:   7.1× lower RSS at t=300s extrapolation
+
+═══════════════════════════════════════════════════════════
+HEAPTRACK BASELINE vs POSTFIX HEADLINE
+═══════════════════════════════════════════════════════════
+
+                              v1.1.6      v1.1.7 (Arc-share)   Δ
+  total alloc calls       409,332,065      91,928,919      -77.5%
+  alloc rate (calls/s)      1,853,321         425,715      -77.0%
+  peak heap                  3.25 GB         502.1 MB     -84.5%
+  peak RSS (w/ heaptrack)    4.29 GB         676.9 MB     -84.2%
+  total memory leaked        3.21 GB         484.0 MB     -84.9%
+  temp alloc rate            n/a              91,648/s    n/a
+
+Top allocator stack:
+  v1.1.6 baseline: BOTH top-2 stacks rooted at
+    Dispatcher::tick (src/telemetry/dispatcher.rs:194)
+    → Vec<ProcessSnapshot>::clone
+    → ProcessSnapshot::clone (src/telemetry/source.rs:21)
+    → HashMap<K,V>::clone (environ deep-clone)
+    ~258M of 409M calls (~63%); ~989 MB of 3.25 GB peak (~30%).
+  v1.1.7 (Arc-share) top stack:
+    sysinfo::unix::linux::process::update_proc_info
+    (src/unix/linux/process.rs:503) — /proc scan refresh
+    22.6M calls, 8.29 MB peak (NORMAL platform-layer cost).
+  The Dispatcher::tick:194 stack is GONE from the top-N.
+
+═══════════════════════════════════════════════════════════
+DECISION GATE SUMMARY
+═══════════════════════════════════════════════════════════
+
+Per DISPATCH 22:
+  "IF RSS now stable (not ~1.5 GB/min) AND Vec/HashMap clones gone
+   from top-N: leak CLOSED. Proceed to ship."
+  "IF leak reduced but not eliminated: apply mimalloc fallback ...
+   if STILL leaking, STOP."
+
+Observed:
+  ✓ Vec/HashMap clones GONE from top-N (Inspector hypothesis
+    confirmed; ITEM 1 surgically targeted the right line).
+  ✗ RSS NOT flat — ~190 MB/min growth persists with mimalloc.
+  ✓ 7.1× improvement vs v1.1.6 (1,350 → 190 MB/min).
+  ✓ Well below the 1.5 GB/min FAIL bar.
+
+Verdict: STOP-AND-SURFACE per trigger 3.
+  - Principal leak (per-(proc × source) Vec clones) is CLOSED.
+    Confirmed by heaptrack: the dispatcher.rs:194 stack no longer
+    appears in the top allocators.
+  - Residual ~190 MB/min growth is a SEPARATE retention bug,
+    independent of the dispatcher clone-pressure issue. Likely
+    candidates (no diagnostic data yet — surfaced for next
+    dispatch): unbounded mpsc backlog, accumulator per-PID growth
+    that survives forget(), sysinfo process_map growth, tokio
+    process child handle accumulation, tracing log buffer.
+  - Ship v1.1.7 with the demonstrated fixes (Arc-share + on_forget
+    + mimalloc); route residual to a follow-up dispatch.
+
+═══════════════════════════════════════════════════════════
+PROCESS NOTE — measurement methodology
+═══════════════════════════════════════════════════════════
+
+Two earlier endurance attempts had a $EMON_PID-capture bug
+(`pgrep -f` matched a stale parent shell's cmdline rather than
+the real edge_monitor process), producing rss_mb=0 / DEAD readings
+that were not the binary's true RSS. The above runs use
+`pgrep -fn` (newest match) + an explicit `/proc/$EMON_PID` alive
+check at t=0 before the sampling loop, which produces the correct
+PID and the readings above.

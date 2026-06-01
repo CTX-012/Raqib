@@ -622,6 +622,14 @@ impl Runtime {
                         // `ProcessSample::ppid`; `None` for kernel
                         // threads or transient /proc race losses.
                         ppid: s.ppid,
+                        // v1.1.5 ITEM B (DISPATCH 16) — plumb the
+                        // classifier's verdict so samplers don't
+                        // re-derive it from cmdline. B4 embeddings
+                        // now gates on this instead of its own
+                        // `is_embeddings_cmdline`, picking up
+                        // script-file workloads the classifier
+                        // already tagged (D-B4-SCRIPT-ASYMMETRY).
+                        workload_category: Some(ann.workload_category),
                     })
                 })
                 .collect();
@@ -650,6 +658,13 @@ impl Runtime {
                         model_name: ann.model_name.clone(),
                         cpu_pct: ann.cpu_pct,
                         ppid: s.ppid,
+                        // v1.1.5 ITEM B — same plumb as live_ai.
+                        // For NotAi rows this carries
+                        // `Some(WorkloadCategory::Unknown)` (or
+                        // whatever the classifier set), so a
+                        // sampler keying on `Some(Embeddings)`
+                        // naturally doesn't fire on them.
+                        workload_category: Some(ann.workload_category),
                     })
                 })
                 .collect();

@@ -68,7 +68,6 @@
 //! tracked for B2.
 
 use std::collections::HashMap;
-use std::path::Path;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -90,32 +89,13 @@ const EMBEDDINGS_ACTIVE_CPU_PCT: f32 = 60.0;
 /// bridge the gaps). Shape mirrors B2's `AGENT_IDLE_WINDOW`.
 const EMBEDDINGS_IDLE_WINDOW: Duration = Duration::from_secs(12);
 
-/// Cmdline substring markers indicating an embeddings workload.
-/// Lowercased + substring-matched against the joined cmdline. Kept
-/// narrow: the classifier's stricter signals at
-/// `src/classifier/script_sniff.rs` are the authoritative source;
-/// these are the cmdline-observable subset reachable at sampler
-/// dispatch time without a `workload_category` field on
-/// `ProcessSnapshot`.
-// v1.1.4 P5-B4-CLASSIFY — kept in sync with the classifier's
-// embeddings keyword coverage (src/classifier/keyword_match.rs) so a
-// process the classifier tags as Embeddings is also one this sampler
-// will sample. Added flagembedding / nomic-embed / all-minilm /
-// jina-embeddings to match the classifier.
-const EMBEDDINGS_CMDLINE_MARKERS: &[&str] = &[
-    "sentence_transformers",
-    "sentence-transformers",
-    "flagembedding",
-    "bge-",
-    "gte-",
-    "e5-base",
-    "e5-large",
-    "e5-small",
-    "multilingual-e5",
-    "nomic-embed",
-    "all-minilm",
-    "jina-embeddings",
-];
+// v1.1.5 ITEM B (DISPATCH 16) — `applies_to` now reads
+// `proc.workload_category == Some(Embeddings)` directly. The classifier
+// is the single source of truth (script-sniff + extended keyword
+// coverage); the prior `EMBEDDINGS_CMDLINE_MARKERS` /
+// `is_embeddings_cmdline` re-derivation here would miss script-file
+// workloads that the classifier already tagged (D-B4-SCRIPT-
+// ASYMMETRY). The cmdline-substring list is retired.
 
 pub struct EmbeddingsCpuSource {
     /// PID → last `Instant` the workload read at or above
@@ -160,47 +140,6 @@ impl Default for EmbeddingsCpuSource {
     }
 }
 
-/// True when `cmdline` carries a token / substring that the
-/// classifier would treat as an embeddings signal. Matches the
-/// `script_sniff` markers reachable via cmdline (file paths,
-/// `python -m` invocations against known modules). Library-only
-/// signal coverage is deliberately not duplicated here.
-fn is_embeddings_cmdline(cmdline: &[String]) -> bool {
-    if cmdline.is_empty() {
-        return false;
-    }
-    let joined = cmdline.join(" ").to_ascii_lowercase();
-    if EMBEDDINGS_CMDLINE_MARKERS
-        .iter()
-        .any(|m| joined.contains(m))
-    {
-        return true;
-    }
-    // `python -m sentence_transformers …` is the most common live
-    // shape; explicit token scan covers cases where the joined
-    // lowercase substring scan above missed (e.g. quoting that
-    // splits the package name across argv elements).
-    cmdline.iter().enumerate().any(|(i, arg)| {
-        if arg == "-m"
-            && let Some(next) = cmdline.get(i + 1)
-        {
-            let lowered = next.to_ascii_lowercase();
-            return lowered.starts_with("sentence_transformers")
-                || lowered.starts_with("sentence-transformers");
-        }
-        // Path-style markers: a model file argument like
-        // `models/bge-large-en-v1.5/` or `--model bge-base-en`.
-        let basename = Path::new(arg)
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or(arg)
-            .to_ascii_lowercase();
-        EMBEDDINGS_CMDLINE_MARKERS
-            .iter()
-            .any(|m| basename.contains(m))
-    })
-}
-
 #[async_trait]
 impl TelemetrySource for EmbeddingsCpuSource {
     fn name(&self) -> &str {
@@ -208,7 +147,12 @@ impl TelemetrySource for EmbeddingsCpuSource {
     }
 
     fn applies_to(&self, proc: &ProcessSnapshot) -> bool {
-        is_embeddings_cmdline(&proc.cmdline)
+        // v1.1.5 ITEM B — gate on the classifier's verdict (plumbed
+        // through `ProcessSnapshot.workload_category` by DISPATCH
+        // 16). Picks up script-file embeddings workloads the
+        // classifier already tagged via script-sniff (the
+        // v1.1.4 D-B4-SCRIPT-ASYMMETRY gap).
+        proc.workload_category == Some(crate::model::WorkloadCategory::Embeddings)
     }
 
     async fn sample(&mut self, proc: &ProcessSnapshot) -> SourceResult<TelemetryFrame> {
@@ -227,6 +171,15 @@ mod tests {
     use std::collections::HashMap as StdMap;
 
     fn snap(pid: u32, cpu_pct: f32, cmdline: &[&str]) -> ProcessSnapshot {
+        snap_with_category(pid, cpu_pct, cmdline, None)
+    }
+
+    fn snap_with_category(
+        pid: u32,
+        cpu_pct: f32,
+        cmdline: &[&str],
+        workload_category: Option<crate::model::WorkloadCategory>,
+    ) -> ProcessSnapshot {
         ProcessSnapshot {
             pid,
             name: "python3".into(),
@@ -235,42 +188,78 @@ mod tests {
             model_name: None,
             cpu_pct,
             ppid: None,
+            workload_category,
         }
     }
 
-    /// `python -m sentence_transformers …` is the typical live
-    /// invocation. Joined-substring scan catches it.
+    // v1.1.5 ITEM B — B4's responsibility is now "fire iff
+    // `workload_category == Some(Embeddings)`"; cmdline matching
+    // moved to the classifier (keyword_match + script_sniff) and is
+    // covered by classifier tests there.
+
+    /// `python -m sentence_transformers …` invocation that the
+    /// classifier tagged as Embeddings — B4 fires.
     #[test]
-    fn applies_to_python_dash_m_sentence_transformers() {
+    fn applies_to_fires_on_embeddings_workload_category() {
         let s = EmbeddingsCpuSource::new();
-        let p = snap(
+        let p = snap_with_category(
             100,
             0.0,
             &["python3", "-m", "sentence_transformers", "encode"],
+            Some(crate::model::WorkloadCategory::Embeddings),
         );
         assert!(s.applies_to(&p));
     }
 
-    /// `--model bge-…` style invocation against a model path.
+    /// REGRESSION PIN for v1.1.4 → v1.1.5 D-B4-SCRIPT-ASYMMETRY: a
+    /// bare `python script.py` workload whose embeddings imports
+    /// live INSIDE the script file (no cmdline marker). The
+    /// classifier tags it Embeddings via script-sniff; under the
+    /// pre-v1.1.5 cmdline gate B4 silently skipped it (activity
+    /// null). Under the v1.1.5 workload_category gate B4 fires.
     #[test]
-    fn applies_to_bge_model_path() {
+    fn b4_fires_on_script_file_embeddings_via_workload_category() {
         let s = EmbeddingsCpuSource::new();
-        let p = snap(
+        // ASYMMETRIC: cmdline has no embedding marker, but the
+        // classifier-tagged `workload_category` says Embeddings —
+        // exactly the runtime asymmetry between sampler-input
+        // shapes that the pre-v1.1.5 cmdline-only gate missed.
+        let p = snap_with_category(
             100,
             0.0,
-            &[
-                "python3",
-                "encode.py",
-                "--model",
-                "/models/bge-large-en-v1.5",
-            ],
+            &["python3", "encode_server.py"],
+            Some(crate::model::WorkloadCategory::Embeddings),
         );
-        assert!(s.applies_to(&p));
+        assert!(
+            s.applies_to(&p),
+            "B4 must fire on script-file embeddings tagged by the \
+             classifier, not just cmdline-marker-bearing invocations",
+        );
     }
 
-    /// Non-embeddings python invocations must NOT classify.
+    /// Non-embeddings categories must NOT fire B4.
     #[test]
-    fn applies_to_rejects_non_embeddings_python() {
+    fn applies_to_rejects_other_workload_categories() {
+        let s = EmbeddingsCpuSource::new();
+        for category in [
+            crate::model::WorkloadCategory::LLM,
+            crate::model::WorkloadCategory::Vision,
+            crate::model::WorkloadCategory::ROS2,
+            crate::model::WorkloadCategory::Agent,
+            crate::model::WorkloadCategory::Unknown,
+        ] {
+            let p = snap_with_category(100, 95.0, &["python3", "x.py"], Some(category));
+            assert!(
+                !s.applies_to(&p),
+                "B4 must not fire on {category:?}",
+            );
+        }
+    }
+
+    /// `workload_category: None` (a snapshot whose classifier
+    /// verdict wasn't plumbed — test fixtures) must not fire B4.
+    #[test]
+    fn applies_to_rejects_none_category() {
         let s = EmbeddingsCpuSource::new();
         let p = snap(100, 0.0, &["python3", "train.py", "--lr", "0.001"]);
         assert!(!s.applies_to(&p));

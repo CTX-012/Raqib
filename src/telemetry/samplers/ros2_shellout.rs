@@ -93,6 +93,18 @@ use crate::telemetry::source::{
 // the topic set." Most ROS2 graphs change topics rarely.
 const ROS2_TOPIC_LIST_INTERVAL: Duration = Duration::from_secs(30);
 
+// v1.1.5 ITEM E (Inspector side-finding) — time-based GC threshold
+// for `PerPidState` entries. The dispatcher's `forget(pid)` does
+// not propagate to sources (adding `forget_pid` to TelemetrySource
+// is foundation work flagged by DISPATCH 16 trigger #4 and routed
+// to a future dispatch). Instead, B3 sweeps its own cache at the
+// top of `sample`: any entry whose `last_topic_list_at` is older
+// than 10× the topic-list refresh interval (5 min) is dropped.
+// Bounds the leak in time (not in PID count) — equivalent closure
+// property to the dispatcher-hook approach without the trait
+// extension.
+const ROS2_CACHE_GC_THRESHOLD: Duration = Duration::from_secs(60 * 5);
+
 // v1.1.5 ITEM D (BUG-P5-2) — per-tick short `ros2 topic echo --once
 // --timeout 1` probe. We only need to OBSERVE a message arrival;
 // no Hz computation required. 1 s per probe is the shortest cap
@@ -355,6 +367,14 @@ impl TelemetrySource for Ros2ShelloutSource {
 
     async fn sample(&mut self, proc: &ProcessSnapshot) -> SourceResult<TelemetryFrame> {
         let now = Instant::now();
+        // v1.1.5 ITEM E — sweep stale PerPidState entries before
+        // touching the cache for this PID. Bounds the leak in time
+        // independent of dispatcher forget propagation.
+        self.cache.retain(|_, st| {
+            st.last_topic_list_at
+                .map(|t| now.duration_since(t) < ROS2_CACHE_GC_THRESHOLD)
+                .unwrap_or(true) // cold-start entries (no list yet) are kept
+        });
         let state = self.cache.entry(proc.pid).or_default();
 
         // Refresh topic list per cadence (graphs change slowly).
@@ -735,9 +755,9 @@ mod tests {
         assert!(ROS2_ACTIVITY_STALENESS >= Duration::from_secs(30));
     }
 
-    /// v1.1.5 ITEM E preview: `forget(pid)` clears the per-PID
-    /// state. Pinned here as a sampler-side test; the dispatcher-
-    /// wiring test lives in dispatcher.rs.
+    /// v1.1.5 ITEM E — `forget(pid)` clears the per-PID state.
+    /// Inherent helper; the auto-GC sweep in `sample` covers the
+    /// "dispatcher never tells us to forget" case.
     #[test]
     fn forget_drops_per_pid_state() {
         let mut s = Ros2ShelloutSource::new();
@@ -748,5 +768,49 @@ mod tests {
         assert!(s.cache.contains_key(&7));
         s.forget(7);
         assert!(!s.cache.contains_key(&7));
+    }
+
+    /// v1.1.5 ITEM E — the cache GC threshold bounds the leak in
+    /// time. A stale entry whose `last_topic_list_at` is older than
+    /// the threshold is dropped on the next sample sweep. Test
+    /// exercises the sweep predicate directly (the `sample` method
+    /// can't be driven without a real `ros2` subprocess).
+    #[test]
+    fn b3_cache_gc_drops_stale_entries() {
+        let mut s = Ros2ShelloutSource::new();
+        let now = Instant::now();
+        // Stale PID — last_topic_list_at well past the threshold.
+        let stale = s.cache.entry(100).or_default();
+        stale.last_topic_list_at =
+            Some(now - ROS2_CACHE_GC_THRESHOLD - Duration::from_secs(1));
+        stale.topic_list = vec!["/old".into()];
+        // Fresh PID — well inside the threshold.
+        let fresh = s.cache.entry(200).or_default();
+        fresh.last_topic_list_at = Some(now);
+        fresh.topic_list = vec!["/new".into()];
+        // Cold-start entry (no list yet) — must be kept.
+        let cold = s.cache.entry(300).or_default();
+        cold.last_topic_list_at = None;
+
+        // The sweep predicate the production sample() applies:
+        s.cache.retain(|_, st| {
+            st.last_topic_list_at
+                .map(|t| now.duration_since(t) < ROS2_CACHE_GC_THRESHOLD)
+                .unwrap_or(true)
+        });
+
+        assert!(!s.cache.contains_key(&100), "stale entry must be dropped");
+        assert!(s.cache.contains_key(&200), "fresh entry must be kept");
+        assert!(s.cache.contains_key(&300), "cold-start entry must be kept");
+    }
+
+    /// Pin the GC threshold's "≥ 10× refresh interval" relationship —
+    /// a refactor that drops the GC threshold below the refresh
+    /// cadence would drop entries the next sample call is about to
+    /// touch.
+    #[test]
+    fn b3_cache_gc_threshold_is_well_above_refresh_interval() {
+        assert!(ROS2_CACHE_GC_THRESHOLD >= ROS2_TOPIC_LIST_INTERVAL * 10);
+        assert_eq!(ROS2_CACHE_GC_THRESHOLD, Duration::from_secs(60 * 5));
     }
 }

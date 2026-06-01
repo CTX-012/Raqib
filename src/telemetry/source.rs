@@ -58,6 +58,22 @@ pub struct ProcessSnapshot {
     /// field should treat `None` as "unknown parent", not as
     /// "no parent".
     pub ppid: Option<u32>,
+    /// Phase 2 / DISPATCH 16 / v1.1.5 ITEM B — the classifier's
+    /// `WorkloadCategory` verdict for this PID, surfaced onto the
+    /// snapshot so samplers don't have to re-derive it from
+    /// cmdline. v1.1.4 broadened the classifier (script-sniff +
+    /// extended keyword coverage) but B4 was still gating on its
+    /// own cmdline-substring `is_embeddings_cmdline` — script-file
+    /// embeddings workloads classified correctly but never got
+    /// sampled (activity null). DISPATCH 13B finding (D-B4-SCRIPT-
+    /// ASYMMETRY). Plumbed here so the classifier's verdict is the
+    /// single source of truth, mirroring how 1.5 plumbed cpu_pct
+    /// and 1.6 plumbed ppid.
+    ///
+    /// `None` for test fixtures that don't care; production
+    /// builders always pass `Some(...)` from
+    /// `AnnotatedProcess::workload_category`.
+    pub workload_category: Option<crate::model::WorkloadCategory>,
 }
 
 /// Phase 2 — per-category activity surfacing (DISPATCH 1 foundation).
@@ -316,6 +332,7 @@ mod tests {
             model_name: None,
             cpu_pct: 0.0,
             ppid: None,
+            workload_category: None,
         }
     }
 

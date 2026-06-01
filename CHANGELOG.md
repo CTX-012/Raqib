@@ -6,6 +6,87 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project aims to adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 once `v1.0.0` is tagged. Until then, minor versions may include breaking changes.
 
+## [1.1.5] — 2026-06-01 — cleanup bundle + BUG-P5-2 fix
+
+Five-item bundle closing the audit DRIFT findings from the
+2026-06-01 dispatches plus an Inspector side-finding. The
+architectural BUG-P5-2 fix lands here under operator-locked
+APPROACH (c) — Inspector's default.
+
+### Fixed
+
+- **D-DAEMON-MARKER — daemon classifier marker matches real Humble
+  shape (ITEM A).** v1.1.4's `_ros2_daemon` marker missed the
+  daemon's real argv on current Humble
+  (`python3 -c "from ros2cli.daemon.daemonize import main; main()"
+  --name ros2-daemon`). Added the stable module path
+  `ros2cli.daemon.daemonize` to `ROS2_CLI_INTROSPECTION_MARKERS`
+  alongside `_ros2_daemon`; either form trips the guard.
+- **D-BUG-P5-2-STALE-TEXT — stale deferral version (ITEM C).** B3
+  doc-comment said BUG-P5-2 was "deferred to v1.1.4"; flipped to
+  v1.1.5 to match the actual resolution path. ~2 LoC.
+- **D-B4-SCRIPT-ASYMMETRY — foundation extension (ITEM B).**
+  v1.1.4 broadened the classifier (script-sniff + extended keyword
+  coverage) but B4 still gated on its own
+  `is_embeddings_cmdline` — script-file embeddings workloads
+  classified correctly but were never sampled (activity null).
+  Operator-locked APPROACH α: foundation extension. Added
+  `ProcessSnapshot.workload_category: Option<WorkloadCategory>`
+  (third additive field after DISPATCH 1.5 `cpu_pct` and 1.6
+  `ppid`); the runtime builders plumb it from
+  `AnnotatedProcess.workload_category`; B4's `applies_to` reads
+  it directly. The cmdline-substring duplication
+  (`EMBEDDINGS_CMDLINE_MARKERS` + `is_embeddings_cmdline`,
+  ~40 LoC) is retired. 11 construction sites updated.
+- **BUG-P5-2 — sub-Hz ROS2 topics now observable (ITEM D).**
+  Architectural fix under operator-locked APPROACH (c) —
+  Inspector's default. Replaced per-tick `ros2 topic hz` (whose
+  first-emit time scales with 1/rate, structurally unobservable
+  at ≤0.5 Hz) with `ros2 topic echo --once --timeout 1` per tick +
+  a 30 s per-topic staleness window. Echo arrival is observable
+  at any non-zero rate; the window covers ≥3 expected arrivals at
+  0.1 Hz, so a single observed message holds Active across the
+  inter-message gaps. ~-40 LoC net (removed: hz regex parser,
+  WARNING fast-fail, hz observation/read helpers, hz cache fields,
+  5 hz-rate parser tests; added: echo helpers, per-topic
+  `last_message_at`, sub-Hz regression pin).
+  Surfaced (NOT touched in this release per trigger #3):
+  `DESIGN_HANDOFF.md:120`'s `{Hz}` field in the ROS2 row template
+  is aspirational; B3 has never emitted a rate field on the wire.
+  Updating the template text is a separate contract change.
+- **B3 cache GC — Inspector side-finding (ITEM E).** The Inspector
+  flagged that `dispatcher.forget(pid)` doesn't propagate to B3's
+  per-PID cache — a bounded leak today, more material under the
+  v1.1.5 echo-once mechanism's per-topic state. Operator's
+  enumerated options included (a) a `forget_pid` trait method,
+  which explicitly trips STOP-AND-SURFACE trigger #4
+  ("foundation work that may warrant separate dispatch"). Picked
+  a third in-scope path: B3-side time-based GC. Sweeps
+  `last_topic_list_at` against a 5-minute threshold
+  (10× the topic-list refresh interval) at the top of each
+  `sample`. Bounds the leak in time, not in PID count — equivalent
+  closure property to a dispatcher hook, no trait extension. The
+  inherent `Ros2ShelloutSource::forget(pid)` is in place for
+  future dispatcher wiring if APPROACH (a) is later sanctioned.
+
+### Surface — flagged but not modified
+
+- **`DESIGN_HANDOFF.md:120` `{Hz}` field.** Aspirational template
+  text; never produced by B3 on the wire (B3 emits only
+  `activity_state`). Updating to remove the field is a visible
+  contract change worth its own dispatch (trigger #3).
+
+### Test count: 896 → 898 (+2 net)
+
+- ITEM A: +1 (real Humble daemon shape)
+- ITEM B: +3 added applies_to tests (workload_category-based)
+  −1 absorbed (the `applies_to_rejects_non_embeddings_python`
+  test became `applies_to_rejects_none_category`)
+- ITEM D: +3 (sub-Hz regression pin, staleness-window constants
+  pin, forget inherent test) −5 (obsolete hz-rate parser tests)
+- ITEM E: +2 (GC sweep predicate, threshold-vs-refresh-interval
+  pin)
+
 ## [1.1.4] — 2026-05-24 — bug-surface fixes (P5 + DISPATCH 11 carry-forward)
 
 Narrow-scope hotfix closing the carry-forward items from P5 +

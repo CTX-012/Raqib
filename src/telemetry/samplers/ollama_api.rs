@@ -445,6 +445,7 @@ mod tests {
             model_name: None,
             cpu_pct: 0.0,
             ppid: None,
+            workload_category: None,
         }
     }
 
@@ -457,6 +458,7 @@ mod tests {
             model_name: Some(model.into()),
             cpu_pct,
             ppid: None,
+            workload_category: None,
         }
     }
 

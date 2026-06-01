@@ -275,6 +275,32 @@ pub trait TelemetrySource: Send + Sync {
     fn sample_timeout(&self) -> std::time::Duration {
         crate::telemetry::DEFAULT_SAMPLE_TIMEOUT
     }
+
+    /// v1.1.7 (DISPATCH 22 ITEM 2) — notify the sampler that the
+    /// runtime has forgotten `pid` (it exited and its `RunRecord`
+    /// has been persisted, or the operator killed it). Samplers
+    /// that cache per-PID state should drop the entry here so
+    /// stale data doesn't leak into a recycled PID.
+    ///
+    /// Default impl is a no-op: most samplers are stateless
+    /// per-PID and have nothing to forget. B3 ROS2 shellout
+    /// (`Ros2ShelloutSource`) overrides this to drop its
+    /// `PerPidState` map entry — pre-v1.1.7 B3 relied on a 5-min
+    /// time-based GC sweep ([`Ros2ShelloutSource::sample`]'s
+    /// `ROS2_CACHE_GC_THRESHOLD`) which bounded the leak in time
+    /// but kept ghost entries for that whole window after PID
+    /// death. The `on_forget` hook makes the clear prompt.
+    ///
+    /// Sync signature (not `async`): cache drops are O(1) HashMap
+    /// removals and don't need to await. The dispatcher acquires
+    /// the per-source `tokio::sync::Mutex` and calls this under
+    /// the guard.
+    ///
+    /// Foundation extension flagged by DISPATCH 16 trigger #4 and
+    /// Inspector #15 (cache-clear gap). Deliberately deferred in
+    /// v1.1.5 ITEM E (which shipped the GC sweep as a bounded
+    /// workaround); now landed under operator sanction.
+    fn on_forget(&mut self, _pid: u32) {}
 }
 
 /// Crash-isolated wrapper around `TelemetrySource::sample`. A
@@ -420,6 +446,24 @@ mod tests {
         assert_eq!(frame.tokens_per_sec, Some(42.0));
         // Default polyfill went through `sample` exactly once.
         assert_eq!(s.called, 1);
+    }
+
+    /// v1.1.7 ITEM 2 — default `on_forget` body is a no-op.
+    /// Samplers that don't override get a silent default that
+    /// matches every existing sampler's "no per-PID cache to
+    /// drop" reality. Pinned here so a future trait refactor
+    /// that tightens the default (e.g. requires explicit impl)
+    /// trips this test before breaking every downstream sampler.
+    #[test]
+    fn on_forget_default_body_is_a_noop() {
+        // StubSource carries no per-PID state. The default trait
+        // body runs and returns; no panic, no observable effect.
+        // The `called` counter stays at 0 (sample() not invoked).
+        let mut s = StubSource { called: 0 };
+        s.on_forget(7);
+        s.on_forget(8);
+        s.on_forget(u32::MAX);
+        assert_eq!(s.called, 0, "default on_forget must not invoke sample");
     }
 
     /// Spec test: a sampler that returns Permanent error stops being

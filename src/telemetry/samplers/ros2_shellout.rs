@@ -390,6 +390,17 @@ impl TelemetrySource for Ros2ShelloutSource {
             || joined.contains("rclpy")
     }
 
+    /// v1.1.7 ITEM 2 — promptly drop this PID's `PerPidState` when
+    /// the runtime notifies B3 that the PID is gone. Pre-v1.1.7 B3
+    /// relied on the 5-min time-based GC sweep at the top of
+    /// `sample` (v1.1.5 ITEM E) which bounded the leak in time but
+    /// left ghost cache entries live for the full window after PID
+    /// death. The dispatcher now acquires the per-source mutex and
+    /// calls this on every `Dispatcher::forget(pid)`.
+    fn on_forget(&mut self, pid: u32) {
+        self.cache.remove(&pid);
+    }
+
     async fn sample(&mut self, proc: &ProcessSnapshot) -> SourceResult<TelemetryFrame> {
         let now = Instant::now();
         // v1.1.5 ITEM E — sweep stale PerPidState entries before
@@ -840,6 +851,42 @@ mod tests {
         assert!(s.cache.contains_key(&7));
         s.forget(7);
         assert!(!s.cache.contains_key(&7));
+    }
+
+    /// v1.1.7 ITEM 2 (DISPATCH 22) — B3's `on_forget` trait
+    /// override drops the per-PID cache entry promptly when the
+    /// dispatcher signals a PID is gone. Pre-v1.1.7 the only
+    /// cleanup path was the 5-min `ROS2_CACHE_GC_THRESHOLD`
+    /// time-based sweep at the top of `sample`; ghost entries
+    /// stayed live for that whole window after PID death.
+    /// Inspector #15 side-finding.
+    ///
+    /// This test invokes the trait method (not the inherent
+    /// `forget` helper) to pin the trait-side surface.
+    #[test]
+    fn b3_on_forget_clears_pid_cache_promptly() {
+        use crate::telemetry::source::TelemetrySource;
+        let mut s = Ros2ShelloutSource::new();
+        // Seed: two PIDs with state; on_forget(13) should drop
+        // ONLY pid 13 — pid 27 stays.
+        for pid in [13u32, 27] {
+            let st = s.cache.entry(pid).or_default();
+            st.topic_list = vec![format!("/topic_{pid}")];
+            st.last_message_at
+                .insert(format!("/topic_{pid}"), Instant::now());
+        }
+        assert!(s.cache.contains_key(&13));
+        assert!(s.cache.contains_key(&27));
+        TelemetrySource::on_forget(&mut s, 13);
+        assert!(
+            !s.cache.contains_key(&13),
+            "on_forget(13) must drop pid 13's PerPidState entry — \
+             pre-v1.1.7 the only cleanup was the 5-min GC sweep",
+        );
+        assert!(
+            s.cache.contains_key(&27),
+            "on_forget(13) must NOT touch unrelated PIDs",
+        );
     }
 
     /// v1.1.5 ITEM E — the cache GC threshold bounds the leak in

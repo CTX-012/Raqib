@@ -349,9 +349,26 @@ impl Dispatcher {
 
     /// Drop accumulator state for `pid` after persisting the record.
     /// Prevents stale data leaking into a recycled PID.
+    ///
+    /// v1.1.7 ITEM 2 (DISPATCH 22) — also notify every
+    /// [`TelemetrySource`] via [`TelemetrySource::on_forget`] so
+    /// samplers can drop per-PID caches promptly instead of waiting
+    /// for a periodic GC sweep (e.g. B3's pre-v1.1.7 5-min
+    /// `ROS2_CACHE_GC_THRESHOLD`). The notifications are spawned
+    /// on the runtime so this method stays non-blocking — the
+    /// per-source mutex is held by the sample task in flight (if
+    /// any) and we don't want `forget` to stall the runtime tick
+    /// loop waiting for it.
     pub fn forget(&mut self, pid: u32) {
         self.accumulator.forget(pid);
         self.cold_load.forget(pid);
+        for source in &self.sources {
+            let source = source.clone();
+            self.runtime.spawn(async move {
+                let mut guard = source.lock().await;
+                guard.on_forget(pid);
+            });
+        }
     }
 
     /// Read-only handle to the accumulator (UI may want this for the
@@ -759,6 +776,78 @@ mod tests {
                 .push(all_procs.as_ptr() as usize);
             Ok(TelemetryFrame::new(p.pid))
         }
+    }
+
+    /// Probe sampler that records the PIDs passed to `on_forget`
+    /// into a shared `Mutex<Vec<u32>>`. Used by
+    /// `dispatcher_forget_wires_through_to_source_on_forget` to
+    /// verify the v1.1.7 ITEM 2 wire-through.
+    struct OnForgetProbe {
+        forgotten: Arc<std::sync::Mutex<Vec<u32>>>,
+    }
+    #[async_trait]
+    impl TelemetrySource for OnForgetProbe {
+        fn name(&self) -> &str {
+            "on-forget-probe"
+        }
+        fn applies_to(&self, _: &ProcessSnapshot) -> bool {
+            false // never sampled; we only exercise the forget path
+        }
+        async fn sample(&mut self, _: &ProcessSnapshot) -> SourceResult<TelemetryFrame> {
+            unreachable!("OnForgetProbe::sample should never be invoked")
+        }
+        fn on_forget(&mut self, pid: u32) {
+            self.forgotten.lock().unwrap().push(pid);
+        }
+    }
+
+    /// v1.1.7 ITEM 2 (DISPATCH 22) — `Dispatcher::forget(pid)` must
+    /// notify every registered source via `on_forget(pid)`. The
+    /// notification is spawned on the runtime (the per-source
+    /// mutex may be held by a sample task in flight), so the
+    /// assertion polls briefly for the side-effect to land.
+    ///
+    /// Pre-v1.1.7 B3 relied on a 5-min time-based GC sweep
+    /// (`ROS2_CACHE_GC_THRESHOLD`) — bounded the leak in time but
+    /// kept ghost cache entries live for the full window after
+    /// PID death. The wire-through this test pins makes the clear
+    /// prompt: as soon as `runtime.rs` calls `d.forget(pid)` after
+    /// persisting the exit summary, the per-source cache drops.
+    #[test]
+    fn dispatcher_forget_wires_through_to_source_on_forget() {
+        let forgotten_a = Arc::new(std::sync::Mutex::new(Vec::<u32>::new()));
+        let forgotten_b = Arc::new(std::sync::Mutex::new(Vec::<u32>::new()));
+        let mut d = Dispatcher::new(vec![
+            Box::new(OnForgetProbe {
+                forgotten: forgotten_a.clone(),
+            }),
+            Box::new(OnForgetProbe {
+                forgotten: forgotten_b.clone(),
+            }),
+        ])
+        .unwrap();
+        d.forget(42);
+        // Poll briefly — the on_forget call is spawned on the
+        // tokio runtime to avoid blocking the tick loop.
+        let start = std::time::Instant::now();
+        while start.elapsed() < StdDuration::from_secs(2) {
+            if !forgotten_a.lock().unwrap().is_empty()
+                && !forgotten_b.lock().unwrap().is_empty()
+            {
+                break;
+            }
+            std::thread::sleep(StdDuration::from_millis(20));
+        }
+        assert_eq!(
+            *forgotten_a.lock().unwrap(),
+            vec![42],
+            "source A must observe on_forget(42)",
+        );
+        assert_eq!(
+            *forgotten_b.lock().unwrap(),
+            vec![42],
+            "source B must observe on_forget(42)",
+        );
     }
 
     /// v1.1.7 ITEM 1 (DISPATCH 22) — every task the dispatcher

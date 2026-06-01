@@ -132,7 +132,17 @@ const ROS2_CLI_INTROSPECTION_MARKERS: &[&str] = &[
     "ros2 wtf",
     // The ROS2 daemon helper — a long-lived Python process that
     // links librcl but is infrastructure, not a workload.
+    //
+    // v1.1.5 D-DAEMON-MARKER (DRIFT finding from the 2026-06-01
+    // audit dispatches): on real Humble the daemon's argv is
+    // `python3 -c "from ros2cli.daemon.daemonize import main;
+    // main()" --name ros2-daemon`, not the bare `_ros2_daemon`
+    // path shape. The bare path catches some older shapes; the
+    // stable module path `ros2cli.daemon.daemonize` is the
+    // belt-and-braces guard for current Humble. Both are kept so
+    // either form trips the guard.
     "_ros2_daemon",
+    "ros2cli.daemon.daemonize",
 ];
 
 /// Library basenames that signal ROS2 linkage. Looked up as
@@ -1065,6 +1075,34 @@ mod tests {
         assert!(
             classify(&s).is_none(),
             "_ros2_daemon is infrastructure, not a workload",
+        );
+    }
+
+    /// v1.1.5 D-DAEMON-MARKER — the daemon's real Humble argv shape
+    /// is `python3 -c "from ros2cli.daemon.daemonize import main;
+    /// main()" --name ros2-daemon`, which the v1.1.4
+    /// `_ros2_daemon` marker did NOT catch (no `_ros2_daemon`
+    /// substring in argv). The audit dispatches found the daemon
+    /// still showing as a transient ROS2 workload on the
+    /// operator's host. The stable module path
+    /// `ros2cli.daemon.daemonize` is now in the marker list and
+    /// catches this shape.
+    #[test]
+    fn real_humble_daemon_cmdline_does_not_classify() {
+        let s = sample(
+            "ros2-daemon",
+            &[
+                "python3",
+                "-c",
+                "from ros2cli.daemon.daemonize import main; main()",
+                "--name",
+                "ros2-daemon",
+            ],
+        );
+        assert!(
+            classify(&s).is_none(),
+            "the real Humble daemon cmdline (ros2cli.daemon.daemonize) \
+             must be guarded out — this was the v1.1.5 DRIFT finding",
         );
     }
 

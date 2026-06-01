@@ -7,6 +7,20 @@
 //! All pipeline types are re-exported from the library crate; this file
 //! only orchestrates.
 
+// v1.1.7 ITEM 3 fallback (DISPATCH 22, operator-pre-approved) —
+// mimalloc as the global allocator. ITEM 1's Arc-share fix dropped
+// per-tick clone pressure ~85%, but the 5-min RSS endurance against
+// 10× ROS2 publishers still showed ~220 MB/min growth from glibc
+// allocator fragmentation under high short-lived-allocation churn
+// (sysinfo /proc scans, JSON serialization, subprocess pipe buffers).
+// mimalloc tracks free lists per-thread, coalesces aggressively, and
+// returns pages to the OS on a faster cadence — closes the residual
+// gap without a sampler-by-sampler allocation audit. Default features
+// disabled to skip secure-mode overhead (not relevant here) and the
+// experimental override layer.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};

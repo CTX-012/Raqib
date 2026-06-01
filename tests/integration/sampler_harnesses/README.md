@@ -12,6 +12,7 @@ logic was correct against the fixture and wrong against reality.
 |---|---|---|
 | B1 digest-vs-name | v1.1.0 | Fixture set `my_model` and `loaded` to the *same* string. Reality: `model_extract` gives the runner's **blob digest** (`sha256-eb2c71…`); `/api/ps` gives the **model name** (`smollm:135m`). Never equal → activity locked to NotDetected. |
 | B2 bash-child invisibility | v1.1.1 | Fixture passed the bash child in the sampler's input slice. Reality: `runtime.rs` filters to `AICategory != NotAi` before `tick`, and `bash` is `NotAi` → absent from `ai_procs`. Sampler read `ai_procs`, saw no children → activity locked to Idle. |
+| B3 `--timeout` Humble-reject | v1.1.5 | Harness tested `ros2 topic hz`; production code shelled `ros2 topic echo --once --timeout <T>`. Harness silently passed because it never invoked the actual subprocess shape. Humble's `ros-humble-ros2cli 0.18.18` rejected `--timeout` (added in Iron/Jazzy/Rolling) — every probe failed `unrecognized arguments`, every topic locked to Idle. Caught by Tester-B; v1.1.6 ITEM 1 dropped the flag, ITEM 2 (this rewrite) makes the harness mirror the real shape. |
 
 A **production-shape harness** closes this class: instead of
 hand-building the sampler's input, it spawns a *real* workload, runs
@@ -61,10 +62,12 @@ list non-empty within timeout?) against real data, not a fixture.
   claude PID is `NotAi` and therefore absent from the AI-filtered
   slice, so a child-detecting sampler MUST read `all_procs` not
   `ai_procs` — the v1.1.1 bug.
-- `b3_ros2_harness.sh` — measures real `ros2 topic hz` first-line
-  latency vs publisher rate and checks it against the sampler's
-  inner timeout — surfaces the 1 Hz-marginal / sub-Hz-timeout
-  finding empirically rather than assuming a fixed probe time.
+- `b3_ros2_harness.sh` — v1.1.6 rewrite. Spawns the EXACT B3
+  subprocess shape (`ros2 topic echo --once <topic>`, no
+  `--timeout` — see v1.1.6 ITEM 1) against a live publisher,
+  measures first-message latency vs `ROS2_SHELLOUT_TIMEOUT`, AND
+  guards against Humble re-supporting `--timeout` (asserts
+  `--once --timeout 1` STILL fails on the host).
 
 Each script is self-contained, read-only against `src/`, runs
 locally (see "Host dependencies" + "How to run locally" below), and
@@ -93,18 +96,32 @@ present in all_procs slice (unfiltered)?             TRUE
   → FAIL surfaced before ship.
 ```
 
-### B3 (P5 finding — refinement, not a ship bug)
+### B3 (v1.1.5 ship bug — `--timeout` Humble-reject)
 ```
-$ INNER=5 ./b3_ros2_harness.sh
-1Hz topic first-rate-line latency: 4.90s   inner timeout: 5.0s   margin: 0.10s
-  → marginal; under load/jitter a 1Hz topic intermittently times out.
-0.5Hz: 6.83s > 5.0s → TIMES OUT.
-  → surfaces the timeout-too-tight refinement empirically.
+$ ./b3_ros2_harness.sh
+GUARD OK: Humble ros2cli rejects `--timeout` on `topic echo` (rc=2).
+rate=1Hz  first-message=1.04s  inner-timeout=3s  margin=1.96s
+PASS: echo-once observes a message in 1.04s with 1.96s margin under the 3s inner timeout.
 ```
-v1.1.3 raised `ROS2_SHELLOUT_TIMEOUT` 5s → 8s on this finding (run
-the harness with the default `INNER=8` to confirm 1 Hz now clears
-with margin). Sub-Hz topics remain structurally unobservable even
-at 8s — tracked as BUG-P5-2 for v1.1.4.
+Pre-v1.1.6 the harness invoked `ros2 topic hz` and PASSED green
+against the broken v1.1.5 `ros2 topic echo --once --timeout <T>`
+invocation — the harness-drift gap the harness exists to prevent.
+v1.1.6 ITEM 2 makes the harness mirror the EXACT B3 invocation +
+adds a Humble-compat guard step (rc != 0 + stderr mentions
+`--timeout`) so a future re-introduction of the flag fails the
+harness on Humble. See `b3_echo_once_no_timeout_flag_detects_active_topic`
+in `src/telemetry/samplers/ros2_shellout.rs` for the Rust-side
+regression pin.
+
+### B3 prior P5 finding — refinement, not a ship bug
+v1.1.3 raised `ROS2_SHELLOUT_TIMEOUT` 5s → 8s on a 1 Hz-marginal /
+sub-Hz-timeout finding from the `ros2 topic hz` mechanism. v1.1.5
+ITEM D replaced the mechanism with `ros2 topic echo --once` +
+30 s staleness window — first-message latency at 1 Hz is now ~1 s
+(no minimum-3-message wait), so `INNER` came back down to 3 s. The
+"sub-Hz topics are structurally unobservable" property the hz
+mechanism had is gone — echo-arrival is observable at any non-zero
+rate; the staleness window decides Active vs Idle.
 
 ## Host dependencies
 
@@ -137,8 +154,8 @@ PORT=7273 MODEL=smollm:135m ./b1_ollama_harness.sh
 # B2 — needs a claude agent running (e.g. this very session)
 PORT=7273 ./b2_agent_claude_harness.sh
 
-# B3 — needs ROS2 sourced; defaults to the v1.1.3 8s inner timeout
-RATE=1 INNER=8 ROS_SETUP=/opt/ros/humble/setup.bash ./b3_ros2_harness.sh
+# B3 — needs ROS2 sourced; defaults to the v1.1.6 3s inner timeout
+RATE=1 INNER=3 ROS_SETUP=/opt/ros/humble/setup.bash ./b3_ros2_harness.sh
 ```
 
 Each prints its captured real-world values and a final `PASS:` or

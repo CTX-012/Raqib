@@ -6,6 +6,112 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project aims to adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 once `v1.0.0` is tagged. Until then, minor versions may include breaking changes.
 
+## [1.1.6] — 2026-06-01 — v1.1.5 Humble-compat hotfix
+
+Hotfix release for the v1.1.5 BUG-P5-2 ship regression: every
+`ros2 topic echo` probe failed on Humble (`unrecognized arguments:
+--timeout`) and every ROS2 row locked to Idle. The v1.1.5 tag was
+retracted (local + remote, `git tag -d v1.1.5` + `git push origin
+:refs/tags/v1.1.5`); the merge commit is preserved on the branch
+and this release fixes forward. Caught by Tester-B (DISPATCH 17B).
+
+Two demonstrated fixes shipped; two follow-on items
+(STOP-AND-SURFACE under the dispatch's architectural-issue clause)
+left open for a follow-up dispatch — see "Known follow-ups" below.
+
+### Fixed
+
+- **CRITICAL — `--timeout` flag dropped from B3 echo invocation
+  (ITEM 1).** Humble's `ros-humble-ros2cli 0.18.18` does NOT
+  support `--timeout` on `topic echo` (the flag was added in
+  Iron / Jazzy / Rolling). v1.1.5 shipped with `ros2 topic echo
+  --once --timeout <T> <topic>` and every probe failed with
+  `unrecognized arguments: --timeout` → `last_message_at` never
+  updated → every ROS2 topic locked to Idle. v1.1.6 invokes
+  `ros2 topic echo --once <topic>`; the per-probe cap is now the
+  outer `ROS2_SHELLOUT_TIMEOUT` (3 s tokio wrap) plus `--once`
+  self-termination. Verified on the v1.1.6 dev host —
+  `ros2 topic echo --help` lists `--once` but not `--timeout`.
+  The dead `ROS2_ECHO_PROBE_TIMEOUT` constant was removed; the
+  module-header doc-comment records the v1.1.6 ITEM 1 rationale.
+  ~10 LoC. Regression-pin test:
+  `b3_echo_once_no_timeout_flag_detects_active_topic` — args
+  extracted into `ros2_echo_args`; test asserts the list contains
+  `--once` and the topic and does NOT contain `--timeout`.
+
+### Changed
+
+- **B3 production-shape harness mirrors the v1.1.6 echo-once
+  shape (ITEM 2).** Closes the harness-drift gap that hid the
+  v1.1.5 regression. The pre-v1.1.6 `b3_ros2_harness.sh` tested
+  `ros2 topic hz` (the v1.1.4 mechanism) and passed green against
+  the broken v1.1.5 echo-once subprocess — because it never
+  invoked that shape. The rewrite spawns the EXACT B3 invocation
+  against a live publisher AND adds a Humble-compat GUARD step
+  that asserts `ros2 topic echo --once --timeout 1 <topic>` STILL
+  fails on the host (so a future ros2cli backport adding the flag
+  trips the harness for re-evaluation). First live-validated state
+  of the B3 harness; v1.1.3 shipped it DRAFTED-not-live-validated.
+  Live run on the dev host:
+  `GUARD OK: Humble ros2cli rejects --timeout on topic echo (rc=2).
+  rate=1Hz first-message=.847s margin=2.15s under the 3s inner.`
+  `tests/integration/sampler_harnesses/README.md` updated: bug-table
+  row added for the v1.1.5 ship bug; B3 examples re-shaped around
+  the v1.1.6 invocation; `INNER` default lowered 8 s → 3 s.
+- Also fixed a `set -e` trap in the harness: `((wait_count++))`
+  returns 0 the first iteration and trips `set -e`; replaced with
+  the arithmetic-assignment form.
+
+### Known follow-ups (STOP-AND-SURFACE)
+
+The DISPATCH 19 work surfaced two items the hotfix scope cannot
+absorb without a deeper investigation pass. Both are filed as
+follow-up dispatch input rather than shipped fixes:
+
+- **RSS growth — ITEM 3 Step C.** Tester-B observed v1.1.5
+  growing 120 MB → 9.5 GB over 12 min (~1 GB/min) against ~10
+  live ROS2 publishers. ITEM 3 Step A re-measured v1.1.6 ITEM 1
+  on the same host: 8.4 GB at ~5.5 min (~1.5 GB/min) — leak
+  survives the `--timeout` fix and is at the same order of
+  magnitude whether echo probes succeed (v1.1.6) or fail fast
+  (v1.1.5). Initial code-reading flags `Dispatcher::tick` in
+  `src/telemetry/dispatcher.rs:170-233` as a likely contributor:
+  every (proc × source) combination clones the full `all_procs`
+  and `ai_procs` `Vec<ProcessSnapshot>`s for its spawned task.
+  With ~10 ROS2 PIDs × 4–5 samplers per tick and a few hundred
+  PIDs per snapshot, per-tick clone volume is large; if per-source
+  mutex backpressure pushes pending tasks across ticks, multiple
+  ticks' worth of clones accumulate. Candidate fix: switch the
+  per-task `Vec<ProcessSnapshot>` clones to `Arc<Vec<…>>` so all
+  tasks of a tick share one allocation. Confidence: medium —
+  consistent with the slope but not heap-profiler-confirmed.
+  Routed to a follow-up dispatch for heap-profiling +
+  architectural review (the user has flagged dispatcher rework
+  as larger than a hotfix can absorb).
+- **Killed-PID ghost rows — ITEM 4.** Operator observed rows
+  for killed publishers persisting 10+ s in the workloads panel.
+  Initial investigation: `src/lifecycle/tracker.rs` correctly
+  clears exited PIDs from `self.previous` after the post-exit
+  tick (the agent hypothesis that lifecycle was the source is
+  disproven by reading lines 33–69 directly). The persistence is
+  elsewhere — most likely a stale read from
+  `RuntimeState::live_telemetry` (`src/runtime.rs`) or the
+  wire-layer cache (`src/web/wire.rs`). The
+  `forget_pid`-trait-method approach was deliberately avoided
+  in v1.1.5 ITEM E (DISPATCH 16 trigger #4 territory); whether
+  this fix needs that foundation extension depends on where the
+  retention actually lives. Routed to a follow-up dispatch.
+
+### Process notes
+
+- v1.1.5 tag retracted (`git tag -d v1.1.5` + `git push origin
+  :refs/tags/v1.1.5`); merge commit preserved on the branch
+  (second retraction in the v1.1.x series, after v1.1.0 — same
+  fix-forward protocol).
+- The dispatch's STOP-AND-SURFACE clause was exercised for the
+  first time on architectural-feeling items; see "Known
+  follow-ups" above.
+
 ## [1.1.5] — 2026-06-01 — cleanup bundle + BUG-P5-2 fix
 
 Five-item bundle closing the audit DRIFT findings from the

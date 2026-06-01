@@ -88,7 +88,7 @@ pub struct PlatformSnapshot {
 /// `linux_proc::ProcessCollector` is the actual process source,
 /// and we only read memory fields off the System anyway). The
 /// long-lived `System` plus a targeted `sys.refresh_memory()`
-/// inside [`collect_system_metrics`] eliminates that wasted work
+/// inside `collect_system_metrics` eliminates that wasted work
 /// (~22.6M alloc calls in 90s under the 10× ROS2-publisher
 /// workload per DISPATCH 22 PHASE 0 → ~0).
 pub fn collect_snapshot(sys: &mut sysinfo::System) -> PlatformResult<PlatformSnapshot> {

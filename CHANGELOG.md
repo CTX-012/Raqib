@@ -6,6 +6,126 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project aims to adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 once `v1.0.0` is tagged. Until then, minor versions may include breaking changes.
 
+## [1.1.8] — 2026-06-01 — partial residual leak fix + STOP-AND-SURFACE
+
+DISPATCH 25 follow-up on the v1.1.7 STOP-AND-SURFACE filing
+(~190 MB/min residual). Inspector (DISPATCH 24) ranked candidate
+(4) "tokio `Child` handle leak from `kill()` without `wait()`"
+as the strongest hypothesis; PHASE 0 /proc diagnostic (heaptrack
+turned out blind to mimalloc on v1.1.7 — see "Process notes"
+below) observed 226 `anon_inode:[eventfd]` FDs at t=185s under
+the 10× ROS2-publisher workload, growing ~1 FD/sec, consistent
+with the candidate.
+
+The two specified fixes shipped. Endurance after both fixes:
+
+  v1.1.7 (Arc + mimalloc):    ~190 MB/min
+  v1.1.8 (ITEM 1 + ITEM 2):   ~166 MB/min   (~13% improvement)
+  Inspector target:           < 50 MB/min   (NOT MET)
+
+Per DISPATCH 25 STOP-AND-SURFACE trigger 4 (residual >100 MB/min),
+the residual is filed for a follow-up dispatch with a concrete
+diagnostic-tools list. Full empirical artefacts at
+`tests/empirical/v1_1_8/`.
+
+### Fixed
+
+- **B3 `child.wait().await` reap + 500 ms guard (ITEM 1).**
+  Pre-v1.1.8 `observe_topic_echo` spawned a `ros2 topic echo
+  --once <topic>` subprocess per probe, called `child.kill()`,
+  and dropped the handle without `wait()`. tokio's documented
+  best-effort reaper (tokio-rs/tokio#2685) does not guarantee
+  prompt release of per-`Child` state without an explicit
+  `wait()`; v1.1.8 adds it with a 500 ms guard
+  (`ROS2_CHILD_REAP_GUARD`, well below the 3 s per-probe
+  `ROS2_SHELLOUT_TIMEOUT`). Empirical: ITEM 1 did NOT close the
+  eventfd leak on its own — the eventfd growth rate is
+  essentially unchanged (~1 FD/s). It does drain the child
+  process cleanly (zero zombies in either run), so the fix is
+  correct as a defensive measure but the candidate-(4) hypothesis
+  is REFUTED as the principal driver. The follow-up dispatch
+  needs `strace -e eventfd2` / `bpftrace ustack` / `lsof` to
+  attribute the eventfd creation to its real source. Regression
+  pin: `b3_echo_reaps_child_with_wait` (constant + invariant).
+
+### Changed
+
+- **Long-lived `sysinfo::System` + targeted memory refresh (ITEM 2).**
+  Pre-v1.1.8 `platform::collect_system_metrics` built a fresh
+  `sysinfo::System::new_all()` per tick and called `refresh_all()`
+  — on Linux that walks every PID in /proc and allocates a
+  sysinfo `ProcessSample`-equivalent per process AND does a
+  global CPU usage refresh, despite the function reading only
+  the memory fields off the `System`. Inspector estimated
+  ~1000× alloc reduction for this fix alone. v1.1.8 makes the
+  `System` long-lived (owned by `Runtime` via a new
+  `sys_for_metrics` field, initialised by
+  `platform::new_system_for_metrics()` with
+  `RefreshKind::nothing().with_memory(MemoryRefreshKind::everything())`).
+  Per-tick now calls only `sys.refresh_memory()`.
+
+  CPU-count disposition: `sys.cpus().len()` on the targeted-
+  refresh System returns 0 (the cpu list is only populated by
+  `refresh_cpu_*`, verified against sysinfo-0.38.4 source). We
+  use `std::thread::available_parallelism().map(|n|
+  n.get()).unwrap_or(1)` — the std-library answer, no state,
+  no extra refresh. Regression pin:
+  `collect_system_metrics_with_targeted_refresh_populates_memory`
+  (consecutive refreshes on the same `System` must agree on
+  `total_memory`, `cpu_count > 0`). Touch confined to
+  `src/platform/mod.rs` + `src/runtime.rs` (2 files).
+
+### Known follow-up (STOP-AND-SURFACE — trigger 4)
+
+- **Residual ~166 MB/min RSS growth + 1 FD/sec eventfd leak.**
+  Above DISPATCH 25's 100 MB/min trigger; well above the
+  Inspector target of <50 MB/min. The leak is NOT principally
+  driven by tokio's per-`Child` reaper as DISPATCH 24
+  hypothesised — adding `child.wait()` did not change the
+  eventfd growth rate. Top remaining candidates the next
+  dispatch should investigate, prioritised by allocation
+  cadence (the leak grows at exactly tick-rate):
+    1. tokio runtime scheduler park/unpark eventfds — verify
+       worker thread count is stable per spawn
+    2. tokio process driver inner signal-handler registration
+       — even with `pidfd_open` for `Child`, an inner
+       driver-side eventfd may be per-spawn
+    3. mimalloc's per-thread state reclaim — mimalloc spawns
+       a background thread under high churn; each owns an
+       eventfd
+    4. The audit writer's persistent file-handle wakeup
+       mechanism
+  Required diagnostic tools for the follow-up:
+    - `strace -e trace=eventfd2,signalfd,timerfd_create -f -p $PID`
+      captures eventfd creation real-time
+    - `bpftrace -e 'tracepoint:syscalls:sys_enter_eventfd2 \
+       /comm=="edge_monitor"/ { @[ustack(perf)] = count(); }'`
+      attributes the creations to backtraces
+    - `lsof -p $PID` shows the user-side opener of each FD
+
+### Process notes
+
+- **heaptrack is BLIND to v1.1.7+ allocations.** mimalloc
+  bypasses libc malloc and mmap()s pages directly; heaptrack's
+  LD_PRELOAD hook intercepts libc malloc only. The DISPATCH 25
+  PHASE 0 run reported 290 KB peak heap / 72 KB leaked under a
+  1.78 GB RSS run — useless as a decision gate. The diagnostic
+  shifted to /proc-based snapshotting (smaps_rollup, fd type
+  inventory, child process state, thread count, mmap region
+  count) which observes kernel-side resource accumulation
+  directly. Future leak-fix dispatches on v1.1.7+ binaries
+  should either bring a `#[cfg(feature = "diag-glibc-alloc")]`
+  toggle to swap mimalloc out for the diagnostic build, OR
+  skip heaptrack and lean on /proc + syscall tracing.
+- All three commits (ITEM 1, ITEM 2, polish) are independently
+  bisectable.
+- Empirical artefacts at `tests/empirical/v1_1_8/`:
+  `heaptrack_baseline.txt` (the methodology-shift note + both
+  heaptrack and /proc baseline numbers),
+  `rss_endurance.txt` (5-min RSS + eventfd table for v1.1.7
+  reference and v1.1.8 postfix, with the verdict + diagnostic
+  tools the next dispatch needs).
+
 ## [1.1.7] — 2026-06-01 — close dispatcher clone-pressure leak
 
 Closes the ~1.5 GB/min RSS leak that DISPATCH 19 surfaced after

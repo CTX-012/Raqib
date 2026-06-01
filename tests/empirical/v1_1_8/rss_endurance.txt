@@ -1,0 +1,171 @@
+═══════════════════════════════════════════════════════════
+v1.1.8 RSS ENDURANCE — POSTFIX vs v1.1.7 BASELINE
+═══════════════════════════════════════════════════════════
+
+Workload (both runs):
+  10× `ros2 topic pub /chatterN std_msgs/msg/String "data: hello-N" -r 1`
+  edge_monitor --no-ui --no-web --ticks 0 --log-level warn
+  Stripped release builds (no debug info — apples-to-apples
+  with the v1.1.7 reference numbers from DISPATCH 22).
+Host: Ubuntu 22.04 + ROS Humble + Cyclone DDS, RTX 3060.
+
+╔══════════╤══════════════╤══════════════╗
+║ t (sec)  │ v1.1.7       │ v1.1.8       ║
+║          │ (Arc+mim.)   │ (ITEM 1 + 2) ║
+╟──────────┼──────────────┼──────────────╢
+║      0   │     49       │     30       ║
+║     60   │    249       │    192       ║
+║    120   │    441       │    353       ║
+║    180   │    602       │    516       ║
+║    240   │    788       │    693       ║
+║    300   │    987       │    855       ║
+╚══════════╧══════════════╧══════════════╝
+RSS in MB. v1.1.7 column from DISPATCH 22 ITEM 3 endurance
+(tests/empirical/v1_1_7/rss_endurance.txt).
+
+Per-minute slopes (linear fit over t=60..300s):
+  v1.1.7:    ~190 MB/min
+  v1.1.8:    ~166 MB/min     → ~13% improvement
+  TARGET:    < 50 MB/min     ← NOT MET
+
+═══════════════════════════════════════════════════════════
+KERNEL-SIDE RESOURCE SNAPSHOTS (v1.1.8 postfix)
+═══════════════════════════════════════════════════════════
+
+                       t=0s    t=60s    t=120s   t=180s   t=240s   t=300s
+  RSS                  30 MB   192 MB   353 MB   516 MB   693 MB   855 MB
+  total open FDs       22      83       143      203      269      327
+  eventfd FDs          5       65       125      185      246      306
+  zombies (Z state)    —       0        0        0        0        0
+  thread count         —       5        5        5        5        5
+
+Comparison vs v1.1.7 baseline /proc snapshot at t=185s:
+  v1.1.7 t=185s:  eventfds 226, RSS 600.8 MB
+  v1.1.8 t=180s:  eventfds 185, RSS 516 MB
+  Delta:          -41 eventfds (-18%), -84 MB RSS (-14%)
+
+eventfd growth rate is essentially UNCHANGED (~1 FD/sec) post-
+ITEM 1. The 18% absolute reduction is consistent with ITEM 2's
+elimination of the per-tick sysinfo full-process refresh
+(some of the per-tick allocation work that drove ancillary
+allocations now happens once at runtime construction).
+
+═══════════════════════════════════════════════════════════
+ITEM 1 HYPOTHESIS RECAP — partial confirmation
+═══════════════════════════════════════════════════════════
+
+DISPATCH 24 Inspector ranked candidate (4) "tokio Child handle
+leak from kill() without wait()" as the strongest source of
+the linear residual. PHASE 0 /proc diagnostic of v1.1.7
+ff33479 observed 226 `anon_inode:[eventfd]` FDs at t=185s
+under the 10× publisher workload, growing ~1 FD/s, consistent
+with the candidate.
+
+ITEM 1 added `child.wait()` after `child.kill()` (500 ms
+guard, see `ROS2_CHILD_REAP_GUARD` in
+`src/telemetry/samplers/ros2_shellout.rs`). Expected: eventfd
+growth flat after fix.
+
+Observed: eventfd growth rate ESSENTIALLY UNCHANGED (~1 FD/s)
+in v1.1.8. The ITEM 1 fix:
+  - DOES drain the child process (no zombies in either run)
+  - DOES return promptly (the 500 ms guard wasn't hit — empirical
+    inference from total throughput stability)
+  - Does NOT close the leaked eventfd
+
+Therefore: the eventfd source is NOT tokio's `Child` signal
+registration as candidate (4) hypothesised. It's something
+else that allocates an `anon_inode:[eventfd]` per tick. Top
+remaining candidates the next dispatch should investigate:
+
+  a) tokio runtime's task scheduler park/unpark eventfds —
+     if the worker thread count is dynamic per spawn (it
+     shouldn't be, but worth verifying)
+  b) tokio process driver's signal-handler registration — even
+     with pidfd_open used by `Command::spawn`, there may be a
+     per-spawn eventfd in the inner driver
+  c) mimalloc's per-thread state — mimalloc does spawn a
+     background reclaim thread under high churn (each thread
+     would have its own eventfd for park/unpark)
+  d) the audit writer's persistent file handle wakeup
+     mechanism
+
+Diagnostic tools the next dispatch should bring:
+  - `strace -e trace=eventfd2,signalfd,timerfd_create -p $PID`
+    captures eventfd creation in real-time
+  - `bpftrace -e 'tracepoint:syscalls:sys_enter_eventfd2 /comm==
+    "edge_monitor"/ { @[ustack(perf)] = count(); }'` attributes
+    the creations to backtraces
+  - `lsof -p $PID` shows the user-side opener of each FD
+
+═══════════════════════════════════════════════════════════
+ITEM 2 HYPOTHESIS RECAP — confirmed by code-reading + tests
+═══════════════════════════════════════════════════════════
+
+DISPATCH 24 candidate (2): `platform::collect_system_metrics`
+built a fresh `sysinfo::System::new_all()` + `refresh_all()`
+per tick, allocating a Linux process map every second despite
+only reading memory fields off the System.
+
+ITEM 2 made the `System` long-lived (owned by `Runtime`),
+swapped `refresh_all()` for `refresh_memory()`, and replaced
+`sys.cpus().len()` with `std::thread::available_parallelism()`
+(the cpu list is empty on a non-CPU-refreshed System). Direct
+in-process verification of the per-tick allocation drop would
+require a heaptrack run against a glibc-allocator build — not
+done here because that requires reverting mimalloc temporarily
+(scope creep for this dispatch). The unit-test pin
+`collect_system_metrics_with_targeted_refresh_populates_memory`
+verifies the targeted-refresh shape produces correct memory
+figures across consecutive refreshes on the same handle, which
+was the structural goal.
+
+The ~13% slope improvement (~190 → ~166 MB/min) is consistent
+with ITEM 2 cutting per-tick allocation overhead even though
+ITEM 1's principal target wasn't actually the leak driver.
+
+═══════════════════════════════════════════════════════════
+DECISION GATE OUTCOME
+═══════════════════════════════════════════════════════════
+
+Per DISPATCH 25 STOP-AND-SURFACE trigger 4:
+  "Post-fix leak persists at >100 MB/min — STOP, the
+   non-linear component (Inspector Q4) needs separate
+   investigation"
+
+Observed: 166 MB/min residual (above the 100 MB/min trigger),
+target was <50 MB/min. STOP-AND-SURFACE engaged.
+
+Shipping v1.1.8 with ITEM 1 + ITEM 2 (both applied per spec
+and producing measurable improvement) + the empirical evidence
+above. Routing the residual to a follow-up dispatch with the
+diagnostic-tools list above so the next investigation has the
+methodology to pinpoint the per-second eventfd source.
+
+Specifically NOT done in this dispatch:
+  - Reverting mimalloc to use heaptrack on a glibc build
+  - strace / bpftrace attribution of the per-second eventfd
+  - Investigating non-linear acceleration (Inspector Q4 — the
+    baseline endurance was linear over the 5-min window; any
+    non-linear component lives in longer runs)
+
+═══════════════════════════════════════════════════════════
+PROCESS NOTE
+═══════════════════════════════════════════════════════════
+
+The dispatch's PHASE 0 was supposed to use heaptrack
+`--leak-bytes` to confirm the tokio process-child stacks as
+top of the never-freed list before fixing. heaptrack's
+LD_PRELOAD hook is BLIND to mimalloc allocations (mimalloc
+mmap()s pages directly bypassing libc malloc), so heaptrack
+reported 290 KB peak heap / 72 KB leaked under a 1.78 GB RSS
+run — useless as a decision gate. Switched to /proc-based
+snapshotting (smaps_rollup, fd type inventory, child process
+state, thread count, mmap region count). See
+`tests/empirical/v1_1_8/heaptrack_baseline.txt` for the full
+methodology note.
+
+Future leak-diagnosis dispatches on v1.1.7+ binaries should
+either (a) bring a feature-flag for swapping mimalloc out for
+the diagnostic build, or (b) skip heaptrack and rely on /proc
++ syscall tracing.

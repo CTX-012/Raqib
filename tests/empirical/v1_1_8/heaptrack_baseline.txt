@@ -1,0 +1,112 @@
+═══════════════════════════════════════════════════════════
+v1.1.8 PHASE 0 — DIAGNOSTIC BASELINE (heaptrack + /proc fallback)
+═══════════════════════════════════════════════════════════
+
+Workload: 10× `ros2 topic pub /chatterN std_msgs/msg/String "data: hello-N" -r 1`
+Binary:   target/release/edge_monitor (v1.1.7 ff33479,
+          CARGO_PROFILE_RELEASE_DEBUG=true CARGO_PROFILE_RELEASE_STRIP=none)
+Command:  edge_monitor --no-ui --no-web --ticks 600 --log-level warn
+Wall:     10 min self-terminating run
+Host:     Ubuntu 22.04 + ROS Humble + Cyclone DDS
+
+────────────────────────────────────────────────────────────
+PART A — heaptrack 10-min profile (heaptrack 1.3.0 LD_PRELOAD)
+────────────────────────────────────────────────────────────
+
+RSS sampled by an external poller every 2 min:
+  t=0s:    63 MB
+  t=120s:  496 MB
+  t=240s:  930 MB     → ~217 MB/min slope
+  t=360s:  1,360 MB
+  t=480s:  1,780 MB
+
+heaptrack stats:
+  total runtime:           600.98s
+  alloc calls:             610,582  (1,015/s)
+  temporary allocations:   580,326  (965/s; 94% of all)
+  peak heap memory:        290.13 KB    ← contradicts RSS 1.78 GB
+  peak RSS:                2.30 GB      (matches RSS poller observation)
+  total memory leaked:     72.04 KB
+
+CRITICAL VISIBILITY ISSUE: v1.1.7 ships with mimalloc as
+`#[global_allocator]`. mimalloc allocates pages via mmap()
+DIRECTLY, bypassing libc malloc/free. heaptrack's LD_PRELOAD
+hook intercepts libc malloc only — so the 1.78 GB of mimalloc-
+managed RSS is INVISIBLE to heaptrack. The 610K libc-malloc
+calls are the residual non-mimalloc allocations (clap argument
+parsing, std::process pipes, etc.). The ~72 KB "leaked" is
+genuinely libc-side leaks; mimalloc's growth is unmeasurable
+through this tool with the v1.1.7 binary as-shipped.
+
+This invalidates the dispatch's PHASE 0 "leak-bytes top-N"
+decision gate as written. Switched to /proc-based diagnostic
+(Part B) which observes the kernel-side resource accumulation
+directly, independent of which allocator is in use.
+
+────────────────────────────────────────────────────────────
+PART B — /proc-based diagnostic (3-min clean run)
+────────────────────────────────────────────────────────────
+
+Same workload + binary; run WITHOUT heaptrack (clean RSS):
+
+                          t=15s            t=180s          delta
+  RSS                     119.9 MB         600.8 MB        +480.9 MB (~175 MB/min)
+  Anonymous mappings      110.6 MB         603.1 MB        +492.5 MB
+  Zombies (Z state)            0                0              0
+  Direct children              1 (transient)   1 (transient)  ~stable
+  Thread count                 5                5              0
+  mmap regions                82               83             +1
+  open file descriptors       46              224           +178 (~1 FD/s)
+  └── eventfd FDs              n/a             226            ← growth source
+  └── pipe FDs                                    5
+  └── pidfd FDs                                   1
+  └── socket FDs                                  4
+
+────────────────────────────────────────────────────────────
+DECISION GATE — REVISED
+────────────────────────────────────────────────────────────
+
+Inspector's DISPATCH 24 prediction (candidate 4): tokio
+`Child` handle leak because `kill()` does not `wait()`.
+Inspector's note: "tokio's documented best-effort reaper
+(tokio-rs/tokio#2685)" — without explicit wait(), the per-Child
+signal/pidfd registration and the eventfd backing it never
+release.
+
+Observed: 226 eventfd FDs at t=185s, growing ~1/s.
+            10 ROS2 publishers × 1 B3 echo probe/PID/tick × 1 tick/s
+            = 10 spawn-kill cycles/s; eventfd growth at ~1/s is
+            consistent (cycle batching/coalescing in tokio).
+Observed: 0 zombie processes — tokio's reaper IS removing the
+            process from the process table, but the tokio-side
+            Child handle state (signal registration / pidfd /
+            eventfd) is NOT being released without an explicit
+            wait().
+
+Verdict: candidate (4) CONFIRMED via FD accumulation pattern.
+The dispatch's specified fix — `child.wait()` after `child.kill()`
+with a 500ms guard — directly addresses this by giving tokio's
+Drop-on-completion the chance to release the per-Child state.
+
+Sysinfo wasted-work finding (DISPATCH 24 candidate 2):
+NOT directly diagnosed here (allocator-blind), but Inspector's
+~1000× alloc-reduction analysis is a separate per-tick churn
+reduction that lands as ITEM 2 alongside ITEM 1.
+
+Verdict: proceed with both ITEMs as specified.
+
+────────────────────────────────────────────────────────────
+heaptrack vs /proc — methodological note
+────────────────────────────────────────────────────────────
+
+For future leak-diagnosis dispatches on this binary, heaptrack
+must either:
+  - Be paired with a fresh build that disables mimalloc
+    (`#[cfg(feature = "diag-glibc-alloc")]`-style toggle), OR
+  - Be replaced with `pmap` / `smaps_rollup` / `/proc/$PID/fd`
+    snapshotting which sees kernel-side resources independent
+    of allocator.
+
+The DISPATCH 22 PHASE 0 profile worked because v1.1.6 had no
+mimalloc — heaptrack hooked the only allocator. v1.1.8+ requires
+the methodological shift above.

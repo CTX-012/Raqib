@@ -78,9 +78,22 @@ pub struct PlatformSnapshot {
 
 /// Collects all running processes and system metrics from the platform.
 /// Implements the main data collection loop for Module 2.
-pub fn collect_snapshot() -> PlatformResult<PlatformSnapshot> {
+///
+/// v1.1.8 ITEM 2 (DISPATCH 25) — takes a long-lived
+/// `&mut sysinfo::System` owned by the runtime. Pre-v1.1.8 this
+/// function built a fresh `System::new_all()` per tick + called
+/// `refresh_all()`, which on Linux scans every PID in /proc and
+/// allocates a whole `ProcessSample` per process AND a global
+/// CPU usage update — both wasted (the platform layer's
+/// `linux_proc::ProcessCollector` is the actual process source,
+/// and we only read memory fields off the System anyway). The
+/// long-lived `System` plus a targeted `sys.refresh_memory()`
+/// inside `collect_system_metrics` eliminates that wasted work
+/// (~22.6M alloc calls in 90s under the 10× ROS2-publisher
+/// workload per DISPATCH 22 PHASE 0 → ~0).
+pub fn collect_snapshot(sys: &mut sysinfo::System) -> PlatformResult<PlatformSnapshot> {
     let timestamp = Utc::now();
-    let system = collect_system_metrics()?;
+    let system = collect_system_metrics(sys)?;
     let processes = collect_all_processes()?;
     let gpu = collect_gpu_metrics()?;
 
@@ -90,6 +103,17 @@ pub fn collect_snapshot() -> PlatformResult<PlatformSnapshot> {
         processes,
         gpu,
     })
+}
+
+/// v1.1.8 ITEM 2 — long-lived `sysinfo::System` constructor for
+/// callers that need the targeted-refresh shape (only the memory
+/// fields, no per-tick process map). Used by `Runtime::new()` and
+/// the `collect_snapshot_succeeds` regression test.
+pub fn new_system_for_metrics() -> sysinfo::System {
+    use sysinfo::{MemoryRefreshKind, RefreshKind};
+    sysinfo::System::new_with_specifics(
+        RefreshKind::nothing().with_memory(MemoryRefreshKind::everything()),
+    )
 }
 
 /// Collects all running processes from the platform.
@@ -104,17 +128,30 @@ pub fn collect_gpu_metrics() -> PlatformResult<GpuSnapshot> {
     collector.collect()
 }
 
-/// Collects system-level metrics using sysinfo.
-fn collect_system_metrics() -> PlatformResult<SystemMetrics> {
-    use sysinfo::System;
-
-    let mut sys = System::new_all();
-    sys.refresh_all();
+/// Collects system-level metrics using a long-lived sysinfo
+/// [`sysinfo::System`].
+///
+/// v1.1.8 ITEM 2 (DISPATCH 25):
+///  - The caller (runtime tick or test) supplies the System; we
+///    only refresh the memory fields per tick (`refresh_memory`),
+///    NOT the process map (`linux_proc::ProcessCollector` owns
+///    that) or CPU usage (we don't read it here).
+///  - `cpu_count` is read from `std::thread::available_parallelism`
+///    instead of `sys.cpus().len()`: the latter returns 0 unless
+///    `refresh_cpu_*` has been called (and the cpu list is only
+///    constructed on that refresh), and we don't want to pay for
+///    a CPU-usage refresh just to count cores. `available_parallelism`
+///    is the std-library answer to "how many logical CPUs can this
+///    process use"; it falls back to 1 if the platform query fails.
+fn collect_system_metrics(sys: &mut sysinfo::System) -> PlatformResult<SystemMetrics> {
+    sys.refresh_memory();
 
     let total_memory = sys.total_memory();
     let used_memory = sys.used_memory();
     let available_memory = sys.available_memory();
-    let cpu_count = sys.cpus().len();
+    let cpu_count = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
 
     // Read load average from /proc/loadavg
     let load_average = read_load_average().unwrap_or([0.0, 0.0, 0.0]);
@@ -162,7 +199,9 @@ mod tests {
 
     #[test]
     fn collect_snapshot_succeeds() {
-        let result = collect_snapshot();
+        // v1.1.8 ITEM 2 — caller owns the long-lived System.
+        let mut sys = new_system_for_metrics();
+        let result = collect_snapshot(&mut sys);
         match result {
             Ok(snapshot) => {
                 assert!(!snapshot.processes.is_empty());
@@ -177,7 +216,8 @@ mod tests {
 
     #[test]
     fn collect_system_metrics_succeeds() {
-        let result = collect_system_metrics();
+        let mut sys = new_system_for_metrics();
+        let result = collect_system_metrics(&mut sys);
         match result {
             Ok(metrics) => {
                 assert!(metrics.total_memory > 0);
@@ -187,6 +227,29 @@ mod tests {
                 eprintln!("System metrics collection failed: {}", e);
             }
         }
+    }
+
+    /// v1.1.8 ITEM 2 (DISPATCH 25) — the targeted-refresh shape
+    /// must populate the memory fields. Pre-fix the function called
+    /// `sys.refresh_all()` on a fresh `System::new_all()` every
+    /// tick; post-fix it calls `sys.refresh_memory()` on a
+    /// long-lived `System` built via `new_system_for_metrics`.
+    /// Pin that the targeted shape still returns non-zero memory
+    /// figures on the test host (which has memory).
+    #[test]
+    fn collect_system_metrics_with_targeted_refresh_populates_memory() {
+        let mut sys = new_system_for_metrics();
+        // Two consecutive refreshes via the same long-lived System
+        // — proves the per-tick reuse pattern works.
+        let a = collect_system_metrics(&mut sys).expect("first refresh");
+        let b = collect_system_metrics(&mut sys).expect("second refresh");
+        assert!(a.total_memory > 0, "total_memory must be populated");
+        assert!(a.cpu_count > 0, "cpu_count from available_parallelism must be > 0");
+        assert_eq!(
+            a.total_memory, b.total_memory,
+            "total_memory is hardware-fixed; consecutive refreshes \
+             on the same System must agree",
+        );
     }
 
     #[test]

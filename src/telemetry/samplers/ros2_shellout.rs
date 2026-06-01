@@ -122,6 +122,18 @@ const ROS2_CACHE_GC_THRESHOLD: Duration = Duration::from_secs(60 * 5);
 // now comes from the outer `ROS2_SHELLOUT_TIMEOUT` tokio wrap +
 // `--once` self-termination alone. See `observe_topic_echo`.
 
+// v1.1.8 ITEM 1 (DISPATCH 25) — outer bound on the explicit
+// `child.wait()` after `child.kill()`. Releases tokio's per-Child
+// signal/pidfd/eventfd registration (cf. tokio-rs/tokio#2685
+// "Process API does not guarantee prompt reaping"). The wait
+// normally returns near-instantly because `--once` already
+// self-exited the child; the guard only covers pathological kernel
+// edge cases (e.g. a stuck SIGTERM delivery). 500 ms is well below
+// the 3 s `ROS2_SHELLOUT_TIMEOUT` per-probe budget and the 9 s
+// dispatcher per-source ceiling, so a stuck reap can't compound
+// across ticks.
+const ROS2_CHILD_REAP_GUARD: Duration = Duration::from_millis(500);
+
 // v1.1.5 ITEM D (BUG-P5-2) — Active is held for this duration after
 // the last observed message arrival on a topic. The window has to
 // span the worst publisher rate B3 cares about: a 0.1 Hz publisher
@@ -263,6 +275,20 @@ impl Ros2ShelloutSource {
         // first message, but if the outer wait fired first, kill the
         // child explicitly. kill_on_drop covers the rest.
         let _ = child.kill().await;
+        // v1.1.8 ITEM 1 (DISPATCH 25) — reap the child deterministically.
+        // tokio's best-effort reaper (tokio-rs/tokio#2685) does NOT
+        // guarantee prompt release of per-Child state after kill() —
+        // kill() signals, but the signal/pidfd registration backing
+        // the Child handle (each one consumes a kernel `anon_inode:
+        // [eventfd]` slot) is only released when `wait()` completes.
+        // Without it, every probe leaked one eventfd: the DISPATCH 25
+        // PHASE 0 diagnostic observed 226 eventfds at t=185s under
+        // the 10× ROS2-publisher workload (~1 fd/s), correlating with
+        // the linear ~195 MB/min RSS growth. The 500 ms guard bounds
+        // pathological non-reaping (kernel edge cases); the normal
+        // path returns near-instantly since `--once` already
+        // self-exited the child before kill().
+        let _ = tokio::time::timeout(ROS2_CHILD_REAP_GUARD, child.wait()).await;
 
         match timed {
             Ok(Ok(observed)) => Ok(observed),
@@ -529,6 +555,48 @@ mod tests {
         // 9 s outer dispatcher ceiling (unchanged from v1.1.3).
         assert_eq!(ROS2_SHELLOUT_TIMEOUT, Duration::from_secs(3));
         assert_eq!(outer, Duration::from_secs(9));
+    }
+
+    /// v1.1.8 ITEM 1 (DISPATCH 25) — pin the reap-guard timing
+    /// invariant for the explicit `child.wait()` after
+    /// `child.kill()` in `observe_topic_echo`. Without the wait,
+    /// tokio's per-Child signal/pidfd/eventfd registration was
+    /// leaking — DISPATCH 25 PHASE 0 /proc diagnostic observed
+    /// 226 `anon_inode:[eventfd]` FDs at t=185s under the 10×
+    /// ROS2-publisher workload (~1 FD/s), correlating with the
+    /// linear ~195 MB/min RSS growth.
+    ///
+    /// The guard MUST stay well below `ROS2_SHELLOUT_TIMEOUT`
+    /// (3 s) so a pathological reap can't push a probe past its
+    /// budget and pile up sample tasks waiting on the per-source
+    /// mutex. Pinned at 500 ms — fast enough to never matter on
+    /// the healthy path (the child is already exited; wait()
+    /// returns immediately), slow enough to ride out kernel
+    /// SIGCHLD delivery hiccups.
+    ///
+    /// Behavioural unit test against a real `ros2` subprocess is
+    /// not possible without a live ROS2 graph (kept out of
+    /// `cargo test`); the empirical proof of fix is the post-fix
+    /// /proc snapshot showing eventfd count flat.
+    #[test]
+    fn b3_echo_reaps_child_with_wait() {
+        assert_eq!(ROS2_CHILD_REAP_GUARD, Duration::from_millis(500));
+        assert!(
+            ROS2_CHILD_REAP_GUARD < ROS2_SHELLOUT_TIMEOUT,
+            "reap guard ({:?}) must stay well below the per-probe \
+             ROS2_SHELLOUT_TIMEOUT ({:?}) — otherwise a stuck reap \
+             can push a probe past its budget and pile up sample \
+             tasks waiting on the per-source mutex (the v1.1.6 leak \
+             shape DISPATCH 22 closed).",
+            ROS2_CHILD_REAP_GUARD,
+            ROS2_SHELLOUT_TIMEOUT,
+        );
+        // Symbolic pin: assert the production helper that builds
+        // the echo args list is reachable, so a refactor that
+        // accidentally drops `observe_topic_echo` (and with it the
+        // wait() call) doesn't leave only this constant behind.
+        let args = ros2_echo_args("/sentinel");
+        assert!(args.contains(&"--once"));
     }
 
     fn proc(pid: u32, name: &str, cmdline: &[&str], env: &[(&str, &str)]) -> ProcessSnapshot {

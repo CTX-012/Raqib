@@ -351,6 +351,17 @@ pub struct Runtime {
     /// Cached USER_HZ. Resolved once at startup via sysconf(_SC_CLK_TCK);
     /// falls back to the standard Linux default of 100 if the call fails.
     clk_tck: u64,
+    /// v1.1.8 ITEM 2 (DISPATCH 25) — long-lived `sysinfo::System`
+    /// for the per-tick memory metrics. Pre-v1.1.8 this was built
+    /// fresh inside `platform::collect_system_metrics` via
+    /// `System::new_all()` + `refresh_all()` on every tick, which
+    /// on Linux scans every PID in /proc and allocates a whole
+    /// `ProcessSample`-equivalent per process AND a global CPU
+    /// usage update — both wasted (`linux_proc::ProcessCollector`
+    /// is the actual process source; we only read memory fields
+    /// off the `System`). The long-lived handle + per-tick
+    /// `sys.refresh_memory()` eliminates the wasted work.
+    sys_for_metrics: sysinfo::System,
 }
 
 impl Runtime {
@@ -414,6 +425,7 @@ impl Runtime {
             prev_cpu: HashMap::new(),
             pid_stderr: HashMap::new(),
             clk_tck: read_clk_tck(),
+            sys_for_metrics: platform::new_system_for_metrics(),
         }
     }
 
@@ -498,7 +510,7 @@ impl Runtime {
     /// Updates `state` and returns it. Errors here are fatal — the loop
     /// owner must decide whether to retry or exit.
     pub fn tick(&mut self) -> Result<&RuntimeState, RuntimeError> {
-        let snapshot = platform::collect_snapshot()?;
+        let snapshot = platform::collect_snapshot(&mut self.sys_for_metrics)?;
         let now = Instant::now();
         let vram_by_pid = vram_bytes_by_pid(&snapshot.gpu);
 

@@ -184,8 +184,19 @@ impl Dispatcher {
         // samplers like B2 agent-claude can see parent / child trees
         // (including NotAi bash children). Existing samplers inherit
         // the default polyfill that delegates to `sample`.
-        let all_procs_owned: Vec<ProcessSnapshot> = all_procs.to_vec();
-        let ai_procs_owned: Vec<ProcessSnapshot> = ai_procs.to_vec();
+        // v1.1.7 — Arc-share the per-tick snapshot slices so the
+        // spawned per-source tasks each hold a cheap `Arc::clone`
+        // refcount bump instead of a deep `Vec<ProcessSnapshot>`
+        // clone (which deep-clones each `environ` `HashMap`). The
+        // pre-Arc shape was the dominant alloc-call source under
+        // ROS2 churn (DISPATCH 22 heaptrack baseline: ~258M of 409M
+        // total alloc calls in 90s rooted at this `Vec::clone`
+        // path), and per-source-mutex backpressure pinned multiple
+        // ticks' worth of clones live at once → ~1.35 GB/min RSS
+        // growth. Trait surface unchanged: `&Arc<Vec<T>>` deref-
+        // coerces to `&[T]` at the `sample_with_context` call.
+        let all_procs_owned: Arc<Vec<ProcessSnapshot>> = Arc::new(all_procs.to_vec());
+        let ai_procs_owned: Arc<Vec<ProcessSnapshot>> = Arc::new(ai_procs.to_vec());
         for proc in ai_procs {
             for source in &self.sources {
                 let source = source.clone();
@@ -338,9 +349,26 @@ impl Dispatcher {
 
     /// Drop accumulator state for `pid` after persisting the record.
     /// Prevents stale data leaking into a recycled PID.
+    ///
+    /// v1.1.7 ITEM 2 (DISPATCH 22) — also notify every
+    /// [`TelemetrySource`] via [`TelemetrySource::on_forget`] so
+    /// samplers can drop per-PID caches promptly instead of waiting
+    /// for a periodic GC sweep (e.g. B3's pre-v1.1.7 5-min
+    /// `ROS2_CACHE_GC_THRESHOLD`). The notifications are spawned
+    /// on the runtime so this method stays non-blocking — the
+    /// per-source mutex is held by the sample task in flight (if
+    /// any) and we don't want `forget` to stall the runtime tick
+    /// loop waiting for it.
     pub fn forget(&mut self, pid: u32) {
         self.accumulator.forget(pid);
         self.cold_load.forget(pid);
+        for source in &self.sources {
+            let source = source.clone();
+            self.runtime.spawn(async move {
+                let mut guard = source.lock().await;
+                guard.on_forget(pid);
+            });
+        }
     }
 
     /// Read-only handle to the accumulator (UI may want this for the
@@ -710,5 +738,175 @@ mod tests {
         wait_for_activity(&mut d, 1, StdDuration::from_secs(2)).unwrap();
         d.forget(1);
         assert_eq!(d.activity_for(1), None);
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // v1.1.7 ITEM 1 — Arc-share regression pin
+    // ─────────────────────────────────────────────────────────────
+
+    /// Probe sampler that records the `all_procs.as_ptr()` it
+    /// receives on each `sample_with_context` invocation. Used by
+    /// `dispatcher_tick_shares_procs_via_arc_not_clone` to verify
+    /// the dispatcher passes the SAME backing buffer to every task
+    /// it spawns in a tick — the property `Arc::clone` preserves
+    /// and per-task `Vec::clone` breaks.
+    struct SliceProbe {
+        recorded_ptrs: Arc<std::sync::Mutex<Vec<usize>>>,
+    }
+    #[async_trait]
+    impl TelemetrySource for SliceProbe {
+        fn name(&self) -> &str {
+            "slice-probe"
+        }
+        fn applies_to(&self, _: &ProcessSnapshot) -> bool {
+            true
+        }
+        async fn sample(&mut self, p: &ProcessSnapshot) -> SourceResult<TelemetryFrame> {
+            Ok(TelemetryFrame::new(p.pid))
+        }
+        async fn sample_with_context(
+            &mut self,
+            p: &ProcessSnapshot,
+            _ai_procs: &[ProcessSnapshot],
+            all_procs: &[ProcessSnapshot],
+        ) -> SourceResult<TelemetryFrame> {
+            self.recorded_ptrs
+                .lock()
+                .unwrap()
+                .push(all_procs.as_ptr() as usize);
+            Ok(TelemetryFrame::new(p.pid))
+        }
+    }
+
+    /// Probe sampler that records the PIDs passed to `on_forget`
+    /// into a shared `Mutex<Vec<u32>>`. Used by
+    /// `dispatcher_forget_wires_through_to_source_on_forget` to
+    /// verify the v1.1.7 ITEM 2 wire-through.
+    struct OnForgetProbe {
+        forgotten: Arc<std::sync::Mutex<Vec<u32>>>,
+    }
+    #[async_trait]
+    impl TelemetrySource for OnForgetProbe {
+        fn name(&self) -> &str {
+            "on-forget-probe"
+        }
+        fn applies_to(&self, _: &ProcessSnapshot) -> bool {
+            false // never sampled; we only exercise the forget path
+        }
+        async fn sample(&mut self, _: &ProcessSnapshot) -> SourceResult<TelemetryFrame> {
+            unreachable!("OnForgetProbe::sample should never be invoked")
+        }
+        fn on_forget(&mut self, pid: u32) {
+            self.forgotten.lock().unwrap().push(pid);
+        }
+    }
+
+    /// v1.1.7 ITEM 2 (DISPATCH 22) — `Dispatcher::forget(pid)` must
+    /// notify every registered source via `on_forget(pid)`. The
+    /// notification is spawned on the runtime (the per-source
+    /// mutex may be held by a sample task in flight), so the
+    /// assertion polls briefly for the side-effect to land.
+    ///
+    /// Pre-v1.1.7 B3 relied on a 5-min time-based GC sweep
+    /// (`ROS2_CACHE_GC_THRESHOLD`) — bounded the leak in time but
+    /// kept ghost cache entries live for the full window after
+    /// PID death. The wire-through this test pins makes the clear
+    /// prompt: as soon as `runtime.rs` calls `d.forget(pid)` after
+    /// persisting the exit summary, the per-source cache drops.
+    #[test]
+    fn dispatcher_forget_wires_through_to_source_on_forget() {
+        let forgotten_a = Arc::new(std::sync::Mutex::new(Vec::<u32>::new()));
+        let forgotten_b = Arc::new(std::sync::Mutex::new(Vec::<u32>::new()));
+        let mut d = Dispatcher::new(vec![
+            Box::new(OnForgetProbe {
+                forgotten: forgotten_a.clone(),
+            }),
+            Box::new(OnForgetProbe {
+                forgotten: forgotten_b.clone(),
+            }),
+        ])
+        .unwrap();
+        d.forget(42);
+        // Poll briefly — the on_forget call is spawned on the
+        // tokio runtime to avoid blocking the tick loop.
+        let start = std::time::Instant::now();
+        while start.elapsed() < StdDuration::from_secs(2) {
+            if !forgotten_a.lock().unwrap().is_empty()
+                && !forgotten_b.lock().unwrap().is_empty()
+            {
+                break;
+            }
+            std::thread::sleep(StdDuration::from_millis(20));
+        }
+        assert_eq!(
+            *forgotten_a.lock().unwrap(),
+            vec![42],
+            "source A must observe on_forget(42)",
+        );
+        assert_eq!(
+            *forgotten_b.lock().unwrap(),
+            vec![42],
+            "source B must observe on_forget(42)",
+        );
+    }
+
+    /// v1.1.7 ITEM 1 (DISPATCH 22) — every task the dispatcher
+    /// spawns in a single `tick` must receive the SAME backing
+    /// `all_procs` buffer, not its own deep clone. Proving the
+    /// Arc-share is the structural fix for the ~1.5 GB/min leak
+    /// the v1.1.6 RSS-endurance run caught and the v1.1.7
+    /// heaptrack baseline rooted at `dispatcher.rs:194`
+    /// (`Vec<ProcessSnapshot>::clone` → `ProcessSnapshot::clone`
+    /// → `HashMap::clone`, ~258M of 409M alloc calls in 90s).
+    ///
+    /// Three probe samplers × three AI PIDs in one tick → nine
+    /// `sample_with_context` invocations, each capturing
+    /// `all_procs.as_ptr() as usize`. If the dispatcher Arc-shares
+    /// the snapshot, all nine pointers equal the same backing.
+    /// If a refactor reintroduces per-task `Vec::clone`, each
+    /// pointer differs and this test trips.
+    #[test]
+    fn dispatcher_tick_shares_procs_via_arc_not_clone() {
+        let recorded = Arc::new(std::sync::Mutex::new(Vec::<usize>::new()));
+        let mut d = Dispatcher::new(vec![
+            Box::new(SliceProbe {
+                recorded_ptrs: recorded.clone(),
+            }),
+            Box::new(SliceProbe {
+                recorded_ptrs: recorded.clone(),
+            }),
+            Box::new(SliceProbe {
+                recorded_ptrs: recorded.clone(),
+            }),
+        ])
+        .unwrap();
+        let procs = vec![snap(1), snap(2), snap(3)];
+        d.tick(&procs, &procs);
+        let start = std::time::Instant::now();
+        while start.elapsed() < StdDuration::from_secs(2) {
+            d.tick(&[], &[]); // drain pending frames
+            if recorded.lock().unwrap().len() >= 9 {
+                break;
+            }
+            std::thread::sleep(StdDuration::from_millis(20));
+        }
+        let ptrs = recorded.lock().unwrap().clone();
+        assert!(
+            ptrs.len() >= 9,
+            "expected >= 9 sample_with_context invocations (3 PIDs \
+             × 3 sources), got {}",
+            ptrs.len(),
+        );
+        let first = ptrs[0];
+        for (i, p) in ptrs.iter().enumerate() {
+            assert_eq!(
+                *p, first,
+                "Arc-share broken: invocation {i} received a different \
+                 `all_procs` backing than invocation 0 — would mean the \
+                 dispatcher is deep-cloning `Vec<ProcessSnapshot>` per \
+                 task again (the ~1.5 GB/min v1.1.6 leak shape from \
+                 DISPATCH 22 baseline)",
+            );
+        }
     }
 }

@@ -1,6 +1,6 @@
 [package]
 name = "edge_monitor"
-version = "1.1.6"
+version = "1.1.7"
 edition = "2024"
 authors = ["Mohaaxa"]
 license = "MIT OR Apache-2.0"
@@ -49,6 +49,16 @@ mime_guess = "2"
 # action enum, themes, sizing. Sibling crate, owned by Agent A. Do not edit
 # from this repo; file a Contract Amendment Request instead.
 ux_contract = { path = "../ux_contract" }
+
+# v1.1.7 (DISPATCH 22 ITEM 3 fallback, operator-pre-approved) — mimalloc
+# global allocator. The Arc-share fix (ITEM 1) dropped per-tick clone
+# pressure by ~85%, but the 5-min RSS endurance run still showed
+# ~220 MB/min growth from glibc allocator fragmentation under high
+# short-lived-allocation churn (sysinfo /proc scans, JSON serialization,
+# stdlib subprocess pipes). mimalloc tracks free lists more aggressively
+# and returns memory to the OS on a faster cadence — closes the residual
+# gap without a sampler-by-sampler audit of who allocates what.
+mimalloc = { version = "0.1", default-features = false }
 
 [dev-dependencies]
 pretty_assertions = "1"

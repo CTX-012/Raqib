@@ -106,7 +106,7 @@ const ROS2_TOPIC_HZ_INTERVAL: Duration = Duration::from_secs(60);
 //
 // NOTE: sub-Hz topics (≤ 0.5 Hz, i.e. one message every ≥ 2 s)
 // remain structurally unobservable even at 8 s for the lowest
-// rates — see BUG-P5-2 (deferred to v1.1.4; the real fix is
+// rates — see BUG-P5-2 (deferred to v1.1.5; the real fix is
 // windowing / streaming the hz output, not a still-larger
 // timeout).
 const ROS2_SHELLOUT_TIMEOUT: Duration = Duration::from_secs(8);

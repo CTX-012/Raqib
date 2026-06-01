@@ -8,10 +8,20 @@
 //!
 //! v1.1.5 ITEM D (BUG-P5-2): mechanism replaced from `ros2 topic
 //! hz` (which couldn't observe sub-Hz topics — its first-emit time
-//! scales with 1/rate) to `ros2 topic echo --once --timeout 1` per
-//! tick + a 30 s staleness window. Echo arrival is observable at
-//! any non-zero rate; the window covers the worst sub-Hz publisher
-//! B3 targets (0.1 Hz → ≥ 3 expected arrivals per 30 s).
+//! scales with 1/rate) to `ros2 topic echo --once` per tick + a
+//! 30 s staleness window. Echo arrival is observable at any
+//! non-zero rate; the window covers the worst sub-Hz publisher B3
+//! targets (0.1 Hz → ≥ 3 expected arrivals per 30 s).
+//!
+//! v1.1.6 ITEM 1 (CRITICAL Humble compat) — DROPPED the
+//! `--timeout` flag from the echo invocation: Humble's
+//! `ros-humble-ros2cli 0.18.18` does not support `--timeout` on
+//! `topic echo` (it was added in Iron/Jazzy/Rolling). v1.1.5
+//! shipped with the flag and every probe failed with
+//! `unrecognized arguments: --timeout`, locking every topic to
+//! Idle (DISPATCH 17B Tester-B). The outer `ROS2_SHELLOUT_TIMEOUT`
+//! tokio wrap + `--once` self-termination cap per-probe duration
+//! without the distro-specific flag.
 //!
 //! # Empirical baseline
 //!
@@ -105,12 +115,12 @@ const ROS2_TOPIC_LIST_INTERVAL: Duration = Duration::from_secs(30);
 // extension.
 const ROS2_CACHE_GC_THRESHOLD: Duration = Duration::from_secs(60 * 5);
 
-// v1.1.5 ITEM D (BUG-P5-2) — per-tick short `ros2 topic echo --once
-// --timeout 1` probe. We only need to OBSERVE a message arrival;
-// no Hz computation required. 1 s per probe is the shortest cap
-// that still catches a healthy ≥1 Hz publisher in a single tick
-// while bounding subprocess churn.
-const ROS2_ECHO_PROBE_TIMEOUT: Duration = Duration::from_secs(1);
+// v1.1.6 ITEM 1 — the v1.1.5 `ROS2_ECHO_PROBE_TIMEOUT` const that
+// previously fed `ros2 topic echo --once --timeout <T>` is REMOVED.
+// `ros-humble-ros2cli 0.18.18` rejects `--timeout` on `topic echo`
+// (the flag was added in Iron/Jazzy/Rolling), so the per-probe cap
+// now comes from the outer `ROS2_SHELLOUT_TIMEOUT` tokio wrap +
+// `--once` self-termination alone. See `observe_topic_echo`.
 
 // v1.1.5 ITEM D (BUG-P5-2) — Active is held for this duration after
 // the last observed message arrival on a topic. The window has to
@@ -125,9 +135,11 @@ const ROS2_ECHO_PROBE_TIMEOUT: Duration = Duration::from_secs(1);
 const ROS2_ACTIVITY_STALENESS: Duration = Duration::from_secs(30);
 
 // Inner subprocess timeout for `ros2 topic echo` and `ros2 topic
-// list`. echo `--timeout` does the per-message cap inside ros2;
-// this is the outer wait we apply on tokio's side as belt-and-
-// braces against the subprocess hanging post-message.
+// list`. v1.1.6 ITEM 1 — this is now the ONLY per-probe cap on
+// `echo --once` (the Humble-unsupported `--timeout` flag was
+// dropped from the invocation). `--once` causes echo to
+// self-terminate on the first message; this tokio wrap caps the
+// wait when no message arrives or the subprocess hangs.
 const ROS2_SHELLOUT_TIMEOUT: Duration = Duration::from_secs(3);
 
 // Pre-v1.1.5 the WARNING_NO_PUBLISHER_PREFIX line distinguished
@@ -208,7 +220,7 @@ impl Ros2ShelloutSource {
     }
 
     /// v1.1.5 ITEM D (BUG-P5-2) — spawn `ros2 topic echo --once
-    /// --timeout <T>` and observe whether a message arrived. Returns
+    /// <topic>` and observe whether a message arrived. Returns
     /// `Ok(true)` if echo printed a non-empty body (a message
     /// arrived inside the probe window); `Ok(false)` if echo exited
     /// without printing (no message); `Err(Transient)` on spawn /
@@ -216,19 +228,21 @@ impl Ros2ShelloutSource {
     ///
     /// `--once` makes echo self-terminate after the first message,
     /// so we don't need the kill discipline the hz mechanism
-    /// required. `--timeout` caps the per-probe wait inside ros2.
-    /// The outer tokio timeout is belt-and-braces.
+    /// required.
+    ///
+    /// v1.1.6 ITEM 1 (CRITICAL Humble compat) — REMOVED the
+    /// `--timeout <T>` flag. `ros-humble-ros2cli 0.18.18` does NOT
+    /// support `--timeout` on `topic echo` (it was added in Iron /
+    /// Jazzy / Rolling). Tester-B (DISPATCH 17B) caught it: every
+    /// v1.1.5 probe failed with "unrecognized arguments: --timeout"
+    /// → `last_message_at` never updated → every topic locked Idle.
+    /// The outer `ROS2_SHELLOUT_TIMEOUT` tokio wrap + the `--once`
+    /// self-termination give us the per-probe cap without the
+    /// distro-specific flag. Verified bare
+    /// `ros2 topic echo --once /topic` works on Humble pre-commit.
     async fn observe_topic_echo(topic: &str) -> SourceResult<bool> {
-        let timeout_secs = ROS2_ECHO_PROBE_TIMEOUT.as_secs().to_string();
         let mut child = Command::new("ros2")
-            .args([
-                "topic",
-                "echo",
-                "--once",
-                "--timeout",
-                &timeout_secs,
-                topic,
-            ])
+            .args(ros2_echo_args(topic))
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
@@ -275,6 +289,17 @@ impl Default for Ros2ShelloutSource {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// v1.1.6 ITEM 1 — extracted so the regression-pin test
+/// (`b3_echo_once_no_timeout_flag_detects_active_topic`) can
+/// assert the args list does NOT contain `--timeout`. The flag
+/// was added in Iron/Jazzy/Rolling and is rejected by Humble's
+/// `ros-humble-ros2cli 0.18.18` — v1.1.5 shipped with it and
+/// every probe failed `unrecognized arguments: --timeout`, locking
+/// every ROS2 row to Idle (DISPATCH 17B Tester-B).
+fn ros2_echo_args(topic: &str) -> [&str; 4] {
+    ["topic", "echo", "--once", topic]
 }
 
 /// Pure parser for `ros2 topic list` output. Tester-A's empirical
@@ -488,9 +513,9 @@ mod tests {
              — otherwise the ros2 subprocess is cancelled before it \
              can read a message. This was the v1.1.0 B3 root cause shape.",
         );
-        // v1.1.5 values: 3 s inner outer wait around echo --once
-        // (which has its own --timeout 1 s), 9 s outer dispatcher
-        // ceiling (unchanged from v1.1.3).
+        // v1.1.5 / v1.1.6 values: 3 s inner tokio wait around
+        // echo --once (no `--timeout` flag — see v1.1.6 ITEM 1),
+        // 9 s outer dispatcher ceiling (unchanged from v1.1.3).
         assert_eq!(ROS2_SHELLOUT_TIMEOUT, Duration::from_secs(3));
         assert_eq!(outer, Duration::from_secs(9));
     }
@@ -745,14 +770,61 @@ mod tests {
     /// Instead pin the constants that drive the staleness behaviour:
     /// the staleness window MUST cover at least 3 expected arrivals
     /// of the worst rate B3 cares about (0.1 Hz → ≥ 30 s).
+    ///
+    /// v1.1.6 ITEM 1 — the v1.1.5 `ROS2_ECHO_PROBE_TIMEOUT` pin
+    /// (1 s) was removed alongside the `--timeout` flag. The
+    /// per-probe cap is now the outer `ROS2_SHELLOUT_TIMEOUT` tokio
+    /// wrap (3 s) plus `--once` self-termination; the staleness
+    /// window remains the load-bearing constant for sub-Hz Active.
     #[test]
     fn b3_staleness_window_covers_sub_hz_rates() {
         assert_eq!(ROS2_ACTIVITY_STALENESS, Duration::from_secs(30));
-        assert_eq!(ROS2_ECHO_PROBE_TIMEOUT, Duration::from_secs(1));
         // 0.1 Hz worst-supported publisher emits a message every 10 s;
         // the staleness window must be ≥ 3 * 10 s so losing the
         // expected 3 arrivals is already a real outage.
         assert!(ROS2_ACTIVITY_STALENESS >= Duration::from_secs(30));
+    }
+
+    /// v1.1.6 ITEM 1 (regression pin) — `ros2 topic echo --once`
+    /// must NOT carry `--timeout`. Humble's `ros-humble-ros2cli
+    /// 0.18.18` rejects the flag (`unrecognized arguments:
+    /// --timeout`) and every v1.1.5 probe failed, locking every
+    /// ROS2 topic to Idle (DISPATCH 17B Tester-B). The args list
+    /// must contain `--once` and the requested topic.
+    ///
+    /// We can't unit-test the active-topic happy path without a
+    /// live ros2 graph; the staleness-window arrival simulation is
+    /// covered by `b3_echo_activity_detects_sub_hz_topic`.
+    /// Production-shape integration coverage lives in
+    /// `tests/integration/sampler_harnesses/b3_ros2_harness.sh`
+    /// (updated in v1.1.6 ITEM 2 to mirror the echo-once shape).
+    #[test]
+    fn b3_echo_once_no_timeout_flag_detects_active_topic() {
+        let args = ros2_echo_args("/chatter");
+        assert!(
+            !args.contains(&"--timeout"),
+            "ros2 topic echo args must NOT contain --timeout — \
+             Humble's ros-humble-ros2cli 0.18.18 rejects the flag \
+             (DISPATCH 17B Tester-B). args = {args:?}",
+        );
+        assert!(
+            args.contains(&"--once"),
+            "ros2 topic echo must use --once for self-termination — \
+             it's the per-probe cap now that --timeout is gone. \
+             args = {args:?}",
+        );
+        assert!(
+            args.contains(&"/chatter"),
+            "topic must be present in the args list. args = {args:?}",
+        );
+        // Pin shape: exactly the three static args + the topic.
+        assert_eq!(
+            &args[..],
+            &["topic", "echo", "--once", "/chatter"],
+            "v1.1.6 echo-once shape — any change to this list must \
+             come with a CHANGELOG entry and a re-verification on \
+             Humble (the distro this fix exists for).",
+        );
     }
 
     /// v1.1.5 ITEM E — `forget(pid)` clears the per-PID state.

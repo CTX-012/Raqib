@@ -200,7 +200,7 @@ pub(crate) struct Row {
     /// (vLLM / llama.cpp continue to report throughput-only). Panel
     /// auto-hides the column when every visible row's `activity` is
     /// `None`.
-    pub activity: Option<crate::telemetry::source::ActivityState>,
+    pub activity: Option<ux_contract::activity::ActivityState>,
 }
 
 /// CAR-17 — compute the §3 `WorkloadStatus` for a single annotated
@@ -645,8 +645,8 @@ const ACTIVITY_COL_WIDTH: usize = 8;
 /// Phase 2 / DISPATCH 1 — render an `ActivityState` to its column
 /// label. Bare-variant enum keeps this a pure match; the caller
 /// pads / truncates to `ACTIVITY_COL_WIDTH`.
-fn activity_label(a: crate::telemetry::source::ActivityState) -> &'static str {
-    use crate::telemetry::source::ActivityState;
+fn activity_label(a: ux_contract::activity::ActivityState) -> &'static str {
+    use ux_contract::activity::ActivityState;
     match a {
         ActivityState::Active => "active",
         ActivityState::Idle => "idle",

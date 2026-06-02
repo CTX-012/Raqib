@@ -22,7 +22,8 @@ use crate::telemetry::samplers::{
     llama_cpp_server::LlamaCppServerSource, ollama_api::OllamaApiSource,
     ros2_shellout::Ros2ShelloutSource, vllm_prometheus::VllmPrometheusSource,
 };
-use crate::telemetry::source::{ActivityState, ProcessSnapshot as TelemetryProcessSnapshot};
+use crate::telemetry::source::ProcessSnapshot as TelemetryProcessSnapshot;
+use ux_contract::activity::ActivityState;
 use crate::telemetry::{Dispatcher, TelemetrySource};
 
 /// Errors emitted by the runtime tick loop. Platform errors are fatal;

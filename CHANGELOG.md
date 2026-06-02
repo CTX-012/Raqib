@@ -6,6 +6,99 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project aims to adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 once `v1.0.0` is tagged. Until then, minor versions may include breaking changes.
 
+## [1.1.10] — 2026-06-01 — ActivityState consume + zombie filter
+
+Backlog-clear before Phase 3. Two unrelated items in one release,
+SPLIT into separate commits per Inspector DISPATCH 31 verdict —
+don't couple a mechanical type-source refactor with a behaviour-
+change fix in the same blame line.
+
+NEW EVIDENCE narrowing the v1.1.5 / v1.1.6 ghost-row hypothesis:
+operator confirmed the ghost appeared on BOTH TUI and web.
+Inspector's DISPATCH 31 path map shows both surfaces read the
+shared upstream `state.annotated`, so a ghost-in-both is an
+UPSTREAM bug, not a render-layer bug. `read_process_sample`
+(`src/platform/linux_proc.rs:88`) NOT filtering State=Z meant
+zombies entered `state.annotated` and surfaced on both — making
+zombie filtering a plausible ghost root-cause, not just defensive
+cleanup. Tester repro (DISPATCH 33, parallel) confirms.
+
+### Changed
+
+- **ActivityState consumed from `ux_contract::activity` v0.3.12
+  (ITEM 1, refactor).** DISPATCH 18 (CAR-21) shipped the producer
+  side back in v0.3.12 (`~/ux_contract` commit 537579f); v1.1.10
+  ITEM 1 ships the consumer side. The local `ActivityState`
+  definition in `src/telemetry/source.rs` is removed in favour of
+  `pub use ux_contract::activity::ActivityState;`. Variant
+  taxonomy (`Active / Idle / Loading / NotDetected`), derive set
+  (`Debug, Clone, Copy, PartialEq, Eq, Hash`), and per-variant
+  semantics are unchanged.
+
+  Wire format preserved via serde's remote-derive pattern: a
+  local `ActivityStateDef` mirror with `#[serde(remote = ...)]`
+  + a small `activity_state_option_serde` module that composes
+  the def through `Option<ActivityState>`. `TelemetryFrame`'s
+  `activity_state` field uses
+  `#[serde(default, with = "activity_state_option_serde")]`.
+  Same `"active" / "idle" / "loading" / "not_detected"` JSON
+  output as pre-v1.1.10. No serde leakage onto the contract
+  (it remains dependency-free per its design).
+
+  Cargo.toml: `ux_contract = { path = "../ux_contract",
+  version = "0.3.12" }` — the version field documents the
+  consumer-side assumption.
+
+  Touch: 6 files, 137 insertions / 41 deletions (close to the
+  dispatch's "30–50 LoC" envelope; the extra is the serde shim
+  and its module-level documentation).
+
+### Fixed
+
+- **Zombie processes (State=Z) are filtered from the sample stream
+  (ITEM 2, candidate ghost-row fix).** Pre-v1.1.10
+  `read_process_sample` accepted any PID directory under `/proc`
+  without checking `/proc/<pid>/stat` field 3 (state char). A
+  zombie is an exited-but-unreaped entry: it has a PID and a
+  `comm`, but no live work. Pre-fix it flowed through to
+  `state.annotated` and surfaced as a row on both TUI and web —
+  the ghost pattern.
+
+  Implementation: a new `parse_state_from_stat` parser (anchored
+  on `rfind(')')` for comm-parens safety, same shape as the
+  existing `parse_cpu_ticks_from_stat` and `parse_starttime_from_stat`)
+  + a one-shot `read_state` helper that reads `/proc/<pid>/stat`
+  before the other 5+ reads. An early `if matches!(state,
+  Some('Z')) { return Err(PlatformError::ZombieFiltered(pid)) }`
+  short-circuits zombies. The `collect()` loop matches the new
+  variant explicitly and emits `tracing::trace!` (not the default
+  `tracing::debug!`) so zombie filtering doesn't pollute routine
+  logs.
+
+  Comm-parens-safe: the test `state_parses_comm_with_parens_and_spaces`
+  uses an adversarial fixture where comm is literally
+  `notify (Z) osd` — the `Z` inside comm must NOT bleed into
+  state, and we assert state correctly reads `R` from the
+  post-rparen first token.
+
+  Touch: 2 files, 163 insertions (most is the test fixtures +
+  the new error-variant docstring).
+
+### Notes
+
+- This release ships TWO items split into separate commits so
+  `git blame` cleanly attributes the type-source swap and the
+  behaviour change separately. Either can be reverted
+  independently if a regression surfaces.
+- Tests: 911 → 915 (+1 ITEM 1 consumed-from-contract,
+  +1 ITEM 1 four-variants-round-trip, +3 ITEM 2 zombie filter:
+  asymmetric-fixture + comm-parens-safe + malformed-stat
+  defensiveness; −1 the renamed `activity_state_serialises_snake_case`
+  is replaced by `activity_state_consumed_from_contract`).
+- The ghost-row hypothesis is candidate-CONFIRMED by DISPATCH 33
+  Tester repro (parallel); CHANGELOG will be updated post-merge
+  if the repro disposition changes.
+
 ## [1.1.9] — 2026-06-01 — B3 spawn-churn fix (cadence + backoff + global cache)
 
 Closes the v1.1.8 STOP-AND-SURFACE filing on the ~166 MB/min

@@ -73,6 +73,13 @@ impl ProcessCollector {
             {
                 match self.read_process_sample(pid_str) {
                     Ok(sample) => processes.push(sample),
+                    // v1.1.10 ITEM 2 — zombies are an expected filter,
+                    // not an error worth logging. The trace-level message
+                    // is here for the rare diagnostic case where a
+                    // developer wants to count zombies on a host.
+                    Err(PlatformError::ZombieFiltered(pid)) => {
+                        tracing::trace!(pid, "filtered zombie process");
+                    }
                     Err(e) => {
                         // Log and continue; process may have exited
                         tracing::debug!(pid = pid_str, error = %e, "skipped process");
@@ -85,8 +92,29 @@ impl ProcessCollector {
     }
 
     /// Reads a single process's information from /proc/<pid>/*.
+    ///
+    /// v1.1.10 ITEM 2 — early-rejects zombies (`/proc/<pid>/stat`
+    /// State == 'Z'). A zombie is an exited-but-unreaped process
+    /// entry: it has a PID + `comm`, but no live work. Pre-v1.1.10
+    /// the sampler accepted them, they entered
+    /// `state.annotated` upstream of both TUI and web surfaces, and
+    /// the v1.1.5 / v1.1.6 "ghost row" pattern on shared upstream
+    /// state matches that path exactly (DISPATCH 31 Inspector
+    /// path-map). Returns [`PlatformError::ZombieFiltered`] which
+    /// the caller `collect()` loop suppresses silently — zombies
+    /// are not errors, just non-workloads.
     fn read_process_sample(&self, pid: u32) -> PlatformResult<ProcessSample> {
         let pid_path = PathBuf::from(format!("/proc/{}", pid));
+
+        // v1.1.10 ITEM 2 — zombie short-circuit. Read stat ONCE up
+        // front; if the State field is 'Z', bail before doing the
+        // 5+ other /proc reads. A transient stat-read failure (PID
+        // raced an exit) is treated as "couldn't determine state,
+        // proceed to the regular reads which will surface the real
+        // error" — never as zombie.
+        if matches!(self.read_state(&pid_path), Some('Z')) {
+            return Err(PlatformError::ZombieFiltered(pid));
+        }
 
         let name = self.read_comm(&pid_path, pid)?;
         let cmdline = self.read_cmdline(&pid_path, pid)?;
@@ -113,6 +141,22 @@ impl ProcessCollector {
             cpu_time_ticks,
             os_start_time,
         })
+    }
+
+    /// v1.1.10 ITEM 2 — read the process state character from
+    /// `/proc/<pid>/stat` (field 3 in `proc(5)` parlance). Used by
+    /// the zombie short-circuit in `read_process_sample`. Returns
+    /// `None` on any read / parse failure — the caller defaults to
+    /// "proceed with the regular reads" so a transient race against
+    /// process exit doesn't get misclassified as a zombie. Stat is
+    /// read here separately from `read_os_start_time` /
+    /// `read_cpu_ticks` because the zombie check needs to fire BEFORE
+    /// those reads (so we don't waste 5+ /proc reads on a process
+    /// that's about to be filtered out anyway).
+    fn read_state(&self, pid_path: &Path) -> Option<char> {
+        let stat_path = pid_path.join("stat");
+        let content = fs::read_to_string(&stat_path).ok()?;
+        parse_state_from_stat(&content)
     }
 
     /// Sprint-7 Item 3 — derive the OS spawn timestamp from
@@ -310,6 +354,36 @@ pub(crate) fn parse_starttime_from_stat(stat: &str) -> Option<u64> {
     fields.get(19).and_then(|s| s.parse::<u64>().ok())
 }
 
+/// v1.1.10 ITEM 2 — parse field 3 (`state`, single ASCII char) from
+/// a `/proc/<pid>/stat` line.
+///
+/// Same `rfind(')')` strategy as [`parse_cpu_ticks_from_stat`] /
+/// [`parse_starttime_from_stat`]: comm (field 2) is wrapped in
+/// parens and CAN contain its own `)` (e.g. a process named
+/// `notify-osd (running)`), so the canonical /proc parser pattern
+/// is to anchor on the LAST `)` and whitespace-tokenize the rest.
+/// State is field 3 — index 0 of the post-comm tail.
+///
+/// Returns the state char (`R / S / D / Z / T / t / X / I / …`)
+/// or `None` if the line shape doesn't match (no `)`, or no token
+/// after the `)`, or the token isn't a single char).
+///
+/// The caller in `read_process_sample` only acts on `Some('Z')`;
+/// other characters proceed normally.
+pub(crate) fn parse_state_from_stat(stat: &str) -> Option<char> {
+    let rparen = stat.rfind(')')?;
+    let tail = &stat[rparen + 1..];
+    let first = tail.split_ascii_whitespace().next()?;
+    let mut chars = first.chars();
+    let c = chars.next()?;
+    if chars.next().is_some() {
+        // Field 3 must be exactly one character; defensive against
+        // a malformed stat line slipping through.
+        return None;
+    }
+    Some(c)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -456,6 +530,84 @@ mod tests {
         assert_eq!(parse_starttime_from_stat("1 (bash) S"), None);
         assert_eq!(parse_starttime_from_stat(""), None);
         assert_eq!(parse_starttime_from_stat("1 (bash"), None);
+    }
+
+    // ── v1.1.10 ITEM 2 — zombie filter via /proc/<pid>/stat State ──
+
+    /// Asymmetric-fixture discipline (DISPATCH 32): the zombie
+    /// fixture must be FILTERED while running / sleeping fixtures
+    /// must be KEPT. Drives the parser directly with verbatim
+    /// `proc(5)`-shaped lines.
+    #[test]
+    fn zombie_process_filtered_from_sample() {
+        // Z fixture — `comm` is a benign single token, state char
+        // after the `)` is `Z`. Parser MUST return Some('Z'); the
+        // caller (`read_process_sample`) MUST short-circuit on Z.
+        let z = "4242 (defunct) Z 1 4242 4242 0 -1 4194304 0 0 0 0 \
+                 0 0 0 0 20 0 1 0 999 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 17 0 0 0 0 0 0 0 0 0 0 0 0";
+        assert_eq!(
+            parse_state_from_stat(z),
+            Some('Z'),
+            "Z fixture must parse to State='Z' — this is the row \
+             that would otherwise enter state.annotated and surface \
+             as a ghost on both TUI + web (DISPATCH 31 path map).",
+        );
+
+        // R fixture — running. MUST be kept.
+        let r = "1234 (bash) R 1 1234 1234 34816 1234 4194304 123 0 0 0 \
+                 100 40 0 0 20 0 1 0 999 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 17 0 0 0 0 0 0 0 0 0 0 0 0";
+        assert_eq!(parse_state_from_stat(r), Some('R'));
+        assert_ne!(parse_state_from_stat(r), Some('Z'));
+
+        // S fixture — sleeping (the most common steady-state). MUST be kept.
+        let s = "9999 (sshd) S 1 9999 9999 0 -1 4194368 50 0 0 0 \
+                 0 0 0 0 20 0 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 17 0 0 0 0 0 0 0 0 0 0 0 0";
+        assert_eq!(parse_state_from_stat(s), Some('S'));
+        assert_ne!(parse_state_from_stat(s), Some('Z'));
+    }
+
+    /// The classic /proc/stat parse trap: `comm` is wrapped in
+    /// parens and CAN legally contain spaces and additional parens
+    /// (a process named `notify-osd (running)` produces a stat line
+    /// `1234 (notify-osd (running)) S …`). A naive parser that
+    /// `split_ascii_whitespace`s from the start treats `(running)`
+    /// as field 3 (state). The contract-shape parser anchors on
+    /// `rfind(')')` and tokenizes after — verified here.
+    #[test]
+    fn state_parses_comm_with_parens_and_spaces() {
+        // comm contains a space + nested parens + the literal text
+        // "Z " in the middle (a classic adversarial fixture — a
+        // naive parser scanning forward could match the `Z` inside
+        // comm as the state). The post-rparen tail starts at the
+        // state character, which here is 'R'.
+        let stat = "42 (notify (Z) osd) R 1 42 42 0 -1 4194304 0 0 0 0 \
+                    500 250 0 0 20 0 1 0 31337 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 17 0 0 0 0 0 0 0 0 0 0 0 0";
+        assert_eq!(
+            parse_state_from_stat(stat),
+            Some('R'),
+            "Comm `notify (Z) osd` must NOT bleed into state — the \
+             `Z` inside comm is a known adversarial trap. Anchored \
+             rfind(')') + tokenize-after is the correct shape (same \
+             as parse_cpu_ticks_from_stat / parse_starttime_from_stat).",
+        );
+    }
+
+    /// Malformed-shape and truncated-input defensiveness: the
+    /// parser must return None on garbage rather than panic.
+    #[test]
+    fn state_returns_none_on_malformed_stat() {
+        // No `)` at all.
+        assert_eq!(parse_state_from_stat(""), None);
+        assert_eq!(parse_state_from_stat("1234 bash R"), None);
+        // `)` but nothing after.
+        assert_eq!(parse_state_from_stat("1234 (bash)"), None);
+        // First post-comm token is multi-char (not a state char).
+        assert_eq!(
+            parse_state_from_stat("1234 (bash) RR"),
+            None,
+            "State field must be exactly one char; defensive against \
+             a malformed line.",
+        );
     }
 
     #[test]

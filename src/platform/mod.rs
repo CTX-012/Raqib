@@ -30,6 +30,17 @@ pub enum PlatformError {
     #[error("sysinfo error: {0}")]
     SysInfo(String),
 
+    /// v1.1.10 ITEM 2 — the process is a zombie (`/proc/<pid>/stat`
+    /// State == 'Z'): exited but not yet reaped by its parent. The
+    /// process-collector loop matches on this variant explicitly and
+    /// silently filters the PID out — zombies are not live workloads
+    /// and surfacing them as rows produces the v1.1.5/v1.1.6 ghost-
+    /// row pattern Inspector flagged in DISPATCH 31. Carries the PID
+    /// for any downstream telemetry that wants to count filtered
+    /// zombies (none currently).
+    #[error("pid {0} is a zombie (filtered)")]
+    ZombieFiltered(u32),
+
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 }

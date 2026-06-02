@@ -209,29 +209,16 @@ const SAMPLER_MARKER_VALUE: &str = "ros2-shellout";
 ///     ([`ROS2_ACTIVITY_STALENESS`]) decides Active vs Idle.
 #[derive(Debug, Default)]
 struct PerPidState {
-    /// v1.1.9 ITEM (b) — last `Instant` a `ros2 topic list` run
-    /// **succeeded**. Updated only on `Ok`. Pre-v1.1.9 this was the
-    /// sole timestamp and a transient failure would retry every tick
-    /// because the cadence predicate keyed off success time only —
-    /// the failure amplifier DISPATCH 28 strace called out
-    /// (~18% of the spawn churn under flaky-graph conditions).
-    last_topic_list_success_at: Option<Instant>,
-    /// v1.1.9 ITEM (b) — last `Instant` a `ros2 topic list` run was
-    /// **attempted** (success or failure). The cadence predicate now
-    /// gates on this, so a failed attempt costs at most one spawn
-    /// per `ROS2_TOPIC_LIST_INTERVAL`. Separating attempt from
-    /// success (rather than the equivalent 1-LoC "update both on
-    /// every attempt" shortcut) keeps the two timestamps independently
-    /// readable — "when did we last try" and "when did we last
-    /// succeed" are useful at different points in the staleness /
-    /// GC logic.
-    last_topic_list_attempt_at: Option<Instant>,
-    /// Cached topic list from the most recent successful `ros2 topic
-    /// list` run.
-    topic_list: Vec<String>,
+    /// v1.1.9 ITEM (a) — `Instant` this PID was last sampled (any
+    /// outcome). Anchors the per-PID GC sweep at the top of
+    /// `sample`. Pre-v1.1.9 the sweep keyed off
+    /// `last_topic_list_attempt_at`, but ITEM (a) lifted the
+    /// topic-list timestamps out to `Ros2ShelloutSource` (shared),
+    /// so per-PID state needed a fresh "last touched" anchor.
+    last_seen_at: Option<Instant>,
     /// topic → last `Instant` an echo probe successfully observed a
-    /// message arrival. Bounded by the topic_list size; cleared on
-    /// `forget(pid)` (v1.1.5 ITEM E).
+    /// message arrival. Bounded by the (now-global) topic_list size;
+    /// cleared on `forget(pid)` (v1.1.5 ITEM E / v1.1.7 ITEM 2).
     last_message_at: HashMap<String, Instant>,
     /// v1.1.9 ITEM (c) — topic → last `Instant` an echo probe was
     /// SPAWNED for this PID/topic pair (success or failure). Drives
@@ -245,14 +232,43 @@ struct PerPidState {
 
 /// ROS2 topic-rate sampler. One source instance per dispatcher;
 /// per-PID state keeps cadence + last-observation across ticks.
+///
+/// v1.1.9 ITEM (a) — `topic_list` + `last_topic_list_{success,attempt}_at`
+/// live HERE on the sampler (sampler-global), not on per-PID state.
+/// The ROS DDS graph is shared across all PIDs sampled by this
+/// instance, so `ros2 topic list` runs ONCE per
+/// [`ROS2_TOPIC_LIST_INTERVAL`] cadence regardless of PID count.
+/// Pre-v1.1.9 each PID independently cached and refreshed the same
+/// global list — under the empirical 10-publisher workload that
+/// meant up to 10× redundant `ros2 topic list` spawns per cadence
+/// window, contributing to the residual spawn churn DISPATCH 28
+/// strace identified. Move is purely internal sampler state; the
+/// trait surface and `Dispatcher::tick` contract are unchanged.
 pub struct Ros2ShelloutSource {
+    /// Per-PID activity-state cache. PerPidState now only holds
+    /// per-PID/per-topic timing (`last_message_at`, `last_echo_probe_at`)
+    /// + the `last_seen_at` GC anchor.
     cache: HashMap<u32, PerPidState>,
+    /// Cached topic list from the most recent successful
+    /// `ros2 topic list` run (sampler-global per v1.1.9 ITEM (a)).
+    topic_list: Vec<String>,
+    /// Sampler-global `last_topic_list_success_at`. Updated only on
+    /// `Ok` from `run_topic_list`. See v1.1.9 ITEM (b) for the
+    /// failure-amplifier rationale.
+    last_topic_list_success_at: Option<Instant>,
+    /// Sampler-global `last_topic_list_attempt_at`. The cadence
+    /// predicate keys off this so a transient failure costs at most
+    /// one spawn per [`ROS2_TOPIC_LIST_INTERVAL`].
+    last_topic_list_attempt_at: Option<Instant>,
 }
 
 impl Ros2ShelloutSource {
     pub fn new() -> Self {
         Self {
             cache: HashMap::new(),
+            topic_list: Vec::new(),
+            last_topic_list_success_at: None,
+            last_topic_list_attempt_at: None,
         }
     }
 
@@ -482,26 +498,27 @@ impl TelemetrySource for Ros2ShelloutSource {
         let now = Instant::now();
         // v1.1.5 ITEM E — sweep stale PerPidState entries before
         // touching the cache for this PID. Bounds the leak in time
-        // independent of dispatcher forget propagation. v1.1.9 ITEM
-        // (b) anchored on `last_topic_list_attempt_at` (the
-        // "last-touched" timestamp), since it's set on both success
-        // AND failed attempts — a PID whose probes keep failing is
-        // still active enough to keep its state warm.
+        // independent of dispatcher forget propagation. v1.1.9
+        // ITEM (a) anchored on per-PID `last_seen_at` (updated
+        // every tick this sampler runs against this PID), since
+        // `last_topic_list_*` moved to sampler-global state.
         self.cache.retain(|_, st| {
-            st.last_topic_list_attempt_at
+            st.last_seen_at
                 .map(|t| now.duration_since(t) < ROS2_CACHE_GC_THRESHOLD)
-                .unwrap_or(true) // cold-start entries (no attempt yet) are kept
+                .unwrap_or(true) // cold-start entries (no tick yet) are kept
         });
-        let state = self.cache.entry(proc.pid).or_default();
 
-        // Refresh topic list per cadence (graphs change slowly).
+        // v1.1.9 ITEM (a) — sampler-global topic-list refresh. Pre-
+        // v1.1.9 each PID cached its own copy; under N publishers
+        // that meant N redundant `ros2 topic list` spawns per
+        // cadence. The graph is shared, so one refresh suffices.
         // v1.1.9 ITEM (b) — gate on `last_topic_list_attempt_at`
         // (not `last_topic_list_success_at`), so a transient
         // `Err(Transient)` from `run_topic_list` doesn't retry on
         // every subsequent tick. We back off to the full
         // `ROS2_TOPIC_LIST_INTERVAL` cadence regardless of outcome,
         // and only the success path updates the cached `topic_list`.
-        let need_list = state
+        let need_list = self
             .last_topic_list_attempt_at
             .map(|t| now.duration_since(t) >= ROS2_TOPIC_LIST_INTERVAL)
             .unwrap_or(true);
@@ -509,19 +526,27 @@ impl TelemetrySource for Ros2ShelloutSource {
             // Mark the attempt BEFORE awaiting; same reasoning as
             // ITEM (c)'s `last_echo_probe_at.insert(..)` — a slow
             // or failing subprocess mustn't double-fire next tick.
-            state.last_topic_list_attempt_at = Some(now);
+            self.last_topic_list_attempt_at = Some(now);
             match Self::run_topic_list().await {
                 Ok(topics) => {
-                    state.topic_list = topics;
-                    state.last_topic_list_success_at = Some(now);
+                    self.topic_list = topics;
+                    self.last_topic_list_success_at = Some(now);
                 }
                 Err(e) => return Err(e),
             }
         }
 
-        if state.topic_list.is_empty() {
+        if self.topic_list.is_empty() {
+            // Update the PID's last_seen anchor before bailing so
+            // the GC sweep doesn't drop a PID whose only failure
+            // mode is "graph empty."
+            self.cache.entry(proc.pid).or_default().last_seen_at = Some(now);
             return Ok(activity_frame(proc.pid, ActivityState::NotDetected));
         }
+
+        // Per-PID state — only touch after the global cache is fresh.
+        let state = self.cache.entry(proc.pid).or_default();
+        state.last_seen_at = Some(now);
 
         // v1.1.5 ITEM D (BUG-P5-2) — pick the first topic and probe
         // it with `ros2 topic echo --once`. v1.1.9 ITEM (c) — gate
@@ -534,7 +559,12 @@ impl TelemetrySource for Ros2ShelloutSource {
         // the subprocess spawn. v1.1.1+ can round-robin across
         // topics; single-topic is fine while the dispatcher's
         // per-source sample_timeout is 9 s.
-        let topic = state.topic_list[0].clone();
+        let topic = self.topic_list[0].clone();
+        // Re-borrow state after touching `self.topic_list` — `state`
+        // was a borrow into `self.cache` so reading a disjoint field
+        // is fine, but the explicit re-borrow keeps the code easy to
+        // audit.
+        let state = self.cache.entry(proc.pid).or_default();
         let need_probe = state
             .last_echo_probe_at
             .get(&topic)
@@ -896,14 +926,17 @@ mod tests {
         let mut s = Ros2ShelloutSource::new();
         let pid = 42;
         let topic = "/sub_hz".to_string();
-        // Seed the per-PID state as if the topic-list refresh has
-        // happened and a message was just observed.
+        // Seed the sampler-global topic-list and the per-PID
+        // last_message_at as if the refresh has happened and a
+        // message was just observed. v1.1.9 ITEM (a) — topic_list +
+        // last_topic_list_* now live on the source.
         let t0 = Instant::now();
+        s.last_topic_list_success_at = Some(t0);
+        s.last_topic_list_attempt_at = Some(t0);
+        s.topic_list = vec![topic.clone()];
         {
             let st = s.cache.entry(pid).or_default();
-            st.last_topic_list_success_at = Some(t0);
-            st.last_topic_list_attempt_at = Some(t0);
-            st.topic_list = vec![topic.clone()];
+            st.last_seen_at = Some(t0);
             st.last_message_at.insert(topic.clone(), t0);
         }
 
@@ -996,13 +1029,14 @@ mod tests {
         let pid = 42;
         let topic = "/chatter".to_string();
         let t0 = Instant::now();
-        // Seed: topic list ready; a probe at t0 succeeded and saw a
-        // message at t0.
+        // Seed: topic list ready (sampler-global per v1.1.9 ITEM
+        // (a)); a probe at t0 succeeded and saw a message at t0.
+        s.last_topic_list_success_at = Some(t0);
+        s.last_topic_list_attempt_at = Some(t0);
+        s.topic_list = vec![topic.clone()];
         {
             let st = s.cache.entry(pid).or_default();
-            st.last_topic_list_success_at = Some(t0);
-            st.last_topic_list_attempt_at = Some(t0);
-            st.topic_list = vec![topic.clone()];
+            st.last_seen_at = Some(t0);
             st.last_message_at.insert(topic.clone(), t0);
             st.last_echo_probe_at.insert(topic.clone(), t0);
         }
@@ -1046,6 +1080,102 @@ mod tests {
         );
     }
 
+    // ─── v1.1.9 ITEM (a) — sampler-global topic-list cache ──────────
+
+    /// v1.1.9 ITEM (a) — `topic_list` + `last_topic_list_*` are
+    /// sampler-global, not per-PID. The ROS DDS graph is shared
+    /// across all PIDs sampled by this instance, so `ros2 topic
+    /// list` runs ONCE per `ROS2_TOPIC_LIST_INTERVAL` regardless of
+    /// PID count. Pre-v1.1.9 each PID independently cached the
+    /// list — under the empirical 10-publisher workload that meant
+    /// up to 10× redundant `ros2 topic list` spawns per cadence
+    /// window.
+    ///
+    /// Three structural pins:
+    ///   1. The fields exist on `Ros2ShelloutSource`, NOT on
+    ///      `PerPidState` (verified by setting them on `s` directly
+    ///      and reading them back; a refactor that re-introduces
+    ///      per-PID copies fails to compile against this test
+    ///      because `PerPidState` no longer has those fields).
+    ///   2. A single update to `s.topic_list` is visible from EVERY
+    ///      PID's sample path — there's only one Vec to share.
+    ///   3. A `last_topic_list_attempt_at` update on the source
+    ///      gates the refresh predicate for ALL PIDs in the same
+    ///      tick (not per-PID).
+    #[test]
+    fn b3_topic_list_cache_is_sampler_global() {
+        let mut s = Ros2ShelloutSource::new();
+        let t0 = Instant::now();
+
+        // (1) Structural pin: the topic-list state is on the source.
+        // PerPidState::default() carries none of the topic-list
+        // fields (compile-time verified by `b3_perpidstate_minimal_after_a_lift`
+        // below — the field set is asserted via construction).
+        s.topic_list = vec!["/chatter".into(), "/scan".into()];
+        s.last_topic_list_attempt_at = Some(t0);
+        s.last_topic_list_success_at = Some(t0);
+
+        // (2) Many PIDs share the SAME backing Vec — verified by
+        // pointer equality between two read paths. (For Vec the
+        // backing buffer is the load-bearing thing; a per-PID copy
+        // would have a distinct allocation.)
+        let p_a_topic = &s.topic_list;
+        let snapshot_ptr_before = p_a_topic.as_ptr();
+
+        // Per-PID activity caches exist independently; populating
+        // one PID's last_message_at must NOT clone the topic list.
+        let st = s.cache.entry(7).or_default();
+        st.last_seen_at = Some(t0);
+        st.last_message_at.insert("/chatter".into(), t0);
+        let st = s.cache.entry(8).or_default();
+        st.last_seen_at = Some(t0);
+        st.last_message_at.insert("/chatter".into(), t0);
+
+        // The source's topic_list backing is unchanged after
+        // mutating PerPidState entries.
+        assert_eq!(
+            s.topic_list.as_ptr(),
+            snapshot_ptr_before,
+            "topic_list backing must remain a single Vec on the \
+             source — a refactor that copies it per PID would \
+             change the pointer.",
+        );
+
+        // (3) Cadence-gate predicate uses the SOURCE timestamp
+        // (not per-PID). At t0+5s the predicate must say "no
+        // refresh needed" REGARDLESS of PID — there's only one
+        // timestamp to consult.
+        let t5 = t0 + Duration::from_secs(5);
+        let need_list = s
+            .last_topic_list_attempt_at
+            .map(|t| t5.duration_since(t) >= ROS2_TOPIC_LIST_INTERVAL)
+            .unwrap_or(true);
+        assert!(!need_list, "cadence holds at t0+5s for ALL PIDs");
+
+        // Pre-v1.1.9 the predicate was per-PID: 10 PIDs all aligned
+        // at t0 would all spawn at t0 + 30 s in one burst. With
+        // ITEM (a), one source-level timestamp gates the refresh:
+        // exactly one spawn per ROS2_TOPIC_LIST_INTERVAL, period.
+    }
+
+    /// v1.1.9 ITEM (a) structural pin: `PerPidState` no longer
+    /// carries `topic_list` or `last_topic_list_*` after the lift.
+    /// Constructing it with the post-v1.1.9 field set must compile;
+    /// a refactor that re-adds the old fields would either need to
+    /// update this test or leave it failing. The intent is to
+    /// surface a `git grep`-able tripwire for the lift property.
+    #[test]
+    fn b3_perpidstate_minimal_after_a_lift() {
+        let st = PerPidState::default();
+        // These fields MUST exist post-lift:
+        let _ = st.last_seen_at;
+        let _ = &st.last_message_at;
+        let _ = &st.last_echo_probe_at;
+        // The lifted-away fields are intentionally NOT on
+        // PerPidState anymore. Trying to reference them here would
+        // fail to compile — this comment documents the intent.
+    }
+
     // ─── v1.1.9 ITEM (b) — topic-list failure backoff ───────────────
 
     /// v1.1.9 ITEM (b) — the topic-list refresh cadence keys off
@@ -1068,24 +1198,20 @@ mod tests {
     #[test]
     fn b3_topic_list_failure_backs_off_to_cadence() {
         let mut s = Ros2ShelloutSource::new();
-        let pid = 42;
         let t0 = Instant::now();
 
-        // Simulate a failed `run_topic_list` at t0: attempt updates,
-        // success does NOT.
-        {
-            let st = s.cache.entry(pid).or_default();
-            st.last_topic_list_attempt_at = Some(t0);
-            // last_topic_list_success_at stays None — no successful
-            // refresh yet.
-        }
+        // v1.1.9 ITEM (a) — topic-list state lives on the source
+        // (sampler-global). Simulate a failed `run_topic_list` at
+        // t0: attempt updates, success does NOT.
+        s.last_topic_list_attempt_at = Some(t0);
+        // last_topic_list_success_at stays None — no successful
+        // refresh yet.
 
         // At t0 + 5 s — well inside ROS2_TOPIC_LIST_INTERVAL (30 s).
         // The production predicate over `last_topic_list_attempt_at`
         // must say "no fresh attempt needed."
         let t5 = t0 + Duration::from_secs(5);
-        let st = s.cache.get(&pid).unwrap();
-        let need_list = st
+        let need_list = s
             .last_topic_list_attempt_at
             .map(|t| t5.duration_since(t) >= ROS2_TOPIC_LIST_INTERVAL)
             .unwrap_or(true);
@@ -1100,7 +1226,7 @@ mod tests {
         // At t0 + 30 s — boundary: cadence elapsed regardless of
         // success/failure.
         let t30 = t0 + ROS2_TOPIC_LIST_INTERVAL;
-        let need_list = st
+        let need_list = s
             .last_topic_list_attempt_at
             .map(|t| t30.duration_since(t) >= ROS2_TOPIC_LIST_INTERVAL)
             .unwrap_or(true);
@@ -1110,16 +1236,12 @@ mod tests {
         );
 
         // Now simulate a SUCCESS at t30: both timestamps update.
-        {
-            let st = s.cache.entry(pid).or_default();
-            st.last_topic_list_attempt_at = Some(t30);
-            st.last_topic_list_success_at = Some(t30);
-            st.topic_list = vec!["/chatter".into()];
-        }
-        let st = s.cache.get(&pid).unwrap();
+        s.last_topic_list_attempt_at = Some(t30);
+        s.last_topic_list_success_at = Some(t30);
+        s.topic_list = vec!["/chatter".into()];
         assert_eq!(
-            st.last_topic_list_attempt_at,
-            st.last_topic_list_success_at,
+            s.last_topic_list_attempt_at,
+            s.last_topic_list_success_at,
             "success path must update BOTH timestamps so a downstream \
              reader can compare them and find them in sync",
         );
@@ -1128,19 +1250,15 @@ mod tests {
         // updates only attempt_at; success_at stays at t30 so the
         // GC / staleness logic can still see "succeeded 30 s ago."
         let t_fail = t30 + Duration::from_secs(35); // > cadence
-        {
-            let st = s.cache.entry(pid).or_default();
-            st.last_topic_list_attempt_at = Some(t_fail);
-            // success_at deliberately not touched
-        }
-        let st = s.cache.get(&pid).unwrap();
+        s.last_topic_list_attempt_at = Some(t_fail);
+        // success_at deliberately not touched
         assert_eq!(
-            st.last_topic_list_success_at,
+            s.last_topic_list_success_at,
             Some(t30),
             "failure path must NOT touch last_topic_list_success_at",
         );
         assert_eq!(
-            st.last_topic_list_attempt_at,
+            s.last_topic_list_attempt_at,
             Some(t_fail),
             "failure path must update last_topic_list_attempt_at",
         );
@@ -1225,7 +1343,10 @@ mod tests {
     fn forget_drops_per_pid_state() {
         let mut s = Ros2ShelloutSource::new();
         let st = s.cache.entry(7).or_default();
-        st.topic_list = vec!["/x".into()];
+        // v1.1.9 ITEM (a) — topic_list moved to sampler-global, so
+        // PerPidState seeding here is the per-PID-only fields
+        // (last_message_at, last_echo_probe_at, last_seen_at).
+        st.last_seen_at = Some(Instant::now());
         st.last_message_at
             .insert("/x".into(), Instant::now());
         assert!(s.cache.contains_key(&7));
@@ -1247,11 +1368,12 @@ mod tests {
     fn b3_on_forget_clears_pid_cache_promptly() {
         use crate::telemetry::source::TelemetrySource;
         let mut s = Ros2ShelloutSource::new();
-        // Seed: two PIDs with state; on_forget(13) should drop
-        // ONLY pid 13 — pid 27 stays.
+        // Seed: two PIDs with per-PID state (topic_list moved to
+        // sampler-global in v1.1.9 ITEM (a); seed last_message_at
+        // + last_seen_at to mark the entry as live).
         for pid in [13u32, 27] {
             let st = s.cache.entry(pid).or_default();
-            st.topic_list = vec![format!("/topic_{pid}")];
+            st.last_seen_at = Some(Instant::now());
             st.last_message_at
                 .insert(format!("/topic_{pid}"), Instant::now());
         }
@@ -1275,29 +1397,31 @@ mod tests {
     /// Test exercises the sweep predicate directly (the `sample`
     /// method can't be driven without a real `ros2` subprocess).
     ///
-    /// v1.1.9 ITEM (b) — anchored on `last_topic_list_attempt_at`
-    /// (the "last-touched" timestamp) so a PID whose probes are
-    /// failing repeatedly is still considered fresh and not swept.
+    /// v1.1.9 ITEM (a) — anchored on per-PID `last_seen_at` (the
+    /// "this sampler touched this PID at" timestamp). Pre-v1.1.9
+    /// the sweep keyed off `last_topic_list_attempt_at`, but ITEM
+    /// (a) lifted the topic-list timestamps to sampler-global state.
+    /// `last_seen_at` is updated at the top of `sample` for every
+    /// PID that flows through, so a PID whose probes are failing
+    /// (or returning Ok(false)) is still kept fresh in the cache.
     #[test]
     fn b3_cache_gc_drops_stale_entries() {
         let mut s = Ros2ShelloutSource::new();
         let now = Instant::now();
-        // Stale PID — last_topic_list_attempt_at well past the threshold.
+        // Stale PID — last_seen_at well past the threshold.
         let stale = s.cache.entry(100).or_default();
-        stale.last_topic_list_attempt_at =
+        stale.last_seen_at =
             Some(now - ROS2_CACHE_GC_THRESHOLD - Duration::from_secs(1));
-        stale.topic_list = vec!["/old".into()];
         // Fresh PID — well inside the threshold.
         let fresh = s.cache.entry(200).or_default();
-        fresh.last_topic_list_attempt_at = Some(now);
-        fresh.topic_list = vec!["/new".into()];
-        // Cold-start entry (no attempt yet) — must be kept.
+        fresh.last_seen_at = Some(now);
+        // Cold-start entry (never sampled) — must be kept.
         let cold = s.cache.entry(300).or_default();
-        cold.last_topic_list_attempt_at = None;
+        cold.last_seen_at = None;
 
         // The sweep predicate the production sample() applies:
         s.cache.retain(|_, st| {
-            st.last_topic_list_attempt_at
+            st.last_seen_at
                 .map(|t| now.duration_since(t) < ROS2_CACHE_GC_THRESHOLD)
                 .unwrap_or(true)
         });

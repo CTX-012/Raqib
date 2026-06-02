@@ -48,7 +48,7 @@ mime_guess = "2"
 # UX_CONTRACT.md v0.3 source of truth — copy strings, alert IDs, thresholds,
 # action enum, themes, sizing. Sibling crate, owned by Agent A. Do not edit
 # from this repo; file a Contract Amendment Request instead.
-ux_contract = { path = "../ux_contract" }
+ux_contract = { path = "../ux_contract", version = "0.3.12" }
 
 # v1.1.7 (DISPATCH 22 ITEM 3 fallback, operator-pre-approved) — mimalloc
 # global allocator. The Arc-share fix (ITEM 1) dropped per-tick clone

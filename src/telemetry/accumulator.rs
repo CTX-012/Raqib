@@ -9,7 +9,8 @@ use std::collections::HashMap;
 
 use crate::storage::run_store::RunMetrics;
 use crate::telemetry::concurrent_requests::TimeWeightedGauge;
-use crate::telemetry::source::{ActivityState, TelemetryFrame};
+use crate::telemetry::source::TelemetryFrame;
+use ux_contract::activity::ActivityState;
 
 /// Running aggregates for one PID. Reset on PID reuse (the dispatcher
 /// notices a fresh spawn and instantiates a new accumulator).

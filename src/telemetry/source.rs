@@ -76,35 +76,80 @@ pub struct ProcessSnapshot {
     pub workload_category: Option<crate::model::WorkloadCategory>,
 }
 
-/// Phase 2 — per-category activity surfacing (DISPATCH 1 foundation).
+// Phase 2 — per-category activity surfacing (DISPATCH 1 foundation).
+//
+// v1.1.10 ITEM 1 (DISPATCH 32 / CAR-21): `ActivityState` is now
+// consumed from `ux_contract::activity` v0.3.12 — single source of
+// truth, ratified through edge_monitor's P5 sampler validation
+// cycle (v1.1.0–v1.1.5). Variant taxonomy (Active / Idle / Loading
+// / NotDetected) and the `Debug, Clone, Copy, PartialEq, Eq, Hash`
+// shape are unchanged; see the contract's doc-comment for the
+// canonical per-variant semantics.
+//
+// The contract crate is intentionally zero-dependency (no `serde`
+// derives on the enum), so wire serialization belongs to the
+// consumer at its boundary. `web/wire.rs::activity_state_to_str`
+// already does that for the dashboard. For `TelemetryFrame`'s
+// `#[derive(Serialize, Deserialize)]` we use serde's remote-derive
+// pattern via `ActivityStateDef` below — no behaviour change,
+// identical snake_case wire shape (`"active" / "idle" / "loading"
+// / "not_detected"`), no serde leakage onto the contract.
+pub use ux_contract::activity::ActivityState;
+
+/// v1.1.10 ITEM 1 — serde remote-derive shim for the foreign
+/// [`ux_contract::activity::ActivityState`]. The contract enum has
+/// no `Serialize`/`Deserialize` derives (the crate is intentionally
+/// dependency-free), so we use this local mirror with
+/// `#[serde(remote = ...)]` to give serde a handle on the foreign
+/// type without forcing a dep onto the contract crate.
 ///
-/// Samplers produce one of four states per process per sample:
+/// Wire shape: `"active" / "idle" / "loading" / "not_detected"` —
+/// IDENTICAL to the pre-v1.1.10 local enum's `rename_all = "snake_case"`
+/// output. A wire-format regression-pin lives in
+/// `tests/telemetry_frame_activity_state_wire.rs`-style coverage
+/// inside this module (see `activity_state_consumed_from_contract`).
 ///
-/// * `Active` — workload is doing observable work (publishing topics,
-///   running prompts, high CPU on the inference loop).
-/// * `Idle` — workload is alive but doing no observable work.
-/// * `Loading` — workload is in a startup / warm-up phase (model
-///   load, cold-start).
-/// * `NotDetected` — sampler ran but couldn't determine state (no
-///   API, no shellout output, insufficient samples in the rolling
-///   window, etc.). Distinct from "sampler didn't apply": if no
-///   sampler ever sets `activity_state` for a PID, the accumulator
-///   returns `None` and the UI hides the column for that row.
-///
-/// The variant shape is a **bare enum** (no payload). The "why not
-/// detected" is per-sampler debug context, not user-visible state;
-/// granularity (sub-variants / reasons) can be added additively in
-/// v1.1.1+ via P5 sampler validation.
-///
-/// CAR-candidate: lift to `ux_contract::activity` in v0.3.12 once
-/// shape proven through P5 sampler validation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// Applied at the field site via
+/// `#[serde(with = "activity_state_option_serde")]` on `Option<ActivityState>`.
+#[derive(Serialize, Deserialize)]
+#[serde(remote = "ux_contract::activity::ActivityState")]
 #[serde(rename_all = "snake_case")]
-pub enum ActivityState {
+#[allow(dead_code)] // referenced through serde's `with` attribute, not directly
+enum ActivityStateDef {
     Active,
     Idle,
     Loading,
     NotDetected,
+}
+
+/// Serde shim for `Option<ActivityState>` that delegates to
+/// `ActivityStateDef`. `#[serde(with = "Def")]` doesn't compose
+/// directly through `Option`, so we wrap the `Some` payload in a
+/// transparent helper inside the serializer / deserializer.
+pub(crate) mod activity_state_option_serde {
+    use super::{ActivityState, ActivityStateDef};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S>(value: &Option<ActivityState>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        #[derive(Serialize)]
+        struct Helper<'a>(#[serde(with = "ActivityStateDef")] &'a ActivityState);
+        match value {
+            Some(v) => serializer.serialize_some(&Helper(v)),
+            None => serializer.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<ActivityState>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Helper(#[serde(with = "ActivityStateDef")] ActivityState);
+        Ok(Option::<Helper>::deserialize(deserializer)?.map(|h| h.0))
+    }
 }
 
 /// One reading. Most fields are `Option` because no single runtime
@@ -162,7 +207,13 @@ pub struct TelemetryFrame {
     /// value per PID). Additive wire-schema bump per Inspector #7
     /// ratification: a v1.0 RunRecord JSON round-trips into a v1.1
     /// reader by virtue of `#[serde(default)]`.
-    #[serde(default)]
+    ///
+    /// v1.1.10 ITEM 1 — `ActivityState` is now the foreign type from
+    /// `ux_contract::activity` (zero-dep crate, no serde derives).
+    /// Wire format unchanged via the `activity_state_option_serde`
+    /// shim that mirrors the pre-v1.1.10 `rename_all = "snake_case"`
+    /// output.
+    #[serde(default, with = "activity_state_option_serde")]
     pub activity_state: Option<ActivityState>,
 }
 
@@ -376,23 +427,66 @@ mod tests {
 
     // ─── Phase 2 / DISPATCH 1 — ActivityState wire shape ────────────
 
-    /// `ActivityState` serialises to snake_case strings (#[serde
-    /// (rename_all = "snake_case")]). Pins the wire-shape contract
-    /// the Svelte SPA + integration tests both lean on.
+    /// v1.1.10 ITEM 1 — wire-format regression pin for the foreign
+    /// [`ux_contract::activity::ActivityState`]. The contract enum
+    /// is zero-dep (no `Serialize` derive), so `serde_json::to_string`
+    /// on the bare enum no longer compiles. Wire shape is preserved
+    /// through `TelemetryFrame`'s `activity_state_option_serde`
+    /// shim — round-trip via the field and assert the snake_case
+    /// payload (`"active" / "idle" / "loading" / "not_detected"`)
+    /// appears verbatim in the JSON.
+    ///
+    /// Renamed from `activity_state_serialises_snake_case` because
+    /// the pin's surface moved (enum → field-via-shim).
     #[test]
-    fn activity_state_serialises_snake_case() {
+    fn activity_state_consumed_from_contract() {
         let cases: &[(ActivityState, &str)] = &[
             (ActivityState::Active, "\"active\""),
             (ActivityState::Idle, "\"idle\""),
             (ActivityState::Loading, "\"loading\""),
             (ActivityState::NotDetected, "\"not_detected\""),
         ];
-        for (state, expected) in cases {
-            let serialised = serde_json::to_string(state).unwrap();
-            assert_eq!(&serialised, expected, "{state:?} should serialise to {expected}");
-            // Round-trip back.
-            let parsed: ActivityState = serde_json::from_str(expected).unwrap();
-            assert_eq!(&parsed, state);
+        for (state, expected_payload) in cases {
+            let mut frame = TelemetryFrame::new(7);
+            frame.activity_state = Some(*state);
+            let json = serde_json::to_string(&frame).unwrap();
+            assert!(
+                json.contains(expected_payload),
+                "TelemetryFrame{{ activity_state: Some({state:?}) }} JSON \
+                 must contain {expected_payload} (via the v1.1.10 \
+                 activity_state_option_serde shim). got: {json}",
+            );
+            // Round-trip back through the shim.
+            let restored: TelemetryFrame = serde_json::from_str(&json).unwrap();
+            assert_eq!(
+                restored.activity_state,
+                Some(*state),
+                "round-trip via the shim must preserve the variant",
+            );
+        }
+    }
+
+    /// v1.1.10 ITEM 1 — pin that the foreign `ActivityState` is
+    /// distinctly the four contract variants and they round-trip
+    /// via the shim end-to-end. Complements the contract-side
+    /// `all_four_variants_are_distinct` test in `~/ux_contract`
+    /// (which pins the variant set at the producer); this is the
+    /// consumer-side pin that all four variants reach edge_monitor
+    /// without collapse.
+    #[test]
+    fn activity_state_four_variants_round_trip_via_shim() {
+        let states = [
+            ActivityState::Active,
+            ActivityState::Idle,
+            ActivityState::Loading,
+            ActivityState::NotDetected,
+        ];
+        for state in &states {
+            let mut frame = TelemetryFrame::new(13);
+            frame.activity_state = Some(*state);
+            let json = serde_json::to_string(&frame).unwrap();
+            let restored: TelemetryFrame = serde_json::from_str(&json).unwrap();
+            assert_eq!(restored.activity_state, Some(*state));
         }
     }
 

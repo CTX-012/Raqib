@@ -345,8 +345,8 @@ impl WireWorkload {
 /// `rename_all = "snake_case"` so the wire schema is decoupled from
 /// the enum's `Serialize` impl (lift-to-`ux_contract::activity` won't
 /// break the dashboard's expected string set).
-fn activity_state_to_str(state: crate::telemetry::source::ActivityState) -> &'static str {
-    use crate::telemetry::source::ActivityState;
+fn activity_state_to_str(state: ux_contract::activity::ActivityState) -> &'static str {
+    use ux_contract::activity::ActivityState;
     match state {
         ActivityState::Active => "active",
         ActivityState::Idle => "idle",

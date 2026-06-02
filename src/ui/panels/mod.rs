@@ -81,7 +81,7 @@ pub fn render(
     // banner pattern. The card renders as a centered overlay below
     // (alongside live_detail / post_mortem), not as a row at the top
     // of the frame, so the layout no longer reserves a banner row.
-    let alerts_height = alerts::region_height(app);
+    let alerts_height = alerts::region_height(state);
     let split = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(alerts_height), Constraint::Min(0)])

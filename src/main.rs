@@ -324,6 +324,37 @@ fn spawn_web_server(
 /// Headless per-tick log. Prints one aggregate line and — when AI workloads
 /// are present — one detail line per AI process so operators can see the
 /// exact model, PID, and resource footprint without running the TUI.
+/// v1.1.11 / DISPATCH 36 — headless-mode alert emission to the
+/// tracing log. Pre-v1.1.11 `--no-ui` never constructed `App` and
+/// the alert state machine lived on `App`, so headless surfaces
+/// (operators tailing logs, ops-driven dashboards via journald)
+/// silently dropped every alert that fired.
+///
+/// One INFO line per VISIBLE alert per tick. Visible == Active
+/// (per `AlertState::visible`) — Suppressed (ack'd) and Pending
+/// (sustain-gated, not yet fired) slots are intentionally NOT
+/// emitted. The `alert.fire=` prefix is grep-able; the line shape
+/// is intentionally machine-readable so journald / vector / etc.
+/// can pattern-match without needing a JSON formatter.
+///
+/// AUTHORITY LOCK: this is observation-only. The log line never
+/// triggers any actuation; it's literally `tracing::info!`.
+fn log_visible_alerts(state: &RuntimeState) {
+    let visible = state.alerts.visible();
+    if visible.is_empty() {
+        return;
+    }
+    for entry in &visible {
+        tracing::info!(
+            alert.fire = ?entry.alert_id,
+            scope = ?entry.scope,
+            pid = entry.pid.map(|p| p as i64).unwrap_or(-1),
+            workload = %entry.workload_name,
+            "alert visible (headless)"
+        );
+    }
+}
+
 fn log_tick_summary(state: &RuntimeState) {
     let ai_procs: Vec<_> = state.ai_processes().collect();
     let exits = state
@@ -632,7 +663,19 @@ fn run_headless(
 
         let started = Instant::now();
         match runtime.tick() {
-            Ok(state) => log_tick_summary(state),
+            Ok(state) => {
+                log_tick_summary(state);
+                // v1.1.11 / DISPATCH 36 — emit any visible alerts to
+                // the headless log on the same tick they're observed.
+                // Pre-v1.1.11 `--no-ui` never constructed `App`, so
+                // alerts were silently dropped (the eval lived on
+                // App). Now that the state machine is on Runtime,
+                // the headless surface gets the same `INFO` line per
+                // visible alert as the TUI's status footer would
+                // surface, prefixed with `alert.fire=` so it's
+                // grep-able.
+                log_visible_alerts(state);
+            }
             Err(e) => {
                 tracing::error!("tick failed: {}", e);
             }

@@ -488,7 +488,7 @@ impl Runtime {
     /// open. The dispatcher forwards `app.kill_confirm_pid()` here
     /// each tick BEFORE calling [`Self::tick`], so the
     /// `AlertId::GovernorArmed` per-tick eval inside
-    /// [`Self::observe_alerts`] can see the current arm state.
+    /// `Self::observe_alerts` can see the current arm state.
     /// Headless mode never calls this; `armed_pid` stays `None`
     /// and `GovernorArmed` never fires there (correct — there's
     /// no kill_confirm card without a TUI).

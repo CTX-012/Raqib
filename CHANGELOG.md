@@ -6,6 +6,103 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project aims to adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 once `v1.0.0` is tagged. Until then, minor versions may include breaking changes.
 
+## [1.1.9] — 2026-06-01 — B3 spawn-churn fix (cadence + backoff + global cache)
+
+Closes the v1.1.8 STOP-AND-SURFACE filing on the ~166 MB/min
+residual leak. DISPATCH 28 operator strace identified the
+ground-truth root cause: 440,409 close() calls in 70 s
+(~6.3 K/s, 99.96 % of all syscalls), dominated by python
+interpreter teardown from B3's per-tick `ros2 topic echo --once`
+subprocess spawns. The v1.1.8 eventfd-leak hypothesis is
+retired in favour of this ground-truth diagnosis.
+
+Three operator-locked fixes shipped (one commit each):
+
+  - ITEM (c) **cadence-gate echo probes at 10 s** (~82 % of spawns).
+  - ITEM (b) **topic-list failure backoff** via attempt/success
+    timestamp separation (~18 % failure amplifier).
+  - ITEM (a) **sampler-global topic-list cache** (Jetson flat-RSS
+    standard; the residual per-PID redundancy).
+
+Expected close()-rate post-fix: ~6,290/s → ~665/s (Inspector
+estimate). The empirical close()-rate validation runs operator-
+side per DISPATCH 30; v1.1.9 unit-test gates do NOT block on it.
+
+### Fixed
+
+- **B3 topic-list failure backoff (ITEM b).** Pre-v1.1.9
+  `PerPidState` carried a single `last_topic_list_at` timestamp
+  updated only on `Ok` from `run_topic_list`. The refresh-gate
+  predicate keyed off the same field, so a transient
+  `Err(Transient)` spawned a fresh `ros2 topic list` subprocess
+  on EVERY subsequent tick until success — the failure
+  amplifier DISPATCH 28 strace called out (~18 % of B3's spawn
+  churn under flaky-graph conditions). v1.1.9 splits the field
+  into `last_topic_list_success_at` (updated on `Ok` only) and
+  `last_topic_list_attempt_at` (updated on every attempt before
+  the await). The cadence predicate now gates on
+  `last_topic_list_attempt_at`, so a failed attempt costs at
+  most one spawn per `ROS2_TOPIC_LIST_INTERVAL` (30 s). Cache
+  GC sweep re-anchored on the new `PerPidState.last_seen_at`
+  (set every tick this sampler runs against this PID), per
+  ITEM (a)'s lift. Operator-locked style was the 10-LoC
+  separation (over the 1-LoC "update both on every attempt"
+  shortcut) for independently readable "tried recently" vs.
+  "succeeded recently" semantics.
+
+### Changed
+
+- **B3 echo probes are cadence-gated at 10 s (ITEM c, the big win).**
+  Pre-v1.1.9 B3 spawned a fresh `ros2 topic echo --once <topic>`
+  subprocess per AI ROS2 PID per tick (~1 Hz). Each spawn is a
+  python interpreter + rclpy import that closes ~500 FDs on
+  startup → ~5 K close()/s from just B3 under the empirical
+  10-publisher workload. The cadence matched the tick rate, NOT
+  any property the use case actually needs: echo-once is a
+  **liveness probe** for the activity-state display, not a rate
+  measurement. v1.1.9 adds `ROS2_ECHO_PROBE_INTERVAL = 10s`
+  + a per-PID-per-topic `last_echo_probe_at` HashMap; within
+  the cadence window B3 reuses the cached `last_message_at` +
+  the staleness check (identical Active/Idle decision a fresh
+  `Ok(false)` probe would produce, just without the subprocess).
+  Pinned invariant:
+  `ROS2_ECHO_PROBE_INTERVAL * 2 <= ROS2_ACTIVITY_STALENESS`,
+  so ≥ 2 probes always fit inside the staleness window. Detection
+  latency for a topic going silent: still ~30 s (same as v1.1.8),
+  the cadence gate does NOT change steady-state Active/Idle
+  decisions — it only stops the per-tick churn.
+- **Sampler-global B3 topic-list cache (ITEM a; Jetson flat-RSS).**
+  Pre-v1.1.9 each PerPidState independently cached the same
+  global topic list. Under the empirical workload (10
+  publishers, all first-seen at roughly the same tick), the
+  per-PID 30 s cadences aligned and 10 redundant
+  `ros2 topic list` spawns fired per cadence window. v1.1.9
+  lifts `topic_list` + `last_topic_list_{success,attempt}_at`
+  from `PerPidState` to `Ros2ShelloutSource` — one refresh per
+  `ROS2_TOPIC_LIST_INTERVAL` regardless of PID count. `PerPidState`
+  gains a `last_seen_at` GC anchor (updated every tick this
+  sampler runs against the PID). Scope: B3-internal only, single
+  file (`src/telemetry/samplers/ros2_shellout.rs`), trait surface
+  unchanged. Why it matters: Jetson Orin Nano 8 GB has ~6.3 GB
+  effective RAM and already OOMs on quantized models; a monitor
+  must be a negligible observer — flat RSS is the real standard,
+  not "10× better but still leaking."
+
+### Notes
+
+- All three commits are independently bisectable (ITEM c
+  `2df8317`, ITEM b `0245916`, ITEM a `734e22f`).
+- close()-rate validation: NOT done in this dispatch (per
+  DISPATCH 29 — operator runs strace -c on v1.1.9 in DISPATCH
+  30). The empirical proof of fix is the strace number, NOT the
+  unit tests. Unit tests pin structural invariants only.
+- Timing interaction (`ROS2_ECHO_PROBE_INTERVAL` 10 s vs
+  `ROS2_ACTIVITY_STALENESS` 30 s): three probes per staleness
+  window. Sub-Hz topic detection latency unchanged from v1.1.8.
+- Test counts: 905 → 910 (+1 cadence-const pin, +1 cadence-
+  behaviour pin, +1 cross-traffic pin, +1 backoff pin, +2 ITEM
+  (a) structural pins — global-cache + PerPidState-minimal).
+
 ## [1.1.8] — 2026-06-01 — partial residual leak fix + STOP-AND-SURFACE
 
 DISPATCH 25 follow-up on the v1.1.7 STOP-AND-SURFACE filing

@@ -184,9 +184,14 @@ fn template_for(alert: AlertId) -> &'static str {
 /// Includes a "+N more" line when `active_count > visible.len()`.
 /// Used both by the render path and by tests that assert on the
 /// rendered text without spinning a `TestBackend`.
-pub fn build_lines(app: &App, state: &RuntimeState, theme: &UiTheme) -> Vec<Line<'static>> {
-    let visible = app.alerts().visible();
-    let total = app.alerts().active_count();
+pub fn build_lines(_app: &App, state: &RuntimeState, theme: &UiTheme) -> Vec<Line<'static>> {
+    // v1.1.11 / DISPATCH 36 — AlertState lives on `RuntimeState`
+    // (lifted from `App` per Phase 3 step 1). `_app` is retained on
+    // the signature because the broader render context may want it
+    // for future panel layout decisions; today the alert region
+    // only needs `state`.
+    let visible = state.alerts.visible();
+    let total = state.alerts.active_count();
     let mut lines: Vec<Line<'static>> = Vec::with_capacity(visible.len() + 1);
 
     for entry in &visible {
@@ -232,9 +237,12 @@ pub fn render(f: &mut Frame, area: Rect, app: &App, state: &RuntimeState, theme:
 /// — used by the top-level layout in `panels/mod.rs` to reserve
 /// exactly the right number of rows. Returns 0 when no alerts fit
 /// or are active.
-pub fn region_height(app: &App) -> u16 {
-    let visible = app.alerts().visible().len();
-    let plus_more = if app.alerts().active_count() > visible {
+pub fn region_height(state: &RuntimeState) -> u16 {
+    // v1.1.11 / DISPATCH 36 — argument changed from `&App` to
+    // `&RuntimeState` because the AlertState moved to `RuntimeState`.
+    // Caller in `panels/mod.rs` updates accordingly.
+    let visible = state.alerts.visible().len();
+    let plus_more = if state.alerts.active_count() > visible {
         1
     } else {
         0
@@ -369,15 +377,16 @@ mod tests {
 
     #[test]
     fn alert_region_renders_active_alert() {
-        let mut app = empty_app();
+        let app = empty_app();
+        let mut state = empty_state();
         let now = Instant::now();
-        app.alerts_mut().observe(
+        state.alerts.observe(
             now,
             WorkloadRef::workload(206, "phi3"),
             AlertId::GovernorArmed,
             true,
         );
-        let lines = build_lines(&app, &empty_state(), &test_theme());
+        let lines = build_lines(&app, &state, &test_theme());
         let text = lines_to_string(&lines);
         assert!(text.contains("Kill armed on phi3"), "{text}");
         assert!(text.contains("(PID 206)"), "{text}");
@@ -385,14 +394,15 @@ mod tests {
 
     #[test]
     fn alert_region_uses_critical_color_for_governor_armed() {
-        let mut app = empty_app();
-        app.alerts_mut().observe(
+        let app = empty_app();
+        let mut state = empty_state();
+        state.alerts.observe(
             Instant::now(),
             WorkloadRef::workload(206, "phi3"),
             AlertId::GovernorArmed,
             true,
         );
-        let styles = lines_to_styles(&build_lines(&app, &empty_state(), &test_theme()));
+        let styles = lines_to_styles(&build_lines(&app, &state, &test_theme()));
         assert_eq!(styles.len(), 1);
         assert_eq!(
             styles[0].bg,
@@ -403,22 +413,23 @@ mod tests {
 
     #[test]
     fn alert_region_uses_attention_color_for_vram_pressure() {
-        let mut app = empty_app();
+        let app = empty_app();
+        let mut state = empty_state();
         let start = Instant::now();
         // Drive VRAM through its sustain gate.
-        app.alerts_mut().observe(
+        state.alerts.observe(
             start,
             WorkloadRef::workload(206, "phi3"),
             AlertId::VramPressure,
             true,
         );
-        app.alerts_mut().observe(
+        state.alerts.observe(
             after(start, 5),
             WorkloadRef::workload(206, "phi3"),
             AlertId::VramPressure,
             true,
         );
-        let styles = lines_to_styles(&build_lines(&app, &empty_state(), &test_theme()));
+        let styles = lines_to_styles(&build_lines(&app, &state, &test_theme()));
         assert_eq!(
             styles[0].bg,
             Some(tier_color(AlertTier::Attention, &test_theme()))
@@ -427,18 +438,19 @@ mod tests {
 
     #[test]
     fn alert_region_renders_plus_n_when_active_count_above_three() {
-        let mut app = empty_app();
+        let app = empty_app();
+        let mut state = empty_state();
         let now = Instant::now();
         // Five instant alerts on different PIDs.
         for pid in 100u32..105 {
-            app.alerts_mut().observe(
+            state.alerts.observe(
                 now,
                 WorkloadRef::workload(pid, "phi3"),
                 AlertId::OomDetected,
                 true,
             );
         }
-        let lines = build_lines(&app, &empty_state(), &test_theme());
+        let lines = build_lines(&app, &state, &test_theme());
         assert_eq!(lines.len(), 4, "3 banners + 1 +N more line");
         let last = lines_to_string(std::slice::from_ref(&lines[3]));
         assert!(last.contains("+2 more"), "last line: {last}");
@@ -446,19 +458,20 @@ mod tests {
 
     #[test]
     fn alert_region_does_not_render_suppressed_alerts() {
-        let mut app = empty_app();
+        let app = empty_app();
+        let mut state = empty_state();
         let now = Instant::now();
-        app.alerts_mut().observe(
+        state.alerts.observe(
             now,
             WorkloadRef::workload(206, "phi3"),
             AlertId::GovernorArmed,
             true,
         );
-        assert_eq!(build_lines(&app, &empty_state(), &test_theme()).len(), 1);
+        assert_eq!(build_lines(&app, &state, &test_theme()).len(), 1);
         // Ack moves the slot from Active to Suppressed; visible() —
         // and therefore build_lines — must drop it.
-        app.alerts_mut().ack_all();
-        assert_eq!(build_lines(&app, &empty_state(), &test_theme()).len(), 0);
+        state.alerts.ack_all();
+        assert_eq!(build_lines(&app, &state, &test_theme()).len(), 0);
     }
 
     #[test]
@@ -471,14 +484,15 @@ mod tests {
         // {reason} — press Enter for post-mortem" — it has NO
         // `{pid}` token (unlike OOM_DETECTED which does), so this
         // test asserts only on workload + reason ordering.
-        let mut app = empty_app();
-        app.alerts_mut().observe_exit(
+        let app = empty_app();
+        let mut state = empty_state();
+        state.alerts.observe_exit(
             Instant::now(),
             WorkloadRef::workload(4523, "Llama-70B"),
             AlertId::WorkloadExited,
             Some("exit code 139".into()),
         );
-        let text = lines_to_string(&build_lines(&app, &empty_state(), &test_theme()));
+        let text = lines_to_string(&build_lines(&app, &state, &test_theme()));
         assert!(
             text.contains("Llama-70B exited with exit code 139"),
             "template assembly wrong: {text}"
@@ -496,14 +510,15 @@ mod tests {
         // terminated by kernel"). Confirm the entry's reason field
         // (if any) is ignored and the substitution still produces
         // the expected text.
-        let mut app = empty_app();
-        app.alerts_mut().observe_exit(
+        let app = empty_app();
+        let mut state = empty_state();
+        state.alerts.observe_exit(
             Instant::now(),
             WorkloadRef::workload(206, "phi3"),
             AlertId::OomDetected,
             None,
         );
-        let text = lines_to_string(&build_lines(&app, &empty_state(), &test_theme()));
+        let text = lines_to_string(&build_lines(&app, &state, &test_theme()));
         assert!(
             text.contains("OOM kill detected — phi3 (PID 206) terminated by kernel"),
             "{text}"
@@ -512,27 +527,27 @@ mod tests {
 
     #[test]
     fn region_height_matches_visible_plus_overflow_indicator() {
-        let mut app = empty_app();
+        let mut state = empty_state();
         let now = Instant::now();
         // Two instant alerts → height = 2.
         for pid in 100u32..102 {
-            app.alerts_mut().observe(
+            state.alerts.observe(
                 now,
                 WorkloadRef::workload(pid, "phi3"),
                 AlertId::OomDetected,
                 true,
             );
         }
-        assert_eq!(region_height(&app), 2);
+        assert_eq!(region_height(&state), 2);
         // Five instant alerts → height = 3 (cap) + 1 ("+N more") = 4.
         for pid in 102u32..105 {
-            app.alerts_mut().observe(
+            state.alerts.observe(
                 now,
                 WorkloadRef::workload(pid, "phi3"),
                 AlertId::OomDetected,
                 true,
             );
         }
-        assert_eq!(region_height(&app), 4);
+        assert_eq!(region_height(&state), 4);
     }
 }

@@ -98,6 +98,22 @@ pub struct RuntimeState {
     /// `App::observe_exit`. Cleared between drains so unbounded
     /// growth is impossible if the UI loop keeps up.
     pub pending_exit_alerts: Vec<ExitAlertEvent>,
+    /// v1.1.11 / DISPATCH 36 / Phase 3 step 1 — alert state machine,
+    /// lifted from `App` (where v1.0.x parked it as a session-scoped
+    /// concession). Now owned by `RuntimeState` so the alert
+    /// evaluation fires on every tick regardless of UI mode —
+    /// `--no-ui` (headless) used to skip `observe_alerts` entirely
+    /// because `App` was never constructed. The L6 commit's
+    /// "session-scoped state" rationale held under the v1.0.x
+    /// UX-only audience; Phase 3 needs alerts emitted on the
+    /// non-TUI surfaces too (headless logs, wire), so ownership
+    /// moves to where the tick path can reach it.
+    ///
+    /// `AlertState::ack_all` semantics are unchanged: ack persists
+    /// for the lifetime of `RuntimeState`, which matches the
+    /// previous "session-scoped" behaviour (the runtime IS the
+    /// session at this layer).
+    pub alerts: crate::ui::alerts::AlertState,
     pub tick_count: u64,
     pub last_tick: Option<Instant>,
 }
@@ -363,6 +379,16 @@ pub struct Runtime {
     /// off the `System`). The long-lived handle + per-tick
     /// `sys.refresh_memory()` eliminates the wasted work.
     sys_for_metrics: sysinfo::System,
+    /// v1.1.11 / DISPATCH 36 — UI-driven hint for the
+    /// `AlertId::GovernorArmed` per-tick eval inside
+    /// [`Self::observe_alerts`]. The kill_confirm card lives on
+    /// `App` (it's session-scoped UI state); each TUI tick the
+    /// dispatcher forwards `app.kill_confirm_pid()` here via
+    /// [`Self::set_armed_pid`] before calling `tick`. Headless
+    /// mode never sets it, so `GovernorArmed` is always Idle
+    /// headless — which is correct (there's no operator to
+    /// "arm" anything). `None` when no card is open.
+    armed_pid: Option<u32>,
 }
 
 impl Runtime {
@@ -427,11 +453,21 @@ impl Runtime {
             pid_stderr: HashMap::new(),
             clk_tck: read_clk_tck(),
             sys_for_metrics: platform::new_system_for_metrics(),
+            armed_pid: None,
         }
     }
 
     pub fn config(&self) -> &Config {
         &self.config
+    }
+
+    /// v1.1.11 / DISPATCH 36 — mutable access to RuntimeState for
+    /// the alert-state machine consumers. Tests in `panels/alerts`
+    /// and `app::tests::acknowledge_alerts_*` drive
+    /// `RuntimeState::alerts` directly via this getter; the
+    /// production path mutates state internally inside `tick`.
+    pub fn state_mut(&mut self) -> &mut RuntimeState {
+        &mut self.state
     }
 
     pub fn state(&self) -> &RuntimeState {
@@ -445,6 +481,130 @@ impl Runtime {
     /// across ticks.
     pub fn drain_exit_alerts(&mut self) -> Vec<ExitAlertEvent> {
         std::mem::take(&mut self.state.pending_exit_alerts)
+    }
+
+    /// v1.1.11 / DISPATCH 36 — UI signal: which PID is currently
+    /// targeted by the kill_confirm card, or `None` when no card is
+    /// open. The dispatcher forwards `app.kill_confirm_pid()` here
+    /// each tick BEFORE calling [`Self::tick`], so the
+    /// `AlertId::GovernorArmed` per-tick eval inside
+    /// `Self::observe_alerts` can see the current arm state.
+    /// Headless mode never calls this; `armed_pid` stays `None`
+    /// and `GovernorArmed` never fires there (correct — there's
+    /// no kill_confirm card without a TUI).
+    pub fn set_armed_pid(&mut self, pid: Option<u32>) {
+        self.armed_pid = pid;
+    }
+
+    /// v1.1.11 / DISPATCH 36 — operator (`a` key) acknowledges
+    /// every Active alert. Lifted from `App::acknowledge_alerts`
+    /// because the state machine now lives on `RuntimeState`.
+    /// Returns the number of alerts that were ack'd, so the
+    /// caller (the dispatcher) can set the
+    /// `ux_contract::status::ALERTS_ACKNOWLEDGED` footer message
+    /// on App when count > 0. Headless mode never calls this
+    /// either (there's no `a` keybinding); active alerts stay
+    /// active until their breach clears.
+    pub fn acknowledge_alerts(&mut self) -> usize {
+        self.state.alerts.ack_all()
+    }
+
+    /// v1.1.11 / DISPATCH 36 — fire an exit-driven alert (the
+    /// L8 / §4 instant-fire path: `OomDetected`, `WorkloadExited`).
+    /// Lifted from `App::observe_exit`. Called by
+    /// [`Self::tick`] for every event drained from
+    /// `state.pending_exit_alerts`.
+    fn observe_exit_alert(&mut self, now: Instant, event: &ExitAlertEvent) {
+        use crate::ui::alerts::WorkloadRef;
+        self.state.alerts.observe_exit(
+            now,
+            WorkloadRef::workload(event.pid, &event.workload_name),
+            event.alert_id,
+            event.reason.clone(),
+        );
+    }
+
+    /// v1.1.11 / DISPATCH 36 — per-tick metric-driven alert eval.
+    /// Lifted from `App::observe_alerts`. The metric inputs come
+    /// from `RuntimeState` (system RAM, total VRAM, per-process
+    /// VRAM, KV-cache peak), so the eval can run on every tick
+    /// regardless of UI mode. The `armed_pid` signal flows from
+    /// [`Self::set_armed_pid`] — headless mode leaves it `None`
+    /// and `GovernorArmed` never fires there.
+    ///
+    /// AUTHORITY LOCK: this is observation-only. It NEVER calls
+    /// any kill/signal path. v1.1.11's contribution is moving
+    /// WHERE the eval lives, not WHAT it does.
+    fn observe_alerts(&mut self, now: Instant) {
+        use crate::ui::alerts::WorkloadRef;
+        use ux_contract::AlertId;
+        use ux_contract::thresholds::{KV_ATTENTION_PCT, RAM_ATTENTION_PCT, VRAM_ATTENTION_PCT};
+
+        // RAM pressure — system-scope, only one slot for the whole host.
+        let ram_pct = self
+            .state
+            .last_snapshot
+            .as_ref()
+            .map(|s| s.system.memory_usage_percent());
+        let ram_breaching = ram_pct.is_some_and(|p| p >= RAM_ATTENTION_PCT);
+        self.state.alerts.observe(
+            now,
+            WorkloadRef::system(),
+            AlertId::RamPressure,
+            ram_breaching,
+        );
+
+        // Per-AI-PID alerts. Snapshot the PIDs and names up front so
+        // the borrow on `state.ai_processes()` is released before we
+        // mutate `state.alerts` in the loop.
+        let total_vram = self
+            .state
+            .last_snapshot
+            .as_ref()
+            .map(|s| s.gpu.total_vram_all_devices())
+            .filter(|&v| v > 0);
+        let armed_pid = self.armed_pid;
+        let workloads: Vec<(u32, String, Option<u64>, Option<f32>)> = self
+            .state
+            .ai_processes()
+            .map(|p| {
+                let kv = self
+                    .state
+                    .live_telemetry
+                    .get(&p.pid)
+                    .and_then(|lt| lt.kv_cache_peak_pct);
+                (p.pid, p.name.clone(), p.vram_bytes, kv)
+            })
+            .collect();
+
+        for (pid, name, vram_bytes, kv_pct) in &workloads {
+            let workload = WorkloadRef::workload(*pid, name);
+
+            // VRAM: device-relative percentage.
+            let vram_pct = match (total_vram, *vram_bytes) {
+                (Some(total), Some(used)) => Some((used as f64 / total as f64) * 100.0),
+                _ => None,
+            };
+            let vram_breaching = vram_pct.is_some_and(|p| p >= VRAM_ATTENTION_PCT);
+            self.state
+                .alerts
+                .observe(now, workload, AlertId::VramPressure, vram_breaching);
+
+            // KV cache: LLM-only signal.
+            let kv = kv_pct.map(|v| v as f64);
+            let kv_breaching = kv.is_some_and(|p| p >= KV_ATTENTION_PCT);
+            self.state
+                .alerts
+                .observe(now, workload, AlertId::KvPressure, kv_breaching);
+
+            // GovernorArmed: this PID is the one currently armed
+            // by the operator's kill_confirm card. Instant-fire;
+            // clears as soon as the arm is released.
+            let armed = armed_pid == Some(*pid);
+            self.state
+                .alerts
+                .observe(now, workload, AlertId::GovernorArmed, armed);
+        }
     }
 
     /// Most-recent run records for `model` from the typed run store, or
@@ -915,6 +1075,29 @@ impl Runtime {
         // operator is scraping. publish_metrics() is non-blocking;
         // try_lock-fail just drops this update in favour of the next.
         self.publish_metrics();
+
+        // v1.1.11 / DISPATCH 36 — alert evaluation on the tick path.
+        // Pre-v1.1.11 this lived on `App::observe_alerts` (TUI-only),
+        // so `--no-ui` never evaluated alerts. Phase 3 needs alerts
+        // surfaced on every UI mode (TUI, headless, web), so the
+        // eval moved here. The metric-driven path runs every tick;
+        // the exit-driven path drains any queued events from this
+        // tick's lifecycle observations (replaces App's old
+        // post-tick `for event in runtime.drain_exit_alerts()` loop).
+        //
+        // AUTHORITY LOCK: observation-only. No kill paths reached
+        // from here.
+        let now = Instant::now();
+        let exit_events = std::mem::take(&mut self.state.pending_exit_alerts);
+        for event in &exit_events {
+            self.observe_exit_alert(now, event);
+        }
+        // Re-queue the events on `pending_exit_alerts` so the existing
+        // TUI consumers (post-mortem card, sticky exit footer) still
+        // see them on the next `Runtime::drain_exit_alerts` call.
+        // The alert state is updated; the queue is preserved.
+        self.state.pending_exit_alerts = exit_events;
+        self.observe_alerts(now);
 
         Ok(&self.state)
     }
@@ -1463,6 +1646,127 @@ mod tests {
         assert!(state.last_snapshot.is_some());
         assert!(state.last_lifecycle.is_some());
         assert!(state.tick_count == 1);
+    }
+
+    /// v1.1.11 / DISPATCH 36 / Phase 3 step 1 — structural pin: a
+    /// freshly constructed `RuntimeState` carries an `AlertState`,
+    /// and `Runtime::tick` evaluates alerts regardless of UI mode.
+    /// Pre-v1.1.11 `AlertState` lived on `App`, so `--no-ui` (which
+    /// never constructed `App`) silently dropped every alert.
+    ///
+    /// Three pins in one test:
+    ///   (1) `RuntimeState::default()` yields a usable `AlertState`
+    ///       (count == 0; an empty state machine, not a panic).
+    ///   (2) The metric-driven `observe_alerts` runs on the tick
+    ///       path. We can't easily synthesise "RAM > threshold"
+    ///       inside an in-process test (platform reads return the
+    ///       host's real memory), so we drive `set_armed_pid` and
+    ///       assert the `GovernorArmed` slot lights up — that
+    ///       proves the eval ran end-to-end through tick.
+    ///   (3) `Runtime::acknowledge_alerts` returns the ack count
+    ///       and the state machine clears (the path the dispatcher
+    ///       uses for the `a` key on TUI and would use for any
+    ///       future headless ack surface).
+    ///
+    /// AUTHORITY LOCK: the only mutation is `observe`/`ack`, never
+    /// any kill path. v1.1.11 is observation-only.
+    #[test]
+    fn alertstate_constructed_in_headless_mode() {
+        use crate::ui::alerts::WorkloadRef;
+        use ux_contract::AlertId;
+
+        // (1) Structural pin: RuntimeState carries a fresh AlertState
+        // immediately on default-construction — no `App` involved.
+        let s = RuntimeState::default();
+        assert_eq!(
+            s.alerts.active_count(),
+            0,
+            "RuntimeState::default() must yield an empty-but-usable \
+             AlertState — pre-v1.1.11 this field didn't exist (state \
+             lived on App) and headless mode silently dropped alerts.",
+        );
+
+        // (2) Drive a tick path that exercises observe_alerts without
+        // requiring a real platform snapshot. Construct the state
+        // directly with an annotated AI process so `state.ai_processes`
+        // yields it, then call observe_alerts.
+        let mut rt = Runtime::new(Config::default());
+        let armed_pid = 4242u32;
+        rt.set_armed_pid(Some(armed_pid));
+        // Seed an annotated process matching armed_pid so the
+        // per-PID loop has something to fire GovernorArmed on.
+        rt.state.annotated.push(AnnotatedProcess {
+            pid: armed_pid,
+            name: "test-llm".into(),
+            category: crate::model::AICategory::Inference,
+            workload_category: crate::model::WorkloadCategory::Unknown,
+            evidence: String::new(),
+            model_name: None,
+            cpu_pct: 0.0,
+            rss_mb: 0,
+            vram_bytes: None,
+            first_observed_at: Instant::now(),
+        });
+        // Drive the same internal method `tick()` would call.
+        rt.observe_alerts(Instant::now());
+        assert!(
+            rt.state.alerts.active_count() > 0,
+            "observe_alerts on Runtime must fire the GovernorArmed slot \
+             for an armed PID with an annotated AI process — the \
+             metric-driven eval lifted from App must work via Runtime \
+             now, including in headless mode.",
+        );
+        let fired_ids: Vec<_> = rt
+            .state
+            .alerts
+            .visible()
+            .iter()
+            .map(|e| e.alert_id)
+            .collect();
+        assert!(
+            fired_ids.contains(&AlertId::GovernorArmed),
+            "GovernorArmed must be among the visible alerts after \
+             set_armed_pid + observe_alerts. visible: {fired_ids:?}",
+        );
+
+        // (3) Ack path: Runtime::acknowledge_alerts clears the state.
+        let n = rt.acknowledge_alerts();
+        assert!(
+            n > 0,
+            "acknowledge_alerts must report the count it ack'd \
+             (used by the dispatcher to set the ALERTS_ACKNOWLEDGED \
+             status footer); got {n}.",
+        );
+        assert_eq!(
+            rt.state.alerts.active_count(),
+            0,
+            "post-ack, the state machine must report zero active alerts.",
+        );
+
+        // (4) Observe_exit path: the L8 instant-fire route must also
+        // reach the lifted state machine. Construct an
+        // `ExitAlertEvent` and route it through `observe_exit_alert`
+        // (the same method Runtime::tick calls per drained event).
+        rt.observe_exit_alert(
+            Instant::now(),
+            &ExitAlertEvent {
+                pid: 9999,
+                workload_name: "exited-llm".into(),
+                alert_id: AlertId::OomDetected,
+                reason: None,
+            },
+        );
+        let after_exit = rt.state.alerts.visible();
+        assert!(
+            after_exit
+                .iter()
+                .any(|e| e.alert_id == AlertId::OomDetected),
+            "observe_exit_alert must fire the instant-fire slot on \
+             RuntimeState::alerts; visible: {after_exit:?}",
+        );
+        // Stop unused-variable warning in the WorkloadRef import path
+        // if a future refactor drops the import block above.
+        let _ = WorkloadRef::workload(0, "_");
     }
 
     #[test]

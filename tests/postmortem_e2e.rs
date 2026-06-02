@@ -20,7 +20,7 @@
 use std::time::{Duration, Instant};
 
 use edge_monitor::config::Config;
-use edge_monitor::runtime::{ExitAlertEvent, Runtime, StderrBuffer};
+use edge_monitor::runtime::{Runtime, StderrBuffer};
 use edge_monitor::storage::run_store::ExitReason;
 use edge_monitor::ui::app::App;
 use edge_monitor::ui::panels::kill_confirm::KillConfirmCard;
@@ -50,18 +50,19 @@ use ux_contract::AlertId;
 /// sustain gate. Exit-driven alerts bypass the sustain window by
 /// design — they're "this PID exited with X reason", which has no
 /// "still breaching" semantics.
-fn fire_active_alert(app: &mut App) {
-    app.observe_exit(
+// v1.1.11 / DISPATCH 36 — AlertState lifted to RuntimeState.
+// The fire fixture and the `app.alerts()` queries now go through
+// the runtime; tests construct one alongside the app.
+fn fire_active_alert(runtime: &mut Runtime) {
+    use edge_monitor::ui::alerts::WorkloadRef;
+    runtime.state_mut().alerts.observe_exit(
         Instant::now(),
-        &ExitAlertEvent {
-            pid: 1234,
-            workload_name: "test-llm".into(),
-            alert_id: AlertId::OomDetected,
-            reason: None,
-        },
+        WorkloadRef::workload(1234, "test-llm"),
+        AlertId::OomDetected,
+        None,
     );
     assert!(
-        app.alerts().active_count() > 0,
+        runtime.state().alerts.active_count() > 0,
         "test fixture must leave at least one Active alert behind",
     );
 }
@@ -136,16 +137,17 @@ fn cascading_escape_clears_kill_confirm_before_postmortem() {
     // kill_confirm card is the most-destructive overlay and gets
     // cancelled first.
     let mut app = App::new();
+    let mut runtime = fresh_runtime();
     app.open_kill_confirm(fixture_kill_confirm(4242, "ollama"));
     app.show_postmortem(fixture_card("phi3-mini"));
 
     // First Esc cancels the kill_confirm; the post-mortem survives.
-    assert!(app.handle_escape());
+    assert!(app.handle_escape(&mut runtime));
     assert!(app.kill_confirm().is_none());
     assert!(app.postmortem().is_some());
 
     // Second Esc dismisses the post-mortem.
-    assert!(app.handle_escape());
+    assert!(app.handle_escape(&mut runtime));
     assert!(app.postmortem().is_none());
 }
 
@@ -157,22 +159,23 @@ fn cascading_escape_clears_kill_confirm_before_postmortem() {
 #[test]
 fn cascading_escape_closes_history_before_acking_alerts() {
     let mut app = App::new();
+    let mut runtime = fresh_runtime();
     app.open_history("phi3-mini".into(), Vec::new());
-    fire_active_alert(&mut app);
+    fire_active_alert(&mut runtime);
     assert!(app.is_history_open());
 
     // First Esc: history closes; alerts must NOT be ack'd this round.
-    assert!(app.handle_escape());
+    assert!(app.handle_escape(&mut runtime));
     assert!(!app.is_history_open());
     assert!(
-        app.alerts().active_count() > 0,
+        runtime.state().alerts.active_count() > 0,
         "alerts must survive the Esc that closed history — step 3 \
          is strictly above step 4 in the §6 cascade",
     );
 
     // Second Esc: nothing else in the way, alerts get ack'd.
-    assert!(app.handle_escape());
-    assert_eq!(app.alerts().active_count(), 0);
+    assert!(app.handle_escape(&mut runtime));
+    assert_eq!(runtime.state().alerts.active_count(), 0);
     assert!(!app.should_quit(), "step 4 ack must not fall through to step 5 quit");
 }
 
@@ -183,19 +186,20 @@ fn cascading_escape_closes_history_before_acking_alerts() {
 #[test]
 fn cascading_escape_closes_help_before_acking_alerts() {
     let mut app = App::new();
+    let mut runtime = fresh_runtime();
     app.toggle_help();
-    fire_active_alert(&mut app);
+    fire_active_alert(&mut runtime);
     assert!(app.show_help());
 
-    assert!(app.handle_escape());
+    assert!(app.handle_escape(&mut runtime));
     assert!(!app.show_help());
     assert!(
-        app.alerts().active_count() > 0,
+        runtime.state().alerts.active_count() > 0,
         "alerts must survive the Esc that closed help",
     );
 
-    assert!(app.handle_escape());
-    assert_eq!(app.alerts().active_count(), 0);
+    assert!(app.handle_escape(&mut runtime));
+    assert_eq!(runtime.state().alerts.active_count(), 0);
     assert!(!app.should_quit());
 }
 
@@ -208,15 +212,16 @@ fn cascading_escape_closes_help_before_acking_alerts() {
 #[test]
 fn cascading_escape_acks_alerts_before_quit_when_no_overlay_is_open() {
     let mut app = App::new();
-    fire_active_alert(&mut app);
+    let mut runtime = fresh_runtime();
+    fire_active_alert(&mut runtime);
     assert!(app.postmortem().is_none());
     assert!(app.kill_confirm().is_none());
     assert!(!app.is_history_open());
     assert!(!app.show_help());
 
-    let consumed = app.handle_escape();
+    let consumed = app.handle_escape(&mut runtime);
     assert!(consumed, "step 4 must return true to distinguish from step 5 quit");
-    assert_eq!(app.alerts().active_count(), 0);
+    assert_eq!(runtime.state().alerts.active_count(), 0);
     assert!(
         !app.should_quit(),
         "step 4 ack must take precedence over step 5 quit per §6",
@@ -454,7 +459,7 @@ fn stderr_buffer_cleared_when_card_dismisses_via_esc_cascade() {
 
     // Esc cascade: the same two-step pattern `ui::apply_action` uses
     // for `Action::EscapeCascade`.
-    assert!(app.handle_escape());
+    assert!(app.handle_escape(&mut rt));
     assert!(app.postmortem().is_none());
     let dismissed = app.take_dismissed_pid();
     assert_eq!(dismissed, Some(TEST_PID));
@@ -480,7 +485,7 @@ fn dismiss_clear_is_a_noop_for_cards_with_no_pid() {
     let mut app = App::new();
     app.show_postmortem(fixture_card("phi3-mini")); // pid: None
 
-    assert!(app.handle_escape());
+    assert!(app.handle_escape(&mut rt));
     assert_eq!(app.take_dismissed_pid(), None);
     // Buffer untouched — TEST_PID's entry survives because we never
     // told `Runtime` to drop it.

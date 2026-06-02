@@ -143,21 +143,24 @@ fn run_loop(
         }
 
         if last_tick.elapsed() >= tick {
+            // v1.1.11 / DISPATCH 36 — alert eval moved to Runtime.
+            // Forward the kill_confirm-card armed-PID into Runtime
+            // BEFORE tick() so observe_alerts (inside tick) sees the
+            // current arm state for the GovernorArmed alert.
+            runtime.set_armed_pid(app.kill_confirm_pid());
             if let Err(e) = runtime.tick() {
                 tracing::error!("tick failed: {}", e);
             }
             runtime.record_governor_audit();
-            // L6 / §4 — observe alert breach conditions for this
-            // tick. AlertState lives on `App`; the metric inputs
-            // come from `runtime.state()` plus `app.kill_confirm_pid`.
             let now = Instant::now();
-            app.observe_alerts(now, runtime.state());
-            // L8 / §4 — drain exit-driven alerts queued by the
-            // lifecycle exit hook this tick (OomDetected,
-            // WorkloadExited).
-            for event in runtime.drain_exit_alerts() {
-                app.observe_exit(now, &event);
+            // Exit-driven alerts (L8 / §4) are fired by Runtime::tick
+            // itself now; this drain is preserved so other consumers
+            // (post-mortem card pop, sticky footer) still see the
+            // events.
+            for _event in runtime.drain_exit_alerts() {
+                // Reserved: any non-alert consumer hooks land here.
             }
+            let _ = now;
             // L17 / §5 — append one sample to each sparkline buffer
             // when a live-detail card is open. No-op when the card
             // is closed (buffers are None) or when the focused PID
@@ -332,7 +335,7 @@ fn apply_action(
                 *live_detail = None;
                 *live_buffers = None;
             } else {
-                app.handle_escape();
+                app.handle_escape(runtime);
                 // L19 — if the cascade just dismissed a post-mortem
                 // card tagged with an exited PID, drop the matching
                 // transient stderr buffer in `Runtime` so the buffer
@@ -347,7 +350,7 @@ fn apply_action(
         // no alerts are active; otherwise sets a transient status
         // footer via `App::acknowledge_alerts`.
         Action::AcknowledgeAlerts => {
-            app.acknowledge_alerts();
+            app.acknowledge_alerts(runtime);
         }
         // §1 region 5 / L14 — `t` cycles Top processes sort
         // (Ram → Cpu → Vram → Ram). Cycle semantics + the

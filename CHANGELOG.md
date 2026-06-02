@@ -6,6 +6,76 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project aims to adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 once `v1.0.0` is tagged. Until then, minor versions may include breaking changes.
 
+## [1.1.11] — 2026-06-01 — AlertState→Runtime (Phase 3 foundation)
+
+Phase 3 step 1 of 3 (incremental: v1.1.11 → v1.1.12 → v1.2.0).
+DISPATCH 36 scope-locked from Inspector DISPATCH 35.
+
+**Authority lock (binding, operator sign-off):** OBSERVE-ONLY.
+No automatic actuation. `send_sigterm` stays manual-only.
+`default_ai_action = Allow` UNCHANGED. No `--enable-governor`
+flag. No tick-path kill wiring. v1.1.11 only moves WHERE alert
+state lives — it does not add any actuation.
+
+### Changed
+
+- **`AlertState` lifted from `App` to `RuntimeState` (ITEM 1).**
+  Pre-v1.1.11 the alert state machine lived on `App`
+  (`src/ui/app.rs:86`, an L6 "session-scoped UI-state"
+  concession that deviated from the original L-plan
+  `RuntimeState` spec — see the L6 commit). `--no-ui` headless
+  mode never constructed `App` → `observe_alerts` never ran →
+  every alert silently dropped. v1.1.11 moves ownership to
+  `RuntimeState::alerts` so the eval fires on every tick
+  regardless of UI mode:
+  - `Runtime` grows `armed_pid: Option<u32>` + `set_armed_pid`
+    setter; the TUI dispatcher forwards
+    `app.kill_confirm_pid()` here BEFORE `runtime.tick()` so
+    the `GovernorArmed` eval sees the current arm state.
+    Headless leaves it `None` (no kill_confirm card without a
+    TUI) → `GovernorArmed` never fires headless, correct.
+  - `Runtime::observe_alerts` (RAM/VRAM/KV/GovernorArmed) and
+    `Runtime::observe_exit_alert` (L8 instant-fire) are called
+    from `Runtime::tick` itself — single source of truth.
+  - `App::handle_escape` and `App::acknowledge_alerts` change
+    signature to take `&mut Runtime` so the §6 ack-alerts
+    cascade reaches the lifted state machine without
+    introducing a one-tick ack delay.
+- **Headless alert emission to the tracing log.** New
+  `log_visible_alerts(state)` in `src/main.rs` emits one
+  `INFO`-level line per visible alert per headless tick,
+  prefixed with `alert.fire=<AlertId>` so journald / vector /
+  etc. can pattern-match. Wire-layer `AlertEntry` list deferred
+  to v1.1.12 (needs `ux_contract` v0.3.13).
+
+### Added
+
+- **`docs/PHASE3_DESIGN.md` — canonical Phase 3 scope in the
+  repo (ITEM 2).** Records the locked scope (Vitals +
+  Governor-finish; observe-only; build sequence; thermal
+  thresholds 85 °C amber / 95 °C red; INA3221 deferred;
+  `ux_contract` v0.3.13 / v0.3.14 prereqs) in version control,
+  alongside the code it governs. Replaces a session-storage
+  plan that vanished when its process changed; the failure
+  mode this file documents is also the failure mode this file
+  fixes.
+
+### Process notes
+
+- STOP-AND-SURFACE triggers all cleared. The lift is a pure
+  relocation — no new alert templates, no new threshold logic,
+  no actuation introduced. Trigger (1) wire-type need not hit
+  (v1.1.11 ships LOGS only).
+- Tests: 915 → 916 (+1
+  `runtime::tests::alertstate_constructed_in_headless_mode`,
+  pinning RuntimeState carries AlertState + observe_alerts
+  fires GovernorArmed + acknowledge_alerts clears state +
+  observe_exit_alert fires OomDetected). 915 existing tests
+  pass unchanged after the signature updates (every cascade,
+  alert-panel render, postmortem ack-precedence test).
+- Both code commits are bisectable (`3b5e13d` refactor,
+  `2a37ae8` docs).
+
 ## [1.1.10] — 2026-06-01 — ActivityState consume + zombie filter
 
 Backlog-clear before Phase 3. Two unrelated items in one release,

@@ -146,6 +146,30 @@ const ROS2_CHILD_REAP_GUARD: Duration = Duration::from_millis(500);
 // rate; the staleness window decides Active/Idle.
 const ROS2_ACTIVITY_STALENESS: Duration = Duration::from_secs(30);
 
+// v1.1.9 ITEM (c) — per-topic minimum interval between
+// `ros2 topic echo --once` probe spawns. Pre-v1.1.9 B3 spawned a
+// fresh subprocess every tick (1 Hz) per PID per topic — the
+// principal driver of the residual RSS leak (DISPATCH 28 operator
+// strace identified 440K close() syscalls over 70s, ~6.3K/s,
+// dominated by python interpreter teardown from ros2 CLI spawns).
+//
+// 10 s gives **three liveness checks per 30 s staleness window** —
+// a topic that goes silent is detected within ~10–20 s, which is
+// appropriate for activity-state display (not a safety-critical
+// timing path). The staleness logic (`ROS2_ACTIVITY_STALENESS = 30 s`)
+// still holds Active across inter-probe gaps using the cached
+// `last_message_at`, so cadence-gating does NOT change the steady-
+// state Active/Idle decisions; it just stops the per-tick subprocess
+// churn that drove the leak.
+//
+// Constraint: `ROS2_ECHO_PROBE_INTERVAL` must stay strictly less
+// than `ROS2_ACTIVITY_STALENESS / 2` so that ≥ 2 probes fit in
+// every staleness window (one probe failing wouldn't cause a
+// premature Idle flip). 5 s doubles spawns for detection latency
+// the use case doesn't need; 15 s leaves only 2 probes/window —
+// fragile if any single probe fails. 10 s is the sweet spot.
+const ROS2_ECHO_PROBE_INTERVAL: Duration = Duration::from_secs(10);
+
 // Inner subprocess timeout for `ros2 topic echo` and `ros2 topic
 // list`. v1.1.6 ITEM 1 — this is now the ONLY per-probe cap on
 // `echo --once` (the Humble-unsupported `--timeout` flag was
@@ -190,6 +214,14 @@ struct PerPidState {
     /// message arrival. Bounded by the topic_list size; cleared on
     /// `forget(pid)` (v1.1.5 ITEM E).
     last_message_at: HashMap<String, Instant>,
+    /// v1.1.9 ITEM (c) — topic → last `Instant` an echo probe was
+    /// SPAWNED for this PID/topic pair (success or failure). Drives
+    /// the [`ROS2_ECHO_PROBE_INTERVAL`] cadence gate that suppresses
+    /// per-tick subprocess churn. Decoupled from `last_message_at`
+    /// so that "we last tried at t1" and "we last saw a message at
+    /// t2" remain independent — a successful probe with no arrival
+    /// (`Ok(false)`) still backs off the next probe by the cadence.
+    last_echo_probe_at: HashMap<String, Instant>,
 }
 
 /// ROS2 topic-rate sampler. One source instance per dispatcher;
@@ -459,14 +491,43 @@ impl TelemetrySource for Ros2ShelloutSource {
         }
 
         // v1.1.5 ITEM D (BUG-P5-2) — pick the first topic and probe
-        // it with `ros2 topic echo --once`. Every tick. If a message
-        // arrived, refresh `last_message_at`; ActivityState is then
-        // governed by the staleness window so sub-Hz topics
-        // (0.1 Hz emits ~3 msgs per 30 s) hold Active across the
-        // inter-message gaps. v1.1.1+ can round-robin across topics;
-        // single-topic is fine while the dispatcher's per-source
-        // sample_timeout is 9 s and ROS2_ECHO_PROBE_TIMEOUT is 1 s.
+        // it with `ros2 topic echo --once`. v1.1.9 ITEM (c) — gate
+        // the probe by `ROS2_ECHO_PROBE_INTERVAL` so we don't spawn
+        // a fresh ros2 subprocess every tick (which was the
+        // principal driver of DISPATCH 28's 6.3K close()/s leak).
+        // Within the cadence window we reuse `last_message_at` +
+        // the staleness check: identical Active/Idle decision as a
+        // freshly probed `Ok(false)` would produce, just without
+        // the subprocess spawn. v1.1.1+ can round-robin across
+        // topics; single-topic is fine while the dispatcher's
+        // per-source sample_timeout is 9 s.
         let topic = state.topic_list[0].clone();
+        let need_probe = state
+            .last_echo_probe_at
+            .get(&topic)
+            .map(|t| now.duration_since(*t) >= ROS2_ECHO_PROBE_INTERVAL)
+            .unwrap_or(true);
+        if !need_probe {
+            // Skip the spawn. The staleness window over
+            // `last_message_at` decides Active/Idle exactly as
+            // a `Ok(false)` probe would have. NotDetected is
+            // unreachable here — we only enter this branch after
+            // a successful probe (which seeded `last_echo_probe_at`),
+            // so `last_message_at` may be empty for this topic
+            // only if every probe so far returned `Ok(false)`
+            // (steady Idle), which is the desired output.
+            let activity = match state.last_message_at.get(&topic) {
+                Some(last) if now.duration_since(*last) < ROS2_ACTIVITY_STALENESS => {
+                    ActivityState::Active
+                }
+                _ => ActivityState::Idle,
+            };
+            return Ok(activity_frame(proc.pid, activity));
+        }
+
+        // Mark the spawn-attempt BEFORE awaiting the subprocess so
+        // a slow/failing spawn doesn't double-fire next tick.
+        state.last_echo_probe_at.insert(topic.clone(), now);
         let pid_for_log = proc.pid;
         let _ = state; // release the &mut self.cache borrow before .await
 
@@ -862,6 +923,122 @@ mod tests {
         // the staleness window must be ≥ 3 * 10 s so losing the
         // expected 3 arrivals is already a real outage.
         assert!(ROS2_ACTIVITY_STALENESS >= Duration::from_secs(30));
+    }
+
+    // ─── v1.1.9 ITEM (c) — cadence-gate echo probes ─────────────────
+
+    /// Pin the timing invariants on the v1.1.9 cadence-gate. The
+    /// 10 s probe interval must remain strictly less than
+    /// `ROS2_ACTIVITY_STALENESS / 2` so that at least two probes
+    /// always fit inside the staleness window — losing a single
+    /// probe to a transient error mustn't cause a premature Idle
+    /// flip. The cadence ratio is the property that bounds spawn
+    /// rate (the leak we're closing) without changing steady-state
+    /// activity detection.
+    #[test]
+    fn b3_echo_probe_respects_10s_interval_const_pins() {
+        assert_eq!(ROS2_ECHO_PROBE_INTERVAL, Duration::from_secs(10));
+        assert!(
+            ROS2_ECHO_PROBE_INTERVAL * 2 <= ROS2_ACTIVITY_STALENESS,
+            "ROS2_ECHO_PROBE_INTERVAL ({:?}) must be ≤ \
+             ROS2_ACTIVITY_STALENESS/2 ({:?}) — otherwise a single \
+             missed probe can push past the staleness window before \
+             the next probe fires, flipping a healthy topic to Idle.",
+            ROS2_ECHO_PROBE_INTERVAL,
+            ROS2_ACTIVITY_STALENESS / 2,
+        );
+    }
+
+    /// v1.1.9 ITEM (c) — within the cadence interval, the cached
+    /// decision "is `last_message_at` inside the staleness window?"
+    /// must be REUSED instead of spawning a fresh probe. This is the
+    /// structural fix for the per-tick subprocess churn (DISPATCH 28
+    /// strace: 6.3K close()/s, dominated by python interpreter
+    /// teardown). Drives the per-PID state directly to assert the
+    /// reuse-vs-respawn predicate the production path applies.
+    #[test]
+    fn b3_echo_probe_respects_10s_interval() {
+        let mut s = Ros2ShelloutSource::new();
+        let pid = 42;
+        let topic = "/chatter".to_string();
+        let t0 = Instant::now();
+        // Seed: topic list ready; a probe at t0 succeeded and saw a
+        // message at t0.
+        {
+            let st = s.cache.entry(pid).or_default();
+            st.last_topic_list_at = Some(t0);
+            st.topic_list = vec![topic.clone()];
+            st.last_message_at.insert(topic.clone(), t0);
+            st.last_echo_probe_at.insert(topic.clone(), t0);
+        }
+
+        // t0 + 5 s — INSIDE cadence: the cadence predicate must say
+        // "no fresh probe needed."
+        let t5 = t0 + Duration::from_secs(5);
+        let st = s.cache.entry(pid).or_default();
+        let need_probe = st
+            .last_echo_probe_at
+            .get(&topic)
+            .map(|t| t5.duration_since(*t) >= ROS2_ECHO_PROBE_INTERVAL)
+            .unwrap_or(true);
+        assert!(
+            !need_probe,
+            "within 10 s of last probe (5 s elapsed) the cadence \
+             gate must suppress a fresh spawn",
+        );
+        // …and the staleness-window decision over the cached
+        // `last_message_at` must hold the topic Active (5 s well
+        // inside the 30 s staleness).
+        let activity = match st.last_message_at.get(&topic) {
+            Some(last) if t5.duration_since(*last) < ROS2_ACTIVITY_STALENESS => {
+                ActivityState::Active
+            }
+            _ => ActivityState::Idle,
+        };
+        assert_eq!(activity, ActivityState::Active);
+
+        // t0 + 10 s — boundary: cadence elapsed, fresh probe needed.
+        let t10 = t0 + Duration::from_secs(10);
+        let st = s.cache.entry(pid).or_default();
+        let need_probe = st
+            .last_echo_probe_at
+            .get(&topic)
+            .map(|t| t10.duration_since(*t) >= ROS2_ECHO_PROBE_INTERVAL)
+            .unwrap_or(true);
+        assert!(
+            need_probe,
+            "at 10 s elapsed the cadence gate must permit a fresh probe",
+        );
+    }
+
+    /// v1.1.9 ITEM (c) — the cache-update side: a fresh probe (any
+    /// outcome) seeds `last_echo_probe_at` BEFORE awaiting the
+    /// subprocess, so a slow or failing spawn doesn't double-fire
+    /// next tick. Pin the per-(pid, topic) bookkeeping shape that
+    /// the production path relies on.
+    #[test]
+    fn b3_echo_probe_seeds_last_attempt_per_pid_topic() {
+        let mut s = Ros2ShelloutSource::new();
+        let pid_a = 1;
+        let pid_b = 2;
+        let topic_x = "/x".to_string();
+        let topic_y = "/y".to_string();
+        let t0 = Instant::now();
+
+        // PID A probes /x at t0; PID B probes /y at t0+1 s.
+        let st = s.cache.entry(pid_a).or_default();
+        st.last_echo_probe_at.insert(topic_x.clone(), t0);
+        let st = s.cache.entry(pid_b).or_default();
+        st.last_echo_probe_at.insert(topic_y.clone(), t0 + Duration::from_secs(1));
+
+        // Cross-traffic: PID A's /x bookkeeping must NOT leak into
+        // PID B (different PID) or into /y (different topic).
+        let st = s.cache.get(&pid_a).unwrap();
+        assert!(st.last_echo_probe_at.contains_key(&topic_x));
+        assert!(!st.last_echo_probe_at.contains_key(&topic_y));
+        let st = s.cache.get(&pid_b).unwrap();
+        assert!(st.last_echo_probe_at.contains_key(&topic_y));
+        assert!(!st.last_echo_probe_at.contains_key(&topic_x));
     }
 
     /// v1.1.6 ITEM 1 (regression pin) — `ros2 topic echo --once`

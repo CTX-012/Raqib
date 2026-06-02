@@ -107,9 +107,11 @@ const ROS2_TOPIC_LIST_INTERVAL: Duration = Duration::from_secs(30);
 // for `PerPidState` entries. The dispatcher's `forget(pid)` does
 // not propagate to sources (adding `forget_pid` to TelemetrySource
 // is foundation work flagged by DISPATCH 16 trigger #4 and routed
-// to a future dispatch). Instead, B3 sweeps its own cache at the
-// top of `sample`: any entry whose `last_topic_list_at` is older
-// than 10× the topic-list refresh interval (5 min) is dropped.
+// to a future dispatch — wired through v1.1.7 ITEM 2 d8f636d).
+// Instead, B3 sweeps its own cache at the top of `sample`: any
+// entry whose `last_topic_list_attempt_at` (per v1.1.9 ITEM (b))
+// is older than 10× the topic-list refresh interval (5 min) is
+// dropped.
 // Bounds the leak in time (not in PID count) — equivalent closure
 // property to the dispatcher-hook approach without the trait
 // extension.
@@ -207,8 +209,25 @@ const SAMPLER_MARKER_VALUE: &str = "ros2-shellout";
 ///     ([`ROS2_ACTIVITY_STALENESS`]) decides Active vs Idle.
 #[derive(Debug, Default)]
 struct PerPidState {
-    last_topic_list_at: Option<Instant>,
-    /// Cached topic list from the most recent `ros2 topic list` run.
+    /// v1.1.9 ITEM (b) — last `Instant` a `ros2 topic list` run
+    /// **succeeded**. Updated only on `Ok`. Pre-v1.1.9 this was the
+    /// sole timestamp and a transient failure would retry every tick
+    /// because the cadence predicate keyed off success time only —
+    /// the failure amplifier DISPATCH 28 strace called out
+    /// (~18% of the spawn churn under flaky-graph conditions).
+    last_topic_list_success_at: Option<Instant>,
+    /// v1.1.9 ITEM (b) — last `Instant` a `ros2 topic list` run was
+    /// **attempted** (success or failure). The cadence predicate now
+    /// gates on this, so a failed attempt costs at most one spawn
+    /// per `ROS2_TOPIC_LIST_INTERVAL`. Separating attempt from
+    /// success (rather than the equivalent 1-LoC "update both on
+    /// every attempt" shortcut) keeps the two timestamps independently
+    /// readable — "when did we last try" and "when did we last
+    /// succeed" are useful at different points in the staleness /
+    /// GC logic.
+    last_topic_list_attempt_at: Option<Instant>,
+    /// Cached topic list from the most recent successful `ros2 topic
+    /// list` run.
     topic_list: Vec<String>,
     /// topic → last `Instant` an echo probe successfully observed a
     /// message arrival. Bounded by the topic_list size; cleared on
@@ -463,24 +482,38 @@ impl TelemetrySource for Ros2ShelloutSource {
         let now = Instant::now();
         // v1.1.5 ITEM E — sweep stale PerPidState entries before
         // touching the cache for this PID. Bounds the leak in time
-        // independent of dispatcher forget propagation.
+        // independent of dispatcher forget propagation. v1.1.9 ITEM
+        // (b) anchored on `last_topic_list_attempt_at` (the
+        // "last-touched" timestamp), since it's set on both success
+        // AND failed attempts — a PID whose probes keep failing is
+        // still active enough to keep its state warm.
         self.cache.retain(|_, st| {
-            st.last_topic_list_at
+            st.last_topic_list_attempt_at
                 .map(|t| now.duration_since(t) < ROS2_CACHE_GC_THRESHOLD)
-                .unwrap_or(true) // cold-start entries (no list yet) are kept
+                .unwrap_or(true) // cold-start entries (no attempt yet) are kept
         });
         let state = self.cache.entry(proc.pid).or_default();
 
         // Refresh topic list per cadence (graphs change slowly).
+        // v1.1.9 ITEM (b) — gate on `last_topic_list_attempt_at`
+        // (not `last_topic_list_success_at`), so a transient
+        // `Err(Transient)` from `run_topic_list` doesn't retry on
+        // every subsequent tick. We back off to the full
+        // `ROS2_TOPIC_LIST_INTERVAL` cadence regardless of outcome,
+        // and only the success path updates the cached `topic_list`.
         let need_list = state
-            .last_topic_list_at
+            .last_topic_list_attempt_at
             .map(|t| now.duration_since(t) >= ROS2_TOPIC_LIST_INTERVAL)
             .unwrap_or(true);
         if need_list {
+            // Mark the attempt BEFORE awaiting; same reasoning as
+            // ITEM (c)'s `last_echo_probe_at.insert(..)` — a slow
+            // or failing subprocess mustn't double-fire next tick.
+            state.last_topic_list_attempt_at = Some(now);
             match Self::run_topic_list().await {
                 Ok(topics) => {
                     state.topic_list = topics;
-                    state.last_topic_list_at = Some(now);
+                    state.last_topic_list_success_at = Some(now);
                 }
                 Err(e) => return Err(e),
             }
@@ -868,7 +901,8 @@ mod tests {
         let t0 = Instant::now();
         {
             let st = s.cache.entry(pid).or_default();
-            st.last_topic_list_at = Some(t0);
+            st.last_topic_list_success_at = Some(t0);
+            st.last_topic_list_attempt_at = Some(t0);
             st.topic_list = vec![topic.clone()];
             st.last_message_at.insert(topic.clone(), t0);
         }
@@ -966,7 +1000,8 @@ mod tests {
         // message at t0.
         {
             let st = s.cache.entry(pid).or_default();
-            st.last_topic_list_at = Some(t0);
+            st.last_topic_list_success_at = Some(t0);
+            st.last_topic_list_attempt_at = Some(t0);
             st.topic_list = vec![topic.clone()];
             st.last_message_at.insert(topic.clone(), t0);
             st.last_echo_probe_at.insert(topic.clone(), t0);
@@ -1008,6 +1043,106 @@ mod tests {
         assert!(
             need_probe,
             "at 10 s elapsed the cadence gate must permit a fresh probe",
+        );
+    }
+
+    // ─── v1.1.9 ITEM (b) — topic-list failure backoff ───────────────
+
+    /// v1.1.9 ITEM (b) — the topic-list refresh cadence keys off
+    /// `last_topic_list_attempt_at`, NOT `last_topic_list_success_at`.
+    /// Pre-v1.1.9 the predicate used the only timestamp it had
+    /// (success), so a transient `Err(Transient)` from
+    /// `run_topic_list` triggered a fresh spawn on EVERY subsequent
+    /// tick until success — the failure-amplifier branch DISPATCH 28
+    /// strace identified as ~18% of B3's spawn churn.
+    ///
+    /// Drives the predicate directly to assert:
+    ///   - A failed attempt at `t0` STILL satisfies the cadence
+    ///     gate at `t0 + 5 s` (no retry-next-tick).
+    ///   - The same attempt-timestamp opens the gate again at
+    ///     `t0 + 30 s` (the success path would similarly).
+    ///   - A success path updates both timestamps; a failure path
+    ///     touches only `last_topic_list_attempt_at`. The pair must
+    ///     remain independently readable so the staleness/GC code
+    ///     can distinguish "tried recently" from "succeeded recently."
+    #[test]
+    fn b3_topic_list_failure_backs_off_to_cadence() {
+        let mut s = Ros2ShelloutSource::new();
+        let pid = 42;
+        let t0 = Instant::now();
+
+        // Simulate a failed `run_topic_list` at t0: attempt updates,
+        // success does NOT.
+        {
+            let st = s.cache.entry(pid).or_default();
+            st.last_topic_list_attempt_at = Some(t0);
+            // last_topic_list_success_at stays None — no successful
+            // refresh yet.
+        }
+
+        // At t0 + 5 s — well inside ROS2_TOPIC_LIST_INTERVAL (30 s).
+        // The production predicate over `last_topic_list_attempt_at`
+        // must say "no fresh attempt needed."
+        let t5 = t0 + Duration::from_secs(5);
+        let st = s.cache.get(&pid).unwrap();
+        let need_list = st
+            .last_topic_list_attempt_at
+            .map(|t| t5.duration_since(t) >= ROS2_TOPIC_LIST_INTERVAL)
+            .unwrap_or(true);
+        assert!(
+            !need_list,
+            "failed attempt at t0 must back off — no retry at t0+5s. \
+             Pre-v1.1.9 the predicate keyed off success and a failed \
+             refresh re-spawned every tick (DISPATCH 28 ~18% of the \
+             B3 churn).",
+        );
+
+        // At t0 + 30 s — boundary: cadence elapsed regardless of
+        // success/failure.
+        let t30 = t0 + ROS2_TOPIC_LIST_INTERVAL;
+        let need_list = st
+            .last_topic_list_attempt_at
+            .map(|t| t30.duration_since(t) >= ROS2_TOPIC_LIST_INTERVAL)
+            .unwrap_or(true);
+        assert!(
+            need_list,
+            "at the cadence boundary the gate must permit a retry",
+        );
+
+        // Now simulate a SUCCESS at t30: both timestamps update.
+        {
+            let st = s.cache.entry(pid).or_default();
+            st.last_topic_list_attempt_at = Some(t30);
+            st.last_topic_list_success_at = Some(t30);
+            st.topic_list = vec!["/chatter".into()];
+        }
+        let st = s.cache.get(&pid).unwrap();
+        assert_eq!(
+            st.last_topic_list_attempt_at,
+            st.last_topic_list_success_at,
+            "success path must update BOTH timestamps so a downstream \
+             reader can compare them and find them in sync",
+        );
+
+        // Independent-readability pin: a later failed attempt
+        // updates only attempt_at; success_at stays at t30 so the
+        // GC / staleness logic can still see "succeeded 30 s ago."
+        let t_fail = t30 + Duration::from_secs(35); // > cadence
+        {
+            let st = s.cache.entry(pid).or_default();
+            st.last_topic_list_attempt_at = Some(t_fail);
+            // success_at deliberately not touched
+        }
+        let st = s.cache.get(&pid).unwrap();
+        assert_eq!(
+            st.last_topic_list_success_at,
+            Some(t30),
+            "failure path must NOT touch last_topic_list_success_at",
+        );
+        assert_eq!(
+            st.last_topic_list_attempt_at,
+            Some(t_fail),
+            "failure path must update last_topic_list_attempt_at",
         );
     }
 
@@ -1135,30 +1270,34 @@ mod tests {
     }
 
     /// v1.1.5 ITEM E — the cache GC threshold bounds the leak in
-    /// time. A stale entry whose `last_topic_list_at` is older than
-    /// the threshold is dropped on the next sample sweep. Test
-    /// exercises the sweep predicate directly (the `sample` method
-    /// can't be driven without a real `ros2` subprocess).
+    /// time. A stale entry whose `last_topic_list_attempt_at` is
+    /// older than the threshold is dropped on the next sample sweep.
+    /// Test exercises the sweep predicate directly (the `sample`
+    /// method can't be driven without a real `ros2` subprocess).
+    ///
+    /// v1.1.9 ITEM (b) — anchored on `last_topic_list_attempt_at`
+    /// (the "last-touched" timestamp) so a PID whose probes are
+    /// failing repeatedly is still considered fresh and not swept.
     #[test]
     fn b3_cache_gc_drops_stale_entries() {
         let mut s = Ros2ShelloutSource::new();
         let now = Instant::now();
-        // Stale PID — last_topic_list_at well past the threshold.
+        // Stale PID — last_topic_list_attempt_at well past the threshold.
         let stale = s.cache.entry(100).or_default();
-        stale.last_topic_list_at =
+        stale.last_topic_list_attempt_at =
             Some(now - ROS2_CACHE_GC_THRESHOLD - Duration::from_secs(1));
         stale.topic_list = vec!["/old".into()];
         // Fresh PID — well inside the threshold.
         let fresh = s.cache.entry(200).or_default();
-        fresh.last_topic_list_at = Some(now);
+        fresh.last_topic_list_attempt_at = Some(now);
         fresh.topic_list = vec!["/new".into()];
-        // Cold-start entry (no list yet) — must be kept.
+        // Cold-start entry (no attempt yet) — must be kept.
         let cold = s.cache.entry(300).or_default();
-        cold.last_topic_list_at = None;
+        cold.last_topic_list_attempt_at = None;
 
         // The sweep predicate the production sample() applies:
         s.cache.retain(|_, st| {
-            st.last_topic_list_at
+            st.last_topic_list_attempt_at
                 .map(|t| now.duration_since(t) < ROS2_CACHE_GC_THRESHOLD)
                 .unwrap_or(true)
         });

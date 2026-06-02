@@ -237,7 +237,7 @@ struct PerPidState {
 /// live HERE on the sampler (sampler-global), not on per-PID state.
 /// The ROS DDS graph is shared across all PIDs sampled by this
 /// instance, so `ros2 topic list` runs ONCE per
-/// [`ROS2_TOPIC_LIST_INTERVAL`] cadence regardless of PID count.
+/// `ROS2_TOPIC_LIST_INTERVAL` cadence regardless of PID count.
 /// Pre-v1.1.9 each PID independently cached and refreshed the same
 /// global list — under the empirical 10-publisher workload that
 /// meant up to 10× redundant `ros2 topic list` spawns per cadence

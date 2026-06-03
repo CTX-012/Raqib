@@ -50,7 +50,10 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use ux_contract::AlertId;
-use ux_contract::thresholds::ALERT_SUSTAIN_SECS;
+// v1.3.1 — sustain is no longer a top-level const here; it lives on
+// `AlertState` as a resolved field. Tests and `Default` use the
+// contract default via the fully-qualified path
+// `ux_contract::thresholds::ALERT_SUSTAIN_SECS`.
 
 /// Identifies what an alert applies to. RAM pressure is the only
 /// system-wide alert in v0.3 §4 (its template names no workload);
@@ -129,14 +132,57 @@ enum SlotState {
 /// Per-(scope, alert_id) slot map. `Idle` is the implicit absent
 /// state — slots are removed when they become Idle so the map stays
 /// bounded by the number of currently-firing or pending alerts.
-#[derive(Debug, Default, Clone)]
+///
+/// v1.3.1 / DISPATCH 53 — gains `sustain_secs`, the
+/// resolved-effective alert-sustain window. Pre-v1.3.1 the sustain
+/// was a contract const read inline at `transition`; with the
+/// `[thresholds]` config layer the value flows from
+/// `EffectiveThresholds::alert_sustain_secs`. The state stores it
+/// at construction so per-tick `observe` calls don't have to thread
+/// it through every call site.
+#[derive(Debug, Clone)]
 pub struct AlertState {
     slots: HashMap<(AlertScope, AlertId), SlotState>,
+    /// Sustain window for pressure-gated alerts (VRAM / RAM / KV /
+    /// Thermal). Resolved from `EffectiveThresholds` at runtime
+    /// construction; default = contract `ALERT_SUSTAIN_SECS`.
+    sustain_secs: u64,
+}
+
+impl Default for AlertState {
+    /// Default reads the contract `ALERT_SUSTAIN_SECS` constant. The
+    /// derive-default path was removed in v1.3.1 because the sustain
+    /// field needs a non-zero starting value; the manual impl makes
+    /// the choice explicit. `RuntimeState::default()` still works
+    /// unchanged via this impl — production fixes the sustain to
+    /// the resolved value in `Runtime::new`.
+    fn default() -> Self {
+        Self {
+            slots: HashMap::new(),
+            sustain_secs: ux_contract::thresholds::ALERT_SUSTAIN_SECS,
+        }
+    }
 }
 
 impl AlertState {
-    pub fn new() -> Self {
-        Self::default()
+    /// v1.3.1 — clean break from the previous `new()` -> `default()`
+    /// pattern. The sustain window is now a per-instance value
+    /// resolved against the operator's `[thresholds]` config; tests
+    /// that want the contract default call `AlertState::default()`
+    /// or `AlertState::new(ALERT_SUSTAIN_SECS)`.
+    pub fn new(sustain_secs: u64) -> Self {
+        Self {
+            slots: HashMap::new(),
+            sustain_secs,
+        }
+    }
+
+    /// v1.3.1 — accessor for the stored sustain window. Tests use this
+    /// to pin the wiring from `EffectiveThresholds.alert_sustain_secs`
+    /// through `Runtime::new` into `state.alerts`. The pressure-pending
+    /// transition reads the same value internally.
+    pub fn sustain_secs(&self) -> u64 {
+        self.sustain_secs
     }
 
     /// Per-tick update for one (scope, alert) pair. `breaching`
@@ -151,7 +197,14 @@ impl AlertState {
     ) -> Option<AlertEvent> {
         let key = (workload.scope, alert_id);
         let current = self.slots.remove(&key);
-        let (next, event) = transition(current, now, workload, alert_id, breaching);
+        let (next, event) = transition(
+            current,
+            now,
+            workload,
+            alert_id,
+            breaching,
+            self.sustain_secs,
+        );
         if let Some(state) = next {
             self.slots.insert(key, state);
         }
@@ -302,6 +355,7 @@ fn transition(
     workload: WorkloadRef,
     alert_id: AlertId,
     breaching: bool,
+    sustain_secs: u64,
 ) -> (Option<SlotState>, Option<AlertEvent>) {
     match (current, breaching) {
         // Idle (implicit absent): only enter Pending or Active when
@@ -321,7 +375,10 @@ fn transition(
 
         // Pending: still breaching → check sustain, otherwise reset.
         (Some(SlotState::Pending(since)), true) => {
-            if now.duration_since(since) >= Duration::from_secs(ALERT_SUSTAIN_SECS) {
+            // v1.3.1 — sustain comes from the AlertState's stored
+            // value (resolved from EffectiveThresholds), not the
+            // contract const directly.
+            if now.duration_since(since) >= Duration::from_secs(sustain_secs) {
                 let entry = AlertEntry {
                     alert_id,
                     scope: workload.scope,
@@ -383,7 +440,7 @@ mod tests {
 
     #[test]
     fn vram_pressure_does_not_fire_for_first_4_secs() {
-        let mut state = AlertState::new();
+        let mut state = AlertState::new(ux_contract::thresholds::ALERT_SUSTAIN_SECS);
         let start = t0();
         // Tick at t=0: enters Pending.
         assert_eq!(state.observe(start, pid(42), AlertId::VramPressure, true), None);
@@ -401,7 +458,7 @@ mod tests {
 
     #[test]
     fn vram_pressure_fires_at_5_secs_continuous() {
-        let mut state = AlertState::new();
+        let mut state = AlertState::new(ux_contract::thresholds::ALERT_SUSTAIN_SECS);
         let start = t0();
         assert_eq!(state.observe(start, pid(42), AlertId::VramPressure, true), None);
         let event = state.observe(after(start, 5), pid(42), AlertId::VramPressure, true);
@@ -412,7 +469,7 @@ mod tests {
 
     #[test]
     fn vram_pressure_resets_sustain_when_metric_drops() {
-        let mut state = AlertState::new();
+        let mut state = AlertState::new(ux_contract::thresholds::ALERT_SUSTAIN_SECS);
         let start = t0();
         // Breach for 3s.
         state.observe(start, pid(42), AlertId::VramPressure, true);
@@ -432,7 +489,7 @@ mod tests {
         // 5000ms or later, fires. This pins the boundary so a future
         // refactor that uses `as_secs()` (which floors) doesn't fire
         // a tick early.
-        let mut state = AlertState::new();
+        let mut state = AlertState::new(ux_contract::thresholds::ALERT_SUSTAIN_SECS);
         let start = t0();
         state.observe(start, pid(42), AlertId::VramPressure, true);
         assert_eq!(
@@ -454,7 +511,7 @@ mod tests {
     fn kv_pressure_independent_from_vram_pressure() {
         // Both alerts on the same PID — each has its own slot, so
         // VRAM firing doesn't preempt KV's sustain timer.
-        let mut state = AlertState::new();
+        let mut state = AlertState::new(ux_contract::thresholds::ALERT_SUSTAIN_SECS);
         let start = t0();
         state.observe(start, pid(42), AlertId::VramPressure, true);
         // KV starts breaching 3s later.
@@ -474,7 +531,7 @@ mod tests {
     #[test]
     fn vram_pressure_independent_per_workload() {
         // Same alert, different PIDs — independent timers.
-        let mut state = AlertState::new();
+        let mut state = AlertState::new(ux_contract::thresholds::ALERT_SUSTAIN_SECS);
         let start = t0();
         state.observe(start, pid(42), AlertId::VramPressure, true);
         state.observe(after(start, 3), pid(99), AlertId::VramPressure, true);
@@ -492,7 +549,7 @@ mod tests {
 
     #[test]
     fn governor_armed_fires_immediately() {
-        let mut state = AlertState::new();
+        let mut state = AlertState::new(ux_contract::thresholds::ALERT_SUSTAIN_SECS);
         let event = state.observe(t0(), pid(42), AlertId::GovernorArmed, true);
         assert_eq!(event, Some(AlertEvent::Fired(AlertId::GovernorArmed)));
         assert_eq!(state.visible().len(), 1);
@@ -500,14 +557,14 @@ mod tests {
 
     #[test]
     fn oom_detected_fires_immediately() {
-        let mut state = AlertState::new();
+        let mut state = AlertState::new(ux_contract::thresholds::ALERT_SUSTAIN_SECS);
         let event = state.observe(t0(), pid(42), AlertId::OomDetected, true);
         assert_eq!(event, Some(AlertEvent::Fired(AlertId::OomDetected)));
     }
 
     #[test]
     fn workload_exited_fires_immediately() {
-        let mut state = AlertState::new();
+        let mut state = AlertState::new(ux_contract::thresholds::ALERT_SUSTAIN_SECS);
         let event = state.observe(t0(), pid(42), AlertId::WorkloadExited, true);
         assert_eq!(event, Some(AlertEvent::Fired(AlertId::WorkloadExited)));
     }
@@ -518,7 +575,7 @@ mod tests {
 
     #[test]
     fn auto_clears_when_condition_resolves() {
-        let mut state = AlertState::new();
+        let mut state = AlertState::new(ux_contract::thresholds::ALERT_SUSTAIN_SECS);
         let start = t0();
         state.observe(start, pid(42), AlertId::VramPressure, true);
         state.observe(after(start, 5), pid(42), AlertId::VramPressure, true);
@@ -535,7 +592,7 @@ mod tests {
 
     #[test]
     fn ack_removes_from_visible() {
-        let mut state = AlertState::new();
+        let mut state = AlertState::new(ux_contract::thresholds::ALERT_SUSTAIN_SECS);
         state.observe(t0(), pid(42), AlertId::GovernorArmed, true);
         assert_eq!(state.visible().len(), 1);
         let count = state.ack_all();
@@ -548,7 +605,7 @@ mod tests {
         // Per §4: ack hides the alert from visible, but the condition
         // is still observed. Re-fire requires the breach to resolve
         // and recur.
-        let mut state = AlertState::new();
+        let mut state = AlertState::new(ux_contract::thresholds::ALERT_SUSTAIN_SECS);
         let start = t0();
         // Fire VRAM via sustain.
         state.observe(start, pid(42), AlertId::VramPressure, true);
@@ -564,7 +621,7 @@ mod tests {
     #[test]
     fn acked_then_condition_resolves_then_recurs_refires() {
         // Suppressed → Idle (on resolve) → Pending → Active flow.
-        let mut state = AlertState::new();
+        let mut state = AlertState::new(ux_contract::thresholds::ALERT_SUSTAIN_SECS);
         let start = t0();
         state.observe(start, pid(42), AlertId::VramPressure, true);
         state.observe(after(start, 5), pid(42), AlertId::VramPressure, true);
@@ -589,7 +646,7 @@ mod tests {
         // in its sustain window has not fired yet — ack_all should
         // leave it alone so it can fire normally when sustain
         // completes.
-        let mut state = AlertState::new();
+        let mut state = AlertState::new(ux_contract::thresholds::ALERT_SUSTAIN_SECS);
         let start = t0();
         state.observe(start, pid(42), AlertId::VramPressure, true);
         let count = state.ack_all();
@@ -605,7 +662,7 @@ mod tests {
 
     #[test]
     fn max_visible_caps_at_3() {
-        let mut state = AlertState::new();
+        let mut state = AlertState::new(ux_contract::thresholds::ALERT_SUSTAIN_SECS);
         let start = t0();
         // Fire 5 instant alerts on different PIDs.
         for (i, p) in [10u32, 11, 12, 13, 14].iter().enumerate() {
@@ -621,7 +678,7 @@ mod tests {
     fn priority_critical_above_attention() {
         // Older Attention alert + newer Critical alert: Critical wins
         // visibility despite being newer.
-        let mut state = AlertState::new();
+        let mut state = AlertState::new(ux_contract::thresholds::ALERT_SUSTAIN_SECS);
         let start = t0();
         // Fire VRAM pressure (Attention tier) at t=5s.
         state.observe(start, pid(10), AlertId::VramPressure, true);
@@ -637,7 +694,7 @@ mod tests {
 
     #[test]
     fn visible_returns_oldest_first_within_same_tier() {
-        let mut state = AlertState::new();
+        let mut state = AlertState::new(ux_contract::thresholds::ALERT_SUSTAIN_SECS);
         let start = t0();
         // Three OOMs on different PIDs, fired at different times.
         state.observe(after(start, 1), pid(10), AlertId::OomDetected, true);
@@ -659,7 +716,7 @@ mod tests {
         // ALERT_RAM_PRESSURE has no `{workload}`/`{pid}` placeholder
         // in its template — it's the only system-scope alert in
         // v0.3 §4.
-        let mut state = AlertState::new();
+        let mut state = AlertState::new(ux_contract::thresholds::ALERT_SUSTAIN_SECS);
         let start = t0();
         state.observe(start, WorkloadRef::system(), AlertId::RamPressure, true);
         state.observe(
@@ -677,7 +734,7 @@ mod tests {
 
     #[test]
     fn observe_with_no_breach_idle_returns_none() {
-        let mut state = AlertState::new();
+        let mut state = AlertState::new(ux_contract::thresholds::ALERT_SUSTAIN_SECS);
         let event = state.observe(t0(), pid(42), AlertId::VramPressure, false);
         assert_eq!(event, None);
         assert_eq!(state.visible().len(), 0);
@@ -689,7 +746,7 @@ mod tests {
 
     #[test]
     fn observe_exit_fires_immediately_with_reason_captured() {
-        let mut state = AlertState::new();
+        let mut state = AlertState::new(ux_contract::thresholds::ALERT_SUSTAIN_SECS);
         let event = state.observe_exit(
             t0(),
             pid(42),
@@ -707,7 +764,7 @@ mod tests {
         // A second exit event for the same (PID, alert_id) replaces
         // the entry but doesn't re-fire — caller doesn't need to
         // log the alert twice.
-        let mut state = AlertState::new();
+        let mut state = AlertState::new(ux_contract::thresholds::ALERT_SUSTAIN_SECS);
         state.observe_exit(t0(), pid(42), AlertId::OomDetected, None);
         let event = state.observe_exit(t0(), pid(42), AlertId::OomDetected, None);
         assert_eq!(event, None);
@@ -721,7 +778,7 @@ mod tests {
         // Suppressed would leak). After ack, the slot is gone — a
         // future observe(false) on the same key would see None
         // (Idle), not a Suppressed slot.
-        let mut state = AlertState::new();
+        let mut state = AlertState::new(ux_contract::thresholds::ALERT_SUSTAIN_SECS);
         state.observe_exit(
             t0(),
             pid(42),
@@ -753,7 +810,7 @@ mod tests {
         // OomDetected and WorkloadExited. Pressure alerts continue
         // to use Suppressed so the recurrence path
         // (Suppressed → Idle → Pending → Active) works per L5.
-        let mut state = AlertState::new();
+        let mut state = AlertState::new(ux_contract::thresholds::ALERT_SUSTAIN_SECS);
         let start = t0();
         state.observe(start, pid(42), AlertId::VramPressure, true);
         state.observe(after(start, 5), pid(42), AlertId::VramPressure, true);
@@ -774,7 +831,7 @@ mod tests {
         // subsequent observe(false) can clear it (the per-tick path
         // doesn't iterate one-shot alert ids), and only ack_all
         // removes the slot.
-        let mut state = AlertState::new();
+        let mut state = AlertState::new(ux_contract::thresholds::ALERT_SUSTAIN_SECS);
         state.observe_exit(
             t0(),
             pid(42),

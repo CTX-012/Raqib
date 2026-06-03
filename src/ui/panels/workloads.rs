@@ -213,7 +213,7 @@ pub fn status_for(
     app: &App,
 ) -> WorkloadStatus {
     let inputs = build_status_inputs(proc, state, app.kill_confirm_pid(), Instant::now());
-    compute_workload_status(&inputs)
+    compute_workload_status(&inputs, &state.thresholds)
 }
 
 /// Build the in-render-order row list. Crate-public for tests + the
@@ -226,7 +226,7 @@ pub(crate) fn ordered_rows(state: &RuntimeState, app: &App) -> Vec<Row> {
         .ai_processes()
         .map(|p| {
             let inputs = build_status_inputs(p, state, armed, now);
-            let status = compute_workload_status(&inputs);
+            let status = compute_workload_status(&inputs, &state.thresholds);
             let lt = state.live_telemetry.get(&p.pid);
             let kv_cache_pct = lt.and_then(|t| t.kv_cache_peak_pct);
             let tokens_per_sec_avg = lt.and_then(|t| t.tokens_per_sec_avg);
@@ -300,9 +300,10 @@ pub fn ordered_pids(state: &RuntimeState, app: &App) -> Vec<u32> {
 /// `degraded_line::*` const and the relevant telemetry features
 /// land, a follow-up row swaps this helper for the contract
 /// templates with the new fields populated.
-pub(crate) fn degraded_line(row: &Row) -> Option<String> {
-    use ux_contract::thresholds::{KV_ATTENTION_PCT, RAM_ATTENTION_PCT, VRAM_ATTENTION_PCT};
-
+pub(crate) fn degraded_line(
+    row: &Row,
+    thresholds: &crate::thresholds::EffectiveThresholds,
+) -> Option<String> {
     if matches!(row.status, WorkloadStatus::Healthy | WorkloadStatus::Loading) {
         return None;
     }
@@ -311,18 +312,24 @@ pub(crate) fn degraded_line(row: &Row) -> Option<String> {
     if row.governor_armed {
         triggers.push("governor armed".to_string());
     }
+    // v1.3.1 — use the resolved thresholds so an operator's
+    // [thresholds] override reaches the trigger-label decision.
+    // Pre-v1.3.1 this read contract constants directly; under
+    // override that would have shown the row as Attention/Critical
+    // (compute_workload_status used the override) but the expansion
+    // line would have hidden the offending metric label.
     if let Some(p) = row.vram_pct
-        && p >= VRAM_ATTENTION_PCT
+        && p >= thresholds.vram_attention_pct
     {
         triggers.push(format!("VRAM {p:.0}%"));
     }
     if let Some(p) = row.ram_pct
-        && p >= RAM_ATTENTION_PCT
+        && p >= thresholds.ram_attention_pct
     {
         triggers.push(format!("RAM {p:.0}%"));
     }
     if let Some(p) = row.kv_cache_pct
-        && (p as f64) >= KV_ATTENTION_PCT
+        && (p as f64) >= thresholds.kv_attention_pct
     {
         triggers.push(format!("KV {p:.0}%"));
     }
@@ -541,7 +548,7 @@ pub fn render(f: &mut Frame, area: Rect, state: &RuntimeState, app: &App, theme:
             // shape keeps Healthy / Loading rows at their
             // pre-L12 single-line layout exactly.
             let mut lines = vec![primary_line];
-            if let Some(expansion) = degraded_line(row) {
+            if let Some(expansion) = degraded_line(row, &state.thresholds) {
                 // §14 — expansion line is supplementary context;
                 // muted keeps it visually subordinate to the
                 // primary row while still readable.
@@ -1126,7 +1133,7 @@ mod tests {
     #[test]
     fn workloads_healthy_row_no_expansion_line() {
         let row = make_row(WorkloadCategory::LLM, WorkloadStatus::Healthy);
-        assert_eq!(degraded_line(&row), None);
+        assert_eq!(degraded_line(&row, &crate::thresholds::EffectiveThresholds::default()), None);
     }
 
     #[test]
@@ -1135,14 +1142,14 @@ mod tests {
         // already shows "cold-loading" — a second line would be
         // redundant and dishonest (no breach is happening).
         let row = make_row(WorkloadCategory::LLM, WorkloadStatus::Loading);
-        assert_eq!(degraded_line(&row), None);
+        assert_eq!(degraded_line(&row, &crate::thresholds::EffectiveThresholds::default()), None);
     }
 
     #[test]
     fn workloads_attention_row_shows_expansion_line() {
         let mut row = make_row(WorkloadCategory::LLM, WorkloadStatus::Attention);
         row.vram_pct = Some(87.0);
-        let expansion = degraded_line(&row).expect("Attention must produce expansion");
+        let expansion = degraded_line(&row, &crate::thresholds::EffectiveThresholds::default()).expect("Attention must produce expansion");
         assert!(expansion.contains("VRAM 87%"), "expansion: {expansion}");
     }
 
@@ -1150,7 +1157,7 @@ mod tests {
     fn workloads_critical_row_shows_expansion_line() {
         let mut row = make_row(WorkloadCategory::LLM, WorkloadStatus::Critical);
         row.governor_armed = true;
-        let expansion = degraded_line(&row).expect("Critical must produce expansion");
+        let expansion = degraded_line(&row, &crate::thresholds::EffectiveThresholds::default()).expect("Critical must produce expansion");
         assert!(expansion.contains("governor armed"), "expansion: {expansion}");
     }
 
@@ -1161,7 +1168,7 @@ mod tests {
         let mut row = make_row(WorkloadCategory::LLM, WorkloadStatus::Attention);
         row.vram_pct = Some(91.4);
         // Display rounds to integer; 91.4 → "VRAM 91%".
-        assert_eq!(degraded_line(&row).as_deref(), Some("VRAM 91%"));
+        assert_eq!(degraded_line(&row, &crate::thresholds::EffectiveThresholds::default()).as_deref(), Some("VRAM 91%"));
     }
 
     #[test]
@@ -1173,7 +1180,7 @@ mod tests {
         let mut row = make_row(WorkloadCategory::LLM, WorkloadStatus::Critical);
         row.vram_pct = Some(96.0);
         row.kv_cache_pct = Some(93.0);
-        let expansion = degraded_line(&row).expect("triggers present");
+        let expansion = degraded_line(&row, &crate::thresholds::EffectiveThresholds::default()).expect("triggers present");
         assert_eq!(expansion, "VRAM 96% · KV 93%");
     }
 
@@ -1185,7 +1192,7 @@ mod tests {
         let mut row = make_row(WorkloadCategory::LLM, WorkloadStatus::Critical);
         row.governor_armed = true;
         row.vram_pct = Some(96.0);
-        let expansion = degraded_line(&row).expect("triggers present");
+        let expansion = degraded_line(&row, &crate::thresholds::EffectiveThresholds::default()).expect("triggers present");
         assert!(
             expansion.starts_with("governor armed"),
             "governor must lead: {expansion}"
@@ -1202,7 +1209,7 @@ mod tests {
         // No VRAM/RAM/KV pct set; no governor. Should never happen
         // in production (the dot wouldn't escalate without one of
         // these), but pin the fallback.
-        let expansion = degraded_line(&row).expect("Attention always expands");
+        let expansion = degraded_line(&row, &crate::thresholds::EffectiveThresholds::default()).expect("Attention always expands");
         assert!(expansion.contains("no specific metric trigger"));
     }
 

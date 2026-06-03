@@ -1,0 +1,3 @@
+[thresholds]
+thermal_amber_c = 95.0
+thermal_red_c = 85.0

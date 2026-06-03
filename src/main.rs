@@ -193,7 +193,14 @@ fn main() -> anyhow::Result<()> {
     // (CAR-17); the help overlay already surfaces that.
     let shutdown = install_shutdown_handler()?;
 
-    let runtime = Runtime::new(config);
+    // v1.3.1 — `Runtime::new` now validates the operator's
+    // `[thresholds]` config section and rejects invalid combinations
+    // with an operator-actionable message (no silent clamp; v1.0.1
+    // phantom-kill lesson). A bad TOML fails to start with the
+    // resolver's error verbatim — the operator sees exactly which
+    // field is wrong and what the constraint is.
+    let runtime = Runtime::new(config)
+        .with_context(|| "invalid configuration; aborting startup")?;
 
     // Sprint-6 — spawn the web companion on a background thread
     // BEFORE the TUI / headless loop takes the main thread. The TUI

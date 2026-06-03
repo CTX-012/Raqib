@@ -38,6 +38,39 @@ pub struct Config {
     // `Config` is `#[serde(default)]` and doesn't deny unknown fields,
     // so old configs continue to load without warnings.
     pub ui: UiConfig,
+    /// v1.3.1 / DISPATCH 53 — hybrid threshold-config overrides.
+    /// Every field is `Option<>`; missing values use the contract
+    /// defaults from `ux_contract::thresholds`. See
+    /// [`crate::thresholds::EffectiveThresholds`] for the resolver
+    /// and validation invariants.
+    pub thresholds: ThresholdsConfig,
+}
+
+/// v1.3.1 — per-field overrides for the contract's class-2
+/// "deployment threshold" constants. Every field is optional; missing
+/// values fall back to the contract default in
+/// [`crate::thresholds::EffectiveThresholds::resolve`]. Validation
+/// (amber < red, critical ≥ attention, range bounds) runs at resolve
+/// time — invalid combinations reject at startup with an
+/// operator-actionable error rather than silently clamping.
+///
+/// Class-3 sampler constants (`ROS2_ECHO_PROBE_INTERVAL`,
+/// `ROS2_ACTIVITY_STALENESS`, `ROS2_SHELLOUT_TIMEOUT`,
+/// `EMBEDDINGS_ACTIVE_CPU_PCT`) are deliberately ABSENT — they are
+/// correctness-critical (the v1.1.9 leak-fix cadence invariant lives
+/// among them) and remain compile-time const-pinned.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ThresholdsConfig {
+    pub thermal_amber_c: Option<f64>,
+    pub thermal_red_c: Option<f64>,
+    pub vram_attention_pct: Option<f64>,
+    pub vram_critical_pct: Option<f64>,
+    pub ram_attention_pct: Option<f64>,
+    pub ram_critical_pct: Option<f64>,
+    pub kv_attention_pct: Option<f64>,
+    pub kv_critical_pct: Option<f64>,
+    pub alert_sustain_secs: Option<u64>,
 }
 
 /// TUI presentation knobs. Today this is only the §13 theme name; future

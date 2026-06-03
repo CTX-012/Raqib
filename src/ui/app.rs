@@ -482,6 +482,7 @@ mod tests {
     /// construct a runtime via this helper.
     fn empty_runtime() -> crate::runtime::Runtime {
         crate::runtime::Runtime::new(crate::config::Config::default())
+            .expect("Runtime::new must succeed with contract default config")
     }
 
     fn ann(pid: u32, name: &str, cat: AICategory) -> AnnotatedProcess {

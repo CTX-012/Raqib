@@ -140,3 +140,54 @@ vision_probe_socket = ""
 # fall back to "dark" at render time so an unrecognised theme name
 # doesn't refuse to start the TUI.
 theme = "dark"
+
+[thresholds]
+# v1.3.1 / Phase 4 — per-deployment overrides for the contract's
+# class-2 "deployment thresholds" (UX_CONTRACT.md §3 status-dot
+# tiers, §4 pressure alerts). Each field is OPTIONAL; missing values
+# use the contract defaults shipped with the binary
+# (ux_contract::thresholds::*). The resolver
+# (src/thresholds.rs::EffectiveThresholds::resolve) validates the
+# resolved set at startup and REJECTS invalid combinations with an
+# operator-actionable error — no silent clamp. The validity rules
+# are:
+#   - thermal_red_c MUST be strictly greater than thermal_amber_c
+#   - vram_critical_pct  >= vram_attention_pct
+#   - ram_critical_pct   >= ram_attention_pct
+#   - kv_critical_pct    >= kv_attention_pct
+#   - every *_pct in 0.0..=100.0
+#   - alert_sustain_secs in 1..=600
+#
+# Class-3 sampler/correctness constants (ROS2 cadences, embeddings
+# CPU% threshold) are DELIBERATELY NOT configurable — they are
+# correctness-critical (the v1.1.9 leak-fix cadence invariant lives
+# among them) and remain compile-time const-pinned. If you find
+# yourself wanting to tune those, file an issue rather than reaching
+# for a config flag.
+
+# Thermal pressure (Phase 3 / v1.1.12). Defaults 85.0 / 95.0 °C.
+# Tighten for Jetson Orin (Tj_max 100 °C); leave default for x86
+# server-grade CPUs (Tj_max typically 90-105 °C).
+# thermal_amber_c = 80.0
+# thermal_red_c   = 92.0
+
+# Resource pressure (long-standing). Defaults 85 / 95 / 90 / 95 / 80 / 95.
+# Per-deployment tuning is the typical reason to override these —
+# e.g. an inference fleet running at intentional 90% VRAM steady-state
+# wants the attention threshold above its baseline so the alert
+# doesn't fire continuously.
+# vram_attention_pct = 80.0
+# vram_critical_pct  = 90.0
+# ram_attention_pct  = 85.0
+# ram_critical_pct   = 92.0
+# kv_attention_pct   = 75.0
+# kv_critical_pct    = 95.0
+
+# Alert sustain window: how long a pressure condition must hold
+# continuously before the alert fires (smoothing). Default 5 s.
+# Tighter (1-3 s) for CI / smoke tests that want fast feedback;
+# looser (10-30 s) for noisy desktops where pressure briefly spikes
+# during unrelated workload starts. Must be in 1..=600 s; a
+# 0-second sustain would disable smoothing entirely (which is what
+# the contract default of 5 s was introduced to prevent).
+# alert_sustain_secs = 3

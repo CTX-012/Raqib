@@ -134,7 +134,7 @@ fn render_history_overlay() -> String {
     let theme = current_theme("dark");
     let backend = TestBackend::new(120, 40);
     let mut terminal = Terminal::new(backend).expect("test backend");
-    let runtime = Runtime::new(Config::default());
+    let runtime = Runtime::new(Config::default()).expect("Runtime::new must succeed with contract default config");
     let mut app = App::new();
     // Supply at least one record so the header_paragraph renders
     // the column legend (the empty-state path renders the

@@ -27,5 +27,6 @@ pub mod recommend;
 pub mod runtime;
 pub mod storage;
 pub mod telemetry;
+pub mod thresholds;
 pub mod ui;
 pub mod web;

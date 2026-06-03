@@ -30,7 +30,7 @@ Four-step incremental cadence (mirrors Phase 3's v1.1.11 → v1.2.0):
 | Sub-version | Scope | Status |
 |---|---|---|
 | **v1.3.0** | `EDGE_MONITOR_THERMAL_ROOT` env override | **shipped** |
-| v1.3.1 | `[thresholds]` + `[samplers]` deployment overrides | scoped |
+| **v1.3.1** | `[thresholds]` deployment overrides (corrigendum: NO `[samplers]`; see v1.3.1 sub-section) | **shipped** |
 | v1.3.2 | `[[workloads]]` per-workload rules + suppression flags | scoped |
 | v1.3.3 | INA3221 power rails (consumes `ux_contract` v0.3.16) | scoped |
 | Jetson pass | Empirical validation on Orin | scoped (post-v1.3.3) |
@@ -297,3 +297,78 @@ authority lock):
 - **`ux_contract` changes go through Agent A.** v0.3.16 was
   Agent A's parallel dispatch (Q5 ack). v0.3.17+ if needed
   follows the same flow.
+
+## 8. v1.3.1 sub-section (shipped)
+
+v1.3.1 shipped the `[thresholds]` deployment-overridable defaults
+layer per DISPATCH 53. 5 atomic commits (C1 resolver, C2 wiring, C3
+AlertState clean break, C4 docs, C5 chore). 970 tests passing
+(was 952 baseline). Authority lock held — tenth observe-only
+confirmation. See `CHANGELOG.md [1.3.1]` for the per-component
+breakdown.
+
+### `[samplers]` corrigendum
+
+DISPATCH 48's sub-version table at §1 originally listed v1.3.1 as
+"`[thresholds]` + `[samplers]` deployment overrides". DISPATCH 52
+Inspector pre-pass surfaced the contradiction: under the locked
+hybrid model (operator Q1 at §3 above), every sampler-side constant
+is **class-3 ABSOLUTE**:
+
+- `ROS2_ECHO_PROBE_INTERVAL` and `ROS2_ACTIVITY_STALENESS` — pinned
+  by the v1.1.9 leak-fix cadence invariant
+  (`ROS2_ECHO_PROBE_INTERVAL * 2 <= ROS2_ACTIVITY_STALENESS`),
+  which is asserted by an existing test. Loosening either would
+  re-open the close()-volume leak that took 9 dispatches to close.
+- `ROS2_SHELLOUT_TIMEOUT` — v1.1.6 Humble-compat fix, tied to
+  `ros2 topic echo --once` startup time on the empirical host.
+- `EMBEDDINGS_ACTIVE_CPU_PCT` — P5 DISPATCH 9B VALIDATED value;
+  bimodal calibration pinned by `bimodal_thresholds_match_empirical_values`.
+
+**Resolution**: v1.3.1 ships `[thresholds]` ONLY. `[samplers]` does
+not exist. The sub-version table in §1 has been updated. If a future
+deployment hits a real need to tune one of the class-3 constants,
+the path is a focused dispatch that re-classifies that specific
+constant — not a `[samplers]` catch-all that invites future drift.
+
+### What v1.3.1 changed in the schema
+
+The `[thresholds]` section has exactly 9 fields, all `Option<>` (per
+the v1.1.11 / v1.1.12 / v1.2.0 additive-config pattern):
+
+```toml
+[thresholds]
+thermal_amber_c    = ...   # default 85.0; tighter for Jetson Orin
+thermal_red_c      = ...   # default 95.0; must be > thermal_amber_c
+vram_attention_pct = ...   # default 85.0
+vram_critical_pct  = ...   # default 95.0; must be >= vram_attention_pct
+ram_attention_pct  = ...   # default 90.0
+ram_critical_pct   = ...   # default 95.0; must be >= ram_attention_pct
+kv_attention_pct   = ...   # default 80.0
+kv_critical_pct    = ...   # default 95.0; must be >= kv_attention_pct
+alert_sustain_secs = ...   # default 5; in 1..=600
+```
+
+See `docs/configuration.md` for the operator-facing reference, and
+`src/thresholds.rs::EffectiveThresholds::resolve` for the
+validation implementation. Bad TOML rejects at `Runtime::new` with
+an operator-actionable error naming the field — the eighth-times-held
+no-silent-clamp discipline.
+
+### Authority lock evidence
+
+Per the audit table in DISPATCH 52 §8, every v1.3.1 element is
+observation-side or display-side. The schema-level firewall (no
+`action_on_breach` field anywhere in `ThresholdsConfig`) makes
+auto-action impossible to configure from TOML. **Tenth observe-only
+confirmation.** `send_sigterm` stays manual-only; the existing `k` →
+`kill_confirm` card → SIGTERM path is the ONLY actuation surface,
+unchanged since v1.0.
+
+### Ships next
+
+v1.3.2 — `[[workloads]]` per-workload threshold overrides +
+`suppress_alerts` / `suppress_recommendations` flags. Inspector
+pre-pass on the impl shape will fire once the v1.3.1 Tester
+validation gate clears (operator Q7 — Tester validates v1.3.1
+before v1.3.2 starts).

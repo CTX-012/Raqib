@@ -1,0 +1,151 @@
+2026-06-03T13:07:06.285793Z  INFO loading config path=/tmp/good_thresholds.toml
+2026-06-03T13:07:06.287496Z  INFO --no-web set; web UI disabled
+2026-06-03T13:07:06.376694Z  INFO RAPL energy_uj unreadable; CPU watts unavailable path=/sys/class/powercap/intel-rapl:0/energy_uj error=Permission denied (os error 13)
+2026-06-03T13:07:06.377034Z  INFO tick tick=1 ai_processes=19 exits=0
+2026-06-03T13:07:06.377041Z  INFO ai-process pid=2074 name=ollama category=Inference cpu_pct=0.0 rss_mb=355
+2026-06-03T13:07:06.377052Z  INFO ai-process pid=7134 name=claude category=Inference cpu_pct=0.0 rss_mb=194
+2026-06-03T13:07:06.377053Z  INFO ai-process pid=29192 name=claude category=Inference cpu_pct=0.0 rss_mb=220
+2026-06-03T13:07:06.377054Z  INFO ai-process pid=29735 name=claude category=Inference cpu_pct=0.0 rss_mb=168
+2026-06-03T13:07:06.377056Z  INFO ai-process pid=34677 name=claude category=Inference cpu_pct=0.0 rss_mb=232
+2026-06-03T13:07:06.377057Z  INFO ai-process pid=98605 name=claude category=Inference cpu_pct=0.0 rss_mb=128
+2026-06-03T13:07:06.377058Z  INFO ai-process pid=121323 name=claude category=Inference cpu_pct=0.0 rss_mb=127
+2026-06-03T13:07:06.377059Z  INFO ai-process pid=156732 name=claude category=Inference cpu_pct=0.0 rss_mb=167
+2026-06-03T13:07:06.377061Z  INFO ai-process pid=191287 name=bash category=Framework cpu_pct=0.0 rss_mb=2
+2026-06-03T13:07:06.377062Z  INFO ai-process pid=191290 name=claude category=Framework cpu_pct=0.0 rss_mb=1
+2026-06-03T13:07:06.377063Z  INFO ai-process pid=219599 name=bash category=Framework cpu_pct=0.0 rss_mb=2
+2026-06-03T13:07:06.377064Z  INFO ai-process pid=219602 name=claude category=Framework cpu_pct=0.0 rss_mb=3
+2026-06-03T13:07:06.377066Z  INFO ai-process pid=236201 name=bash category=Framework cpu_pct=0.0 rss_mb=2
+2026-06-03T13:07:06.377067Z  INFO ai-process pid=236204 name=claude category=Framework cpu_pct=0.0 rss_mb=3
+2026-06-03T13:07:06.377068Z  INFO ai-process pid=249051 name=claude category=Inference cpu_pct=0.0 rss_mb=143
+2026-06-03T13:07:06.377069Z  INFO ai-process pid=249140 name=claude category=Inference cpu_pct=0.0 rss_mb=223
+2026-06-03T13:07:06.377071Z  INFO ai-process pid=797666 name=claude category=Inference cpu_pct=0.0 rss_mb=215
+2026-06-03T13:07:06.377072Z  INFO ai-process pid=832172 name=claude category=Inference cpu_pct=0.0 rss_mb=191
+2026-06-03T13:07:06.377073Z  INFO ai-process pid=832259 name=claude category=Inference cpu_pct=0.0 rss_mb=247
+2026-06-03T13:07:06.377080Z  INFO alert visible (headless) alert.fire=ThermalPressure scope=System pid=-1 workload=
+2026-06-03T13:07:07.353745Z  INFO tick tick=2 ai_processes=19 exits=0
+2026-06-03T13:07:07.353760Z  INFO ai-process pid=2074 name=ollama category=Inference cpu_pct=0.0 rss_mb=355
+2026-06-03T13:07:07.353764Z  INFO ai-process pid=7134 name=claude category=Inference cpu_pct=1.0024243593215942 rss_mb=194
+2026-06-03T13:07:07.353766Z  INFO ai-process pid=29192 name=claude category=Inference cpu_pct=5.01212215423584 rss_mb=220
+2026-06-03T13:07:07.353768Z  INFO ai-process pid=29735 name=claude category=Inference cpu_pct=1.0024243593215942 rss_mb=168
+2026-06-03T13:07:07.353769Z  INFO ai-process pid=34677 name=claude category=Inference cpu_pct=1.0024243593215942 rss_mb=232
+2026-06-03T13:07:07.353770Z  INFO ai-process pid=98605 name=claude category=Inference cpu_pct=1.0024243593215942 rss_mb=128
+2026-06-03T13:07:07.353772Z  INFO ai-process pid=121323 name=claude category=Inference cpu_pct=1.0024243593215942 rss_mb=127
+2026-06-03T13:07:07.353773Z  INFO ai-process pid=156732 name=claude category=Inference cpu_pct=2.0048487186431885 rss_mb=167
+2026-06-03T13:07:07.353774Z  INFO ai-process pid=191287 name=bash category=Framework cpu_pct=0.0 rss_mb=2
+2026-06-03T13:07:07.353776Z  INFO ai-process pid=191290 name=claude category=Framework cpu_pct=0.0 rss_mb=1
+2026-06-03T13:07:07.353777Z  INFO ai-process pid=219599 name=bash category=Framework cpu_pct=0.0 rss_mb=2
+2026-06-03T13:07:07.353778Z  INFO ai-process pid=219602 name=claude category=Framework cpu_pct=0.0 rss_mb=3
+2026-06-03T13:07:07.353779Z  INFO ai-process pid=236201 name=bash category=Framework cpu_pct=0.0 rss_mb=2
+2026-06-03T13:07:07.353787Z  INFO ai-process pid=236204 name=claude category=Framework cpu_pct=0.0 rss_mb=3
+2026-06-03T13:07:07.353788Z  INFO ai-process pid=249051 name=claude category=Inference cpu_pct=1.0024243593215942 rss_mb=143
+2026-06-03T13:07:07.353790Z  INFO ai-process pid=249140 name=claude category=Inference cpu_pct=1.0024243593215942 rss_mb=223
+2026-06-03T13:07:07.353791Z  INFO ai-process pid=797666 name=claude category=Inference cpu_pct=0.0 rss_mb=215
+2026-06-03T13:07:07.353792Z  INFO ai-process pid=832172 name=claude category=Inference cpu_pct=0.0 rss_mb=191
+2026-06-03T13:07:07.353793Z  INFO ai-process pid=832259 name=claude category=Inference cpu_pct=1.0024243593215942 rss_mb=247
+2026-06-03T13:07:07.353795Z  INFO alert visible (headless) alert.fire=ThermalPressure scope=System pid=-1 workload=
+2026-06-03T13:07:08.354986Z  INFO tick tick=3 ai_processes=19 exits=0
+2026-06-03T13:07:08.355001Z  INFO ai-process pid=2074 name=ollama category=Inference cpu_pct=0.0 rss_mb=355
+2026-06-03T13:07:08.355006Z  INFO ai-process pid=7134 name=claude category=Inference cpu_pct=1.9989218711853027 rss_mb=194
+2026-06-03T13:07:08.355008Z  INFO ai-process pid=29192 name=claude category=Inference cpu_pct=5.996766090393066 rss_mb=220
+2026-06-03T13:07:08.355009Z  INFO ai-process pid=29735 name=claude category=Inference cpu_pct=0.9994609355926514 rss_mb=168
+2026-06-03T13:07:08.355011Z  INFO ai-process pid=34677 name=claude category=Inference cpu_pct=0.9994609355926514 rss_mb=232
+2026-06-03T13:07:08.355027Z  INFO ai-process pid=98605 name=claude category=Inference cpu_pct=0.9994609355926514 rss_mb=128
+2026-06-03T13:07:08.355029Z  INFO ai-process pid=121323 name=claude category=Inference cpu_pct=0.9994609355926514 rss_mb=127
+2026-06-03T13:07:08.355030Z  INFO ai-process pid=156732 name=claude category=Inference cpu_pct=2.998383045196533 rss_mb=167
+2026-06-03T13:07:08.355032Z  INFO ai-process pid=191287 name=bash category=Framework cpu_pct=0.0 rss_mb=2
+2026-06-03T13:07:08.355033Z  INFO ai-process pid=191290 name=claude category=Framework cpu_pct=0.0 rss_mb=1
+2026-06-03T13:07:08.355034Z  INFO ai-process pid=219599 name=bash category=Framework cpu_pct=0.0 rss_mb=2
+2026-06-03T13:07:08.355035Z  INFO ai-process pid=219602 name=claude category=Framework cpu_pct=0.0 rss_mb=3
+2026-06-03T13:07:08.355037Z  INFO ai-process pid=236201 name=bash category=Framework cpu_pct=0.0 rss_mb=2
+2026-06-03T13:07:08.355038Z  INFO ai-process pid=236204 name=claude category=Framework cpu_pct=0.0 rss_mb=3
+2026-06-03T13:07:08.355039Z  INFO ai-process pid=249051 name=claude category=Inference cpu_pct=0.9994609355926514 rss_mb=143
+2026-06-03T13:07:08.355040Z  INFO ai-process pid=249140 name=claude category=Inference cpu_pct=0.9994609355926514 rss_mb=223
+2026-06-03T13:07:08.355042Z  INFO ai-process pid=797666 name=claude category=Inference cpu_pct=1.9989218711853027 rss_mb=215
+2026-06-03T13:07:08.355043Z  INFO ai-process pid=832172 name=claude category=Inference cpu_pct=0.9994609355926514 rss_mb=191
+2026-06-03T13:07:08.355044Z  INFO ai-process pid=832259 name=claude category=Inference cpu_pct=0.9994609355926514 rss_mb=247
+2026-06-03T13:07:08.355046Z  INFO alert visible (headless) alert.fire=ThermalPressure scope=System pid=-1 workload=
+2026-06-03T13:07:09.368459Z  INFO tick tick=4 ai_processes=19 exits=0
+2026-06-03T13:07:09.368474Z  INFO ai-process pid=2074 name=ollama category=Inference cpu_pct=0.0 rss_mb=355
+2026-06-03T13:07:09.368479Z  INFO ai-process pid=7134 name=claude category=Inference cpu_pct=0.98626708984375 rss_mb=194
+2026-06-03T13:07:09.368481Z  INFO ai-process pid=29192 name=claude category=Inference cpu_pct=9.8626708984375 rss_mb=220
+2026-06-03T13:07:09.368482Z  INFO ai-process pid=29735 name=claude category=Inference cpu_pct=0.98626708984375 rss_mb=168
+2026-06-03T13:07:09.368483Z  INFO ai-process pid=34677 name=claude category=Inference cpu_pct=1.9725341796875 rss_mb=232
+2026-06-03T13:07:09.368485Z  INFO ai-process pid=98605 name=claude category=Inference cpu_pct=0.98626708984375 rss_mb=128
+2026-06-03T13:07:09.368486Z  INFO ai-process pid=121323 name=claude category=Inference cpu_pct=0.98626708984375 rss_mb=127
+2026-06-03T13:07:09.368494Z  INFO ai-process pid=156732 name=claude category=Inference cpu_pct=0.98626708984375 rss_mb=167
+2026-06-03T13:07:09.368496Z  INFO ai-process pid=191287 name=bash category=Framework cpu_pct=0.0 rss_mb=2
+2026-06-03T13:07:09.368497Z  INFO ai-process pid=191290 name=claude category=Framework cpu_pct=0.0 rss_mb=1
+2026-06-03T13:07:09.368498Z  INFO ai-process pid=219599 name=bash category=Framework cpu_pct=0.0 rss_mb=2
+2026-06-03T13:07:09.368499Z  INFO ai-process pid=219602 name=claude category=Framework cpu_pct=0.0 rss_mb=3
+2026-06-03T13:07:09.368500Z  INFO ai-process pid=236201 name=bash category=Framework cpu_pct=0.0 rss_mb=2
+2026-06-03T13:07:09.368502Z  INFO ai-process pid=236204 name=claude category=Framework cpu_pct=0.0 rss_mb=3
+2026-06-03T13:07:09.368503Z  INFO ai-process pid=249051 name=claude category=Inference cpu_pct=1.9725341796875 rss_mb=143
+2026-06-03T13:07:09.368504Z  INFO ai-process pid=249140 name=claude category=Inference cpu_pct=1.9725341796875 rss_mb=223
+2026-06-03T13:07:09.368505Z  INFO ai-process pid=797666 name=claude category=Inference cpu_pct=0.98626708984375 rss_mb=215
+2026-06-03T13:07:09.368507Z  INFO ai-process pid=832172 name=claude category=Inference cpu_pct=1.9725341796875 rss_mb=191
+2026-06-03T13:07:09.368508Z  INFO ai-process pid=832259 name=claude category=Inference cpu_pct=1.9725341796875 rss_mb=247
+2026-06-03T13:07:09.368509Z  INFO alert visible (headless) alert.fire=ThermalPressure scope=System pid=-1 workload=
+2026-06-03T13:07:10.356694Z  INFO tick tick=5 ai_processes=19 exits=0
+2026-06-03T13:07:10.356712Z  INFO ai-process pid=2074 name=ollama category=Inference cpu_pct=0.0 rss_mb=355
+2026-06-03T13:07:10.356716Z  INFO ai-process pid=7134 name=claude category=Inference cpu_pct=1.0124539136886597 rss_mb=194
+2026-06-03T13:07:10.356718Z  INFO ai-process pid=29192 name=claude category=Inference cpu_pct=6.074723243713379 rss_mb=219
+2026-06-03T13:07:10.356720Z  INFO ai-process pid=29735 name=claude category=Inference cpu_pct=1.0124539136886597 rss_mb=168
+2026-06-03T13:07:10.356737Z  INFO ai-process pid=34677 name=claude category=Inference cpu_pct=0.0 rss_mb=232
+2026-06-03T13:07:10.356739Z  INFO ai-process pid=98605 name=claude category=Inference cpu_pct=1.0124539136886597 rss_mb=128
+2026-06-03T13:07:10.356740Z  INFO ai-process pid=121323 name=claude category=Inference cpu_pct=2.0249078273773193 rss_mb=127
+2026-06-03T13:07:10.356742Z  INFO ai-process pid=156732 name=claude category=Inference cpu_pct=3.0373616218566895 rss_mb=167
+2026-06-03T13:07:10.356744Z  INFO ai-process pid=191287 name=bash category=Framework cpu_pct=0.0 rss_mb=2
+2026-06-03T13:07:10.356745Z  INFO ai-process pid=191290 name=claude category=Framework cpu_pct=0.0 rss_mb=1
+2026-06-03T13:07:10.356747Z  INFO ai-process pid=219599 name=bash category=Framework cpu_pct=0.0 rss_mb=2
+2026-06-03T13:07:10.356749Z  INFO ai-process pid=219602 name=claude category=Framework cpu_pct=0.0 rss_mb=3
+2026-06-03T13:07:10.356750Z  INFO ai-process pid=236201 name=bash category=Framework cpu_pct=0.0 rss_mb=2
+2026-06-03T13:07:10.356752Z  INFO ai-process pid=236204 name=claude category=Framework cpu_pct=0.0 rss_mb=3
+2026-06-03T13:07:10.356753Z  INFO ai-process pid=249051 name=claude category=Inference cpu_pct=0.0 rss_mb=143
+2026-06-03T13:07:10.356755Z  INFO ai-process pid=249140 name=claude category=Inference cpu_pct=1.0124539136886597 rss_mb=223
+2026-06-03T13:07:10.356757Z  INFO ai-process pid=797666 name=claude category=Inference cpu_pct=1.0124539136886597 rss_mb=215
+2026-06-03T13:07:10.356759Z  INFO ai-process pid=832172 name=claude category=Inference cpu_pct=1.0124539136886597 rss_mb=191
+2026-06-03T13:07:10.356760Z  INFO ai-process pid=832259 name=claude category=Inference cpu_pct=0.0 rss_mb=247
+2026-06-03T13:07:10.356763Z  INFO alert visible (headless) alert.fire=ThermalPressure scope=System pid=-1 workload=
+2026-06-03T13:07:11.356773Z  INFO tick tick=6 ai_processes=19 exits=0
+2026-06-03T13:07:11.356790Z  INFO ai-process pid=2074 name=ollama category=Inference cpu_pct=0.0 rss_mb=355
+2026-06-03T13:07:11.356800Z  INFO ai-process pid=7134 name=claude category=Inference cpu_pct=0.9996163845062256 rss_mb=194
+2026-06-03T13:07:11.356802Z  INFO ai-process pid=29192 name=claude category=Inference cpu_pct=4.998082160949707 rss_mb=219
+2026-06-03T13:07:11.356804Z  INFO ai-process pid=29735 name=claude category=Inference cpu_pct=1.9992327690124512 rss_mb=168
+2026-06-03T13:07:11.356805Z  INFO ai-process pid=34677 name=claude category=Inference cpu_pct=1.9992327690124512 rss_mb=232
+2026-06-03T13:07:11.356806Z  INFO ai-process pid=98605 name=claude category=Inference cpu_pct=0.9996163845062256 rss_mb=128
+2026-06-03T13:07:11.356808Z  INFO ai-process pid=121323 name=claude category=Inference cpu_pct=0.9996163845062256 rss_mb=127
+2026-06-03T13:07:11.356809Z  INFO ai-process pid=156732 name=claude category=Inference cpu_pct=1.9992327690124512 rss_mb=167
+2026-06-03T13:07:11.356810Z  INFO ai-process pid=191287 name=bash category=Framework cpu_pct=0.0 rss_mb=2
+2026-06-03T13:07:11.356812Z  INFO ai-process pid=191290 name=claude category=Framework cpu_pct=0.0 rss_mb=1
+2026-06-03T13:07:11.356813Z  INFO ai-process pid=219599 name=bash category=Framework cpu_pct=0.0 rss_mb=2
+2026-06-03T13:07:11.356814Z  INFO ai-process pid=219602 name=claude category=Framework cpu_pct=0.0 rss_mb=3
+2026-06-03T13:07:11.356815Z  INFO ai-process pid=236201 name=bash category=Framework cpu_pct=0.0 rss_mb=2
+2026-06-03T13:07:11.356816Z  INFO ai-process pid=236204 name=claude category=Framework cpu_pct=0.0 rss_mb=3
+2026-06-03T13:07:11.356818Z  INFO ai-process pid=249051 name=claude category=Inference cpu_pct=1.9992327690124512 rss_mb=143
+2026-06-03T13:07:11.356819Z  INFO ai-process pid=249140 name=claude category=Inference cpu_pct=0.9996163845062256 rss_mb=223
+2026-06-03T13:07:11.356820Z  INFO ai-process pid=797666 name=claude category=Inference cpu_pct=1.9992327690124512 rss_mb=215
+2026-06-03T13:07:11.356822Z  INFO ai-process pid=832172 name=claude category=Inference cpu_pct=0.0 rss_mb=191
+2026-06-03T13:07:11.356823Z  INFO ai-process pid=832259 name=claude category=Inference cpu_pct=1.9992327690124512 rss_mb=247
+2026-06-03T13:07:11.356824Z  INFO alert visible (headless) alert.fire=ThermalPressure scope=System pid=-1 workload=
+2026-06-03T13:07:12.360117Z  INFO tick tick=7 ai_processes=19 exits=0
+2026-06-03T13:07:12.360133Z  INFO ai-process pid=2074 name=ollama category=Inference cpu_pct=0.0 rss_mb=355
+2026-06-03T13:07:12.360138Z  INFO ai-process pid=7134 name=claude category=Inference cpu_pct=1.9928237199783325 rss_mb=194
+2026-06-03T13:07:12.360140Z  INFO ai-process pid=29192 name=claude category=Inference cpu_pct=4.982059478759766 rss_mb=219
+2026-06-03T13:07:12.360141Z  INFO ai-process pid=29735 name=claude category=Inference cpu_pct=0.9964118599891663 rss_mb=168
+2026-06-03T13:07:12.360143Z  INFO ai-process pid=34677 name=claude category=Inference cpu_pct=0.9964118599891663 rss_mb=232
+2026-06-03T13:07:12.360157Z  INFO ai-process pid=98605 name=claude category=Inference cpu_pct=0.9964118599891663 rss_mb=128
+2026-06-03T13:07:12.360175Z  INFO ai-process pid=121323 name=claude category=Inference cpu_pct=0.9964118599891663 rss_mb=127
+2026-06-03T13:07:12.360177Z  INFO ai-process pid=156732 name=claude category=Inference cpu_pct=1.9928237199783325 rss_mb=167
+2026-06-03T13:07:12.360178Z  INFO ai-process pid=191287 name=bash category=Framework cpu_pct=0.0 rss_mb=2
+2026-06-03T13:07:12.360180Z  INFO ai-process pid=191290 name=claude category=Framework cpu_pct=0.0 rss_mb=1
+2026-06-03T13:07:12.360181Z  INFO ai-process pid=219599 name=bash category=Framework cpu_pct=0.0 rss_mb=2
+2026-06-03T13:07:12.360182Z  INFO ai-process pid=219602 name=claude category=Framework cpu_pct=0.0 rss_mb=3
+2026-06-03T13:07:12.360183Z  INFO ai-process pid=236201 name=bash category=Framework cpu_pct=0.0 rss_mb=2
+2026-06-03T13:07:12.360185Z  INFO ai-process pid=236204 name=claude category=Framework cpu_pct=0.0 rss_mb=3
+2026-06-03T13:07:12.360186Z  INFO ai-process pid=249051 name=claude category=Inference cpu_pct=1.9928237199783325 rss_mb=143
+2026-06-03T13:07:12.360193Z  INFO ai-process pid=249140 name=claude category=Inference cpu_pct=0.9964118599891663 rss_mb=223
+2026-06-03T13:07:12.360195Z  INFO ai-process pid=797666 name=claude category=Inference cpu_pct=0.9964118599891663 rss_mb=215
+2026-06-03T13:07:12.360196Z  INFO ai-process pid=832172 name=claude category=Inference cpu_pct=0.9964118599891663 rss_mb=191
+2026-06-03T13:07:12.360198Z  INFO ai-process pid=832259 name=claude category=Inference cpu_pct=0.9964118599891663 rss_mb=247
+2026-06-03T13:07:12.360199Z  INFO alert visible (headless) alert.fire=ThermalPressure scope=System pid=-1 workload=
+2026-06-03T13:07:12.360203Z  INFO tick budget reached; exiting ticks=7

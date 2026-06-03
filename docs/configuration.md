@@ -89,6 +89,56 @@ when the underlying interface is present (latest.md Tier 2.1). There
 is no `[power]` config section today; the dispatcher falls through to
 `None` watts on hosts where neither interface is available.
 
+## `[thresholds]`
+
+v1.3.1 / Phase 4 — per-deployment overrides for the contract's
+class-2 "deployment threshold" constants (UX_CONTRACT.md §3 status-dot
+tiers, §4 pressure alerts). Each field is optional; missing values
+use the contract default shipped with the binary
+(`ux_contract::thresholds::*`).
+
+| Field                  | Type | Default (contract) | Meaning |
+|------------------------|------|--------------------|---------|
+| `thermal_amber_c`      | f64  | `85.0`             | Thermal-pressure amber tier (any zone ≥ this fires `AlertId::ThermalPressure` at `Warning` severity). |
+| `thermal_red_c`        | f64  | `95.0`             | Thermal-pressure red tier (any zone ≥ this bumps `ThermalPressure` to `Critical`). Must be **strictly greater** than `thermal_amber_c`. |
+| `vram_attention_pct`   | f64  | `85.0`             | Per-PID VRAM pressure attention threshold. |
+| `vram_critical_pct`    | f64  | `95.0`             | Per-PID VRAM pressure critical threshold. Must be ≥ `vram_attention_pct`. |
+| `ram_attention_pct`    | f64  | `90.0`             | System RAM pressure attention threshold. |
+| `ram_critical_pct`     | f64  | `95.0`             | System RAM pressure critical threshold. Must be ≥ `ram_attention_pct`. |
+| `kv_attention_pct`     | f64  | `80.0`             | LLM KV-cache pressure attention threshold. |
+| `kv_critical_pct`      | f64  | `95.0`             | LLM KV-cache pressure critical threshold. Must be ≥ `kv_attention_pct`. |
+| `alert_sustain_secs`   | u64  | `5`                | Pressure-alert sustain window in seconds (how long the condition must hold continuously before firing). Must be in `1..=600`. |
+
+The resolver validates the full set at startup and **rejects invalid
+combinations** with an operator-actionable error (no silent clamp).
+A bad TOML fails to start — fix the field, re-run.
+
+Example: tighter thermal for Jetson Orin (Tj_max 100 °C), looser
+sustain for a noisy desktop:
+
+```toml
+[thresholds]
+thermal_amber_c = 80.0
+thermal_red_c   = 92.0
+alert_sustain_secs = 10
+```
+
+### Class-3 absolute (NOT configurable)
+
+The sampler/correctness constants — `ROS2_ECHO_PROBE_INTERVAL` and
+`ROS2_ACTIVITY_STALENESS` (the v1.1.9 leak-fix cadence pair),
+`ROS2_SHELLOUT_TIMEOUT`, `EMBEDDINGS_ACTIVE_CPU_PCT` — stay
+compile-time const-pinned. They are correctness-critical (the
+leak-fix invariant `ROS2_ECHO_PROBE_INTERVAL * 2 <= ROS2_ACTIVITY_STALENESS`
+is load-bearing), not tuning parameters. If a deployment hits a real
+need to tune one of these, file an issue; do not reach for a config
+flag.
+
+The contract's wire-format caps (`REC_MAX_VISIBLE`,
+`ALERT_MAX_VISIBLE`, `ACTIVITY_FEED_*_MAX`) are similarly absolute —
+they govern wire layout / protocol invariants across consumers and
+cannot be overridden per-deployment.
+
 ## Minimal production example
 
 ```toml

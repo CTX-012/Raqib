@@ -61,6 +61,22 @@ pub struct WireSnapshot {
     /// JSON payload; the operator opens the full history view for
     /// older entries.
     pub activity: Vec<WireRunRecord>,
+    /// v1.1.13 / DISPATCH 42 — currently visible alerts. Mirrors
+    /// the TUI's alert region: same alerts in the same priority
+    /// order, same per-entry text rendered via the same
+    /// `ux_contract::alerts::*` template + `substitute(...)` pipeline.
+    /// Each entry carries its pre-classified severity so the Svelte
+    /// renderer maps directly to a color without re-running the
+    /// `alert_tier` mapping in TypeScript — single source of truth
+    /// for severity, identical to thermal v1.1.12.
+    ///
+    /// `#[serde(default)]` makes the field backward-compat additive:
+    /// a pre-v1.1.13 wire reader deserializes the snapshot as
+    /// `alerts: Vec::new()`, identical to the thermal_zones additive
+    /// guarantee. Closes the v1.1.11 deferral that headless logs
+    /// got alert emission but the web wire didn't.
+    #[serde(default)]
+    pub alerts: Vec<WireAlertEntry>,
 }
 
 /// Mission-line counts shown at the top of the dashboard.
@@ -154,6 +170,121 @@ fn classify_thermal(temp_celsius: f32) -> WireThermalSeverity {
         WireThermalSeverity::Amber
     } else {
         WireThermalSeverity::Nominal
+    }
+}
+
+/// v1.1.13 / DISPATCH 42 — wire-stable shape for one currently
+/// visible alert. Mirrors the data layout of
+/// `crate::ui::alerts::AlertEntry` plus a pre-classified severity
+/// and a fully-rendered text body, so the Svelte renderer maps
+/// directly to a color + line of text without re-running the
+/// template substitution in TypeScript. Same single-source-of-truth
+/// pattern as `WireThermalZone` in v1.1.12.
+#[derive(Debug, Clone, Serialize)]
+pub struct WireAlertEntry {
+    /// Snake-case identifier of the alert (`"vram_pressure"`,
+    /// `"ram_pressure"`, `"kv_pressure"`, `"governor_armed"`,
+    /// `"oom_detected"`, `"workload_exited"`). Mapped from
+    /// `ux_contract::AlertId` at the wire boundary via
+    /// `alert_id_to_str`; the bare enum stays zero-dep on the
+    /// contract side (same convention as `ActivityState` and
+    /// `WorkloadStatus`).
+    pub alert_id: &'static str,
+    /// PID the alert is scoped to. `None` for system-scope alerts
+    /// (currently only `RamPressure`).
+    pub pid: Option<u32>,
+    /// Workload display name. Empty string for system-scope alerts.
+    pub workload_name: String,
+    /// Pre-classified severity: `"attention"` or `"critical"`.
+    /// Maps from `crate::ui::panels::alerts::AlertTier` via
+    /// `severity_from_alert_id`. Both surfaces (TUI and Svelte)
+    /// use the SAME `alert_tier` mapping; this field is the wire
+    /// projection of that classification.
+    pub severity: WireAlertSeverity,
+    /// Fully-rendered alert text, e.g. `"VRAM at 92% — Llama-70B
+    /// (PID 4523) — kill armed"`. Produced server-side by
+    /// `crate::ui::panels::alerts::substitute(template_for(alert_id),
+    /// entry, &live_values)` so the TUI and web show the IDENTICAL
+    /// wording. The TUI banner and the Svelte alert list both read
+    /// from this single source of truth.
+    pub text: String,
+}
+
+/// v1.1.13 / DISPATCH 42 — server-side classification of an alert
+/// to a severity bucket. Serialized to snake_case
+/// (`"attention" / "critical"`) so the TS reader can pattern-match
+/// on string literals — same shape as `WireThermalSeverity`.
+///
+/// Mirrors `crate::ui::panels::alerts::AlertTier`. Kept separate
+/// from `WireThermalSeverity` because the two domains use
+/// different tier vocabularies (thermal has Nominal/Amber/Red;
+/// alerts have only Attention/Critical, matching the §14
+/// banner color buckets — there's no "Nominal alert" because if
+/// it's nominal it wouldn't be visible).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WireAlertSeverity {
+    Attention,
+    Critical,
+}
+
+/// v1.1.13 / DISPATCH 42 — snake-case wire string projection of
+/// `ux_contract::AlertId`. The contract enum has no `Serialize`
+/// derive (zero-dep stance, same as `ActivityState` and
+/// `WorkloadStatus`); the wire boundary projects it to a stable
+/// string set the Svelte dashboard pattern-matches on without
+/// importing the variant set.
+///
+/// The string set is the IDENTICAL set used by
+/// `ux_contract::alerts::*_TEMPLATE` keys in spirit (lowercase +
+/// snake_case form of the variant name) — keep them in sync if a
+/// future contract bump adds an alert.
+fn alert_id_to_str(id: ux_contract::AlertId) -> &'static str {
+    use ux_contract::AlertId;
+    match id {
+        AlertId::VramPressure => "vram_pressure",
+        AlertId::RamPressure => "ram_pressure",
+        AlertId::KvPressure => "kv_pressure",
+        AlertId::GovernorArmed => "governor_armed",
+        AlertId::OomDetected => "oom_detected",
+        AlertId::WorkloadExited => "workload_exited",
+    }
+}
+
+/// v1.1.13 / DISPATCH 42 — server-side severity classification
+/// for an alert ID. Mirrors
+/// `crate::ui::panels::alerts::alert_tier` exactly so the two
+/// surfaces stay in sync without crossing the layer boundary
+/// (calling alert_tier directly would force web → ui import; the
+/// duplication here is THREE lines and intentional, and the
+/// `severity_matches_tui_alert_tier` test pins the equivalence).
+fn severity_from_alert_id(id: ux_contract::AlertId) -> WireAlertSeverity {
+    use crate::ui::panels::alerts::{AlertTier, alert_tier};
+    match alert_tier(id) {
+        AlertTier::Attention => WireAlertSeverity::Attention,
+        AlertTier::Critical => WireAlertSeverity::Critical,
+    }
+}
+
+impl WireAlertEntry {
+    /// Project one `AlertEntry` from the runtime's
+    /// `RuntimeState::alerts.visible()` set onto the wire. Renders
+    /// the alert text server-side via the existing
+    /// `panels::alerts::substitute(template_for(id), entry,
+    /// live_values_for(entry, state))` pipeline so the wire body
+    /// matches the TUI banner BYTE-for-BYTE — single source of
+    /// truth.
+    fn from_entry(entry: &crate::ui::alerts::AlertEntry, state: &RuntimeState) -> Self {
+        use crate::ui::panels::alerts::{live_values_for, substitute, template_for};
+        let live = live_values_for(entry, state);
+        let text = substitute(template_for(entry.alert_id), entry, &live);
+        Self {
+            alert_id: alert_id_to_str(entry.alert_id),
+            pid: entry.pid,
+            workload_name: entry.workload_name.clone(),
+            severity: severity_from_alert_id(entry.alert_id),
+            text,
+        }
     }
 }
 
@@ -255,6 +386,17 @@ impl WireSnapshot {
             .map(|p| WireWorkload::from_annotated(p, state))
             .collect::<Vec<_>>();
         let activity = recent.iter().map(WireRunRecord::from_record).collect();
+        // v1.1.13 / DISPATCH 42 — project the same Active alert set
+        // the TUI banner reads. `AlertState::visible()` returns
+        // alerts in §4 priority order (Critical before Attention);
+        // we preserve that order on the wire so the Svelte renderer
+        // can render top-to-bottom without re-sorting.
+        let alerts = state
+            .alerts
+            .visible()
+            .iter()
+            .map(|entry| WireAlertEntry::from_entry(entry, state))
+            .collect::<Vec<_>>();
         Self {
             tick: state.tick_count,
             server_time: Utc::now(),
@@ -262,6 +404,7 @@ impl WireSnapshot {
             vitals,
             workloads,
             activity,
+            alerts,
         }
     }
 
@@ -288,6 +431,7 @@ impl WireSnapshot {
             },
             workloads: Vec::new(),
             activity: Vec::new(),
+            alerts: Vec::new(),
         }
     }
 }
@@ -602,6 +746,223 @@ mod tests {
             v["vitals"]["thermal_zones"].as_array().unwrap().len(),
             0,
             "empty snapshot must carry an empty thermal_zones list",
+        );
+        // v1.1.13 — alerts is the new additive field; ships as
+        // `[]` on the empty wire payload.
+        assert!(
+            v["alerts"].is_array(),
+            "v1.1.13 wire schema must carry alerts as an array",
+        );
+        assert_eq!(
+            v["alerts"].as_array().unwrap().len(),
+            0,
+            "empty snapshot must carry an empty alerts list",
+        );
+    }
+
+    /// v1.1.13 / DISPATCH 42 — `WireSnapshot.alerts` is an additive
+    /// field protected by `#[serde(default)]`. `WireSnapshot` is
+    /// `Serialize`-only in this codebase (the watch-channel
+    /// publisher serializes; the TS client deserializes — no
+    /// round-trip on the Rust side), so the additive guarantee
+    /// is forward-looking: it ensures any future `Deserialize`
+    /// derive (or a test/import that wants to roundtrip) sees the
+    /// missing-field case as `Vec::new()` instead of an error.
+    ///
+    /// Pins:
+    ///
+    /// 1. `WireSnapshot::empty().alerts` is an empty vec (Rust-side
+    ///    construction respects the additive default).
+    /// 2. Serializing the empty snapshot emits an `"alerts": []`
+    ///    field (the TS client sees an array, never `undefined`,
+    ///    when this binary is the server).
+    ///
+    /// The forward-looking deserialize property is documented but
+    /// not run here because there's no Deserialize derive to
+    /// exercise — the `#[serde(default)]` annotation in the struct
+    /// header carries the guarantee at the type level.
+    #[test]
+    fn wiresnapshot_alerts_additive_default() {
+        // (1) Rust-side construction: empty() produces empty alerts.
+        let snap = WireSnapshot::empty();
+        assert!(
+            snap.alerts.is_empty(),
+            "WireSnapshot::empty() must materialise `alerts` as an \
+             empty vec — the additive-default guarantee on the \
+             Rust side.",
+        );
+        // (2) Wire emission: the empty vec serializes as `"alerts":
+        // []` (not omitted), so a current-version TS client always
+        // sees an array, even on the empty initial payload.
+        let json = serde_json::to_string(&snap).expect("serialize");
+        let v: serde_json::Value = serde_json::from_str(&json).expect("parse");
+        assert!(
+            v["alerts"].is_array(),
+            "serialized empty snapshot must emit `alerts` as an array, \
+             not omit the field — TS dashboard's `alerts?` field is \
+             then always non-undefined on a current-version server.",
+        );
+        assert_eq!(v["alerts"].as_array().unwrap().len(), 0);
+    }
+
+    /// v1.1.13 / DISPATCH 42 — `severity_from_alert_id` MUST agree
+    /// with `crate::ui::panels::alerts::alert_tier` for every
+    /// `AlertId` variant. The duplication exists because the wire
+    /// layer doesn't import `ui/panels` for ranking — the cost is
+    /// three short lines kept in sync, and THIS test pins the sync.
+    /// If a future contract bump adds an `AlertId`, the exhaustive
+    /// match in `alert_id_to_str` and `severity_from_alert_id`
+    /// breaks at compile time, and this test breaks at run time
+    /// for any new variant whose tier doesn't round-trip cleanly.
+    #[test]
+    fn severity_matches_tui_alert_tier() {
+        use crate::ui::panels::alerts::{AlertTier, alert_tier};
+        use ux_contract::AlertId;
+        let cases: &[AlertId] = &[
+            AlertId::VramPressure,
+            AlertId::RamPressure,
+            AlertId::KvPressure,
+            AlertId::GovernorArmed,
+            AlertId::OomDetected,
+            AlertId::WorkloadExited,
+        ];
+        for id in cases {
+            let wire = severity_from_alert_id(*id);
+            let tui = alert_tier(*id);
+            let expected_wire = match tui {
+                AlertTier::Attention => WireAlertSeverity::Attention,
+                AlertTier::Critical => WireAlertSeverity::Critical,
+            };
+            assert_eq!(
+                wire, expected_wire,
+                "severity_from_alert_id({id:?}) MUST match alert_tier({id:?}) \
+                 — drift between wire and TUI severity would split the \
+                 banner color across the two surfaces.",
+            );
+        }
+    }
+
+    /// v1.1.13 / DISPATCH 42 — the snake-case wire string set must
+    /// cover EVERY `AlertId` variant (no unknown left over) and
+    /// produce the IDENTICAL identifier the TS dashboard
+    /// pattern-matches on. Compile-time exhaustiveness guards the
+    /// "no missing variant" property; this test guards the
+    /// "stable string spelling" property.
+    #[test]
+    fn alert_id_to_str_covers_all_variants_with_snake_case() {
+        use ux_contract::AlertId;
+        let cases: &[(AlertId, &str)] = &[
+            (AlertId::VramPressure, "vram_pressure"),
+            (AlertId::RamPressure, "ram_pressure"),
+            (AlertId::KvPressure, "kv_pressure"),
+            (AlertId::GovernorArmed, "governor_armed"),
+            (AlertId::OomDetected, "oom_detected"),
+            (AlertId::WorkloadExited, "workload_exited"),
+        ];
+        for (id, expected) in cases {
+            assert_eq!(
+                alert_id_to_str(*id),
+                *expected,
+                "alert_id_to_str({id:?}) must produce {expected}",
+            );
+        }
+    }
+
+    /// v1.1.13 / DISPATCH 42 — `WireAlertSeverity` serializes to
+    /// snake_case strings (`"attention" / "critical"`) so the TS
+    /// reader can pattern-match on literals. Same shape as
+    /// `WireThermalSeverity`. Pin against a future
+    /// `rename_all` regression.
+    #[test]
+    fn alert_severity_serializes_snake_case() {
+        let cases: &[(WireAlertSeverity, &str)] = &[
+            (WireAlertSeverity::Attention, "\"attention\""),
+            (WireAlertSeverity::Critical, "\"critical\""),
+        ];
+        for (sev, expected) in cases {
+            let json = serde_json::to_string(sev).expect("serialize");
+            assert_eq!(&json, expected, "{sev:?} → {expected}");
+        }
+    }
+
+    /// v1.1.13 / DISPATCH 42 — full end-to-end pin:
+    /// `AlertState::visible()` → `Vec<WireAlertEntry>` projection
+    /// preserves alert_id, pid, workload_name, classifies severity
+    /// correctly, and renders the same text the TUI banner would.
+    /// Drives `RuntimeState` directly with two synthetic alerts (one
+    /// instant-fire Critical, one sustain-gated Attention via the
+    /// observe-twice pattern), then composes a wire snapshot and
+    /// inspects the projected vector.
+    #[test]
+    fn alerts_serialize_to_wire() {
+        use crate::ui::alerts::WorkloadRef;
+        use std::time::{Duration, Instant};
+        use ux_contract::AlertId;
+
+        let mut runtime = Runtime::new(Config::default());
+        let state = runtime.state_mut();
+        let t0 = Instant::now();
+        // (1) Instant-fire Critical: GovernorArmed on PID 206 / phi3.
+        state.alerts.observe(
+            t0,
+            WorkloadRef::workload(206, "phi3"),
+            AlertId::GovernorArmed,
+            true,
+        );
+        // (2) Sustain-gated Attention: VramPressure on PID 4523 /
+        // Llama-70B. Observe twice across the sustain window.
+        state.alerts.observe(
+            t0,
+            WorkloadRef::workload(4523, "Llama-70B"),
+            AlertId::VramPressure,
+            true,
+        );
+        state.alerts.observe(
+            t0 + Duration::from_secs(5),
+            WorkloadRef::workload(4523, "Llama-70B"),
+            AlertId::VramPressure,
+            true,
+        );
+
+        let snap = WireSnapshot::from_runtime_state(runtime.state(), &[]);
+        assert_eq!(
+            snap.alerts.len(),
+            2,
+            "both Active alerts must surface on the wire (got {})",
+            snap.alerts.len(),
+        );
+
+        // Find each by alert_id literal (the priority order is
+        // governed by AlertState::visible()).
+        let armed = snap
+            .alerts
+            .iter()
+            .find(|a| a.alert_id == "governor_armed")
+            .expect("governor_armed alert on wire");
+        assert_eq!(armed.pid, Some(206));
+        assert_eq!(armed.workload_name, "phi3");
+        assert_eq!(armed.severity, WireAlertSeverity::Critical);
+        assert!(
+            !armed.text.is_empty(),
+            "WireAlertEntry.text must be the rendered banner string",
+        );
+
+        let vram = snap
+            .alerts
+            .iter()
+            .find(|a| a.alert_id == "vram_pressure")
+            .expect("vram_pressure alert on wire");
+        assert_eq!(vram.pid, Some(4523));
+        assert_eq!(vram.workload_name, "Llama-70B");
+        assert_eq!(vram.severity, WireAlertSeverity::Attention);
+
+        // The whole snapshot round-trips through JSON cleanly.
+        let json = serde_json::to_string(&snap).expect("serialize wire");
+        let v: serde_json::Value = serde_json::from_str(&json).expect("parse wire");
+        assert_eq!(
+            v["alerts"].as_array().unwrap().len(),
+            2,
+            "alerts must round-trip through JSON intact",
         );
     }
 

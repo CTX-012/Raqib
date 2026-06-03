@@ -7,6 +7,7 @@
     import WorkloadsPanel from './components/WorkloadsPanel.svelte';
     import ActivityFeed from './components/ActivityFeed.svelte';
     import ConnectionPill from './components/ConnectionPill.svelte';
+    import AlertsPanel from './components/AlertsPanel.svelte';
 
     onMount(() => {
         connect();
@@ -41,6 +42,14 @@
             </div>
         </div>
     </header>
+
+    <!-- v1.1.13 / DISPATCH 42 — alert region. Renders above the
+         main grid so visible alerts catch the operator's eye
+         FIRST. Self-hides when no alerts are visible (matches the
+         TUI's banner region behaviour). -->
+    <div class="px-6 pt-4">
+        <AlertsPanel alerts={$snapshot.alerts} />
+    </div>
 
     <main class="grid grid-cols-1 lg:grid-cols-3 gap-6 px-6 py-4 flex-1">
         <section class="lg:col-span-1">

@@ -6,6 +6,103 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project aims to adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 once `v1.0.0` is tagged. Until then, minor versions may include breaking changes.
 
+## [1.1.13] — 2026-06-03 — Alerts on the web wire (closes v1.1.11 deferral)
+
+Phase 3 foundation step before the v1.2.0 capstone. DISPATCH 42
+ratified by Inspector DISPATCH 41. NO new `ux_contract` types
+needed — v0.3.13's `AlertId`, `alerts::*` templates, and
+`alert_tier` mapping cover everything the wire surfaces.
+
+**Authority lock (still binding):** display only. The web alert
+panel is `READ-ONLY`; no actuation surface, no keybindings, no
+web-side ack flow (ack remains a TUI keybinding; web ack is
+v1.2.0+ scope). `default_ai_action = Allow` unchanged.
+`send_sigterm` stays manual-only. No new alert IDs introduced
+(`ThermalPressure` stays v1.2.0+ scope).
+
+### Added
+
+- **`WireAlertEntry` + `WireSnapshot.alerts`** (COMMIT 1,
+  `src/web/wire.rs`): closes the v1.1.11 deferral. v1.1.11
+  lifted `AlertState` to `Runtime` and added
+  `log_visible_alerts` for the headless tracing log, but
+  explicitly DEFERRED the web wire ("needs a `ux_contract`
+  type"). DISPATCH 41 re-read found that v0.3.13's contract
+  surface was already sufficient, and v1.2.0 (ranked
+  recommendations) rides on alerts being on the wire, so the
+  deferral had to close as a foundation step. The new wire
+  shape is `WireAlertEntry { alert_id, pid, workload_name,
+  severity, text }`: `alert_id` is the snake-case projection
+  of `ux_contract::AlertId`; `severity` is the snake-case
+  projection of `AlertTier` (`'attention' | 'critical'`);
+  `text` is the byte-for-byte rendering the TUI banner shows,
+  produced server-side via the SAME
+  `panels::alerts::substitute(template_for(id), entry,
+  live_values_for(entry, state))` pipeline. Single source of
+  truth for the alert wording; the Svelte renderer never does
+  template substitution.
+- **`AlertsPanel.svelte`** (COMMIT 2,
+  `web/src/components/AlertsPanel.svelte`): pill-shaped alert
+  lines colored by the server-classified severity
+  (`bg-critical` / `bg-attention`), positioned above the main
+  panel grid so visible alerts catch the operator's eye first.
+  Self-hides when no alerts are visible (matches the TUI's
+  alert region behaviour). Wired into `App.svelte`; the
+  existing panel layout below the alert region is unchanged.
+
+### Changed
+
+- **`Cargo.toml` version 1.1.12 → 1.1.13.** The `ux_contract`
+  pin stays at `version = "0.3.13"` — Inspector confirmed no
+  new contract surface is needed; the existing `AlertId` +
+  `alerts::*` templates + `alert_tier` mapping cover the wire
+  surface in full.
+- **`panels::alerts::template_for` widened from `fn` to
+  `pub(crate) fn`** for the wire builder. Single call site
+  (one line in `src/ui/panels/alerts.rs:172`); the visibility
+  bump is annotated with a v1.1.13 / DISPATCH 42 comment block
+  referencing the wire caller. Same AlertId→template match the
+  TUI banner has always used — no logic change.
+
+### Notes
+
+- All STOP-AND-SURFACE triggers cleared:
+  - (1) `ux_contract` type need: NOT hit — v0.3.13 sufficient.
+  - (2) Non-additive wire change: NOT hit — `#[serde(default)]`
+    protects the additive guarantee, same shape as
+    `thermal_zones` and `activity_state`.
+  - (3) Recommendation structure / new alert ID: NOT introduced
+    — `WireAlertEntry` is just the existing visible alerts
+    projected to the wire.
+  - (4) Actuation / new keybinding: NOT touched.
+  - (5) Svelte pipeline: clean (`npx vite build` succeeded —
+    122 modules transformed, was 121 pre-v1.1.13).
+- Tests: 927 → 932 (+5 net):
+  - `wiresnapshot_alerts_additive_default` — Rust-side
+    additive-default guarantee + empty-snapshot emission shape.
+  - `severity_matches_tui_alert_tier` — exhaustive `AlertId`
+    pin that `severity_from_alert_id` agrees with
+    `panels::alerts::alert_tier`.
+  - `alert_id_to_str_covers_all_variants_with_snake_case` —
+    snake-case spelling pin.
+  - `alert_severity_serializes_snake_case` — JSON shape pin
+    for `WireAlertSeverity`.
+  - `alerts_serialize_to_wire` — end-to-end: drives
+    `RuntimeState.alerts` with two synthetic alerts (instant
+    Critical + sustain-gated Attention), composes a wire
+    snapshot, asserts both surface with correct `alert_id`,
+    `pid`, `workload_name`, `severity`, and round-trips
+    through JSON cleanly.
+  - `empty_snapshot_serializes_to_valid_json` extended with the
+    `alerts: []` assertion (same shape as the v1.1.12
+    `thermal_zones: []` extension).
+- All three commits are independently bisectable
+  (`a795e0c` wire + `7c2e953` Svelte + this polish).
+- `docs/PHASE3_DESIGN.md` updated per the
+  living-doc-per-release process — v1.1.13 added to the
+  build-sequence table AND a new section in the body marking
+  the deferral closed.
+
 ## [1.1.12] — 2026-06-03 — Vitals subsystem (thermal: sysfs + wire + TUI + Svelte)
 
 Phase 3 step 2 of 3. DISPATCH 39 scope-locked from Inspector

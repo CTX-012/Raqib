@@ -14,6 +14,40 @@ export interface WireSnapshot {
     vitals: WireVitals;
     workloads: WireWorkload[];
     activity: WireRunRecord[];
+    // v1.1.13 / DISPATCH 42 — currently visible alerts (closes the
+    // v1.1.11 web-wire deferral). Server pre-classifies severity
+    // against `ux_contract::AlertId`'s tier mapping, so the
+    // dashboard just maps the `severity` literal to a tailwind
+    // class — no template substitution in TypeScript, the `text`
+    // field is the same byte-for-byte rendering the TUI banner
+    // shows. Optional for backward compat in case a pre-v1.1.13
+    // binary is in the field (additive-default guarantee, same
+    // shape as `thermal_zones?` and `activity_state?`).
+    alerts?: WireAlertEntry[];
+}
+
+export interface WireAlertEntry {
+    // Snake-case identifier — 'vram_pressure' | 'ram_pressure' |
+    // 'kv_pressure' | 'governor_armed' | 'oom_detected' |
+    // 'workload_exited'. Mapped from ux_contract::AlertId at the
+    // wire boundary. The dashboard pattern-matches on these
+    // literals for any per-id styling beyond severity.
+    alert_id: string;
+    // PID the alert is scoped to. null for system-scope alerts
+    // (currently only RamPressure).
+    pid: number | null;
+    // Workload display name. Empty string for system-scope alerts.
+    workload_name: string;
+    // Pre-classified severity. Mirrors the TUI's `AlertTier` →
+    // tailwind class mapping: 'critical' → bg-critical / text-critical,
+    // 'attention' → bg-attention / text-attention.
+    severity: 'attention' | 'critical';
+    // Fully-rendered banner text, e.g.
+    // "VRAM at 92% — Llama-70B (PID 4523) — kill armed".
+    // Rendered server-side via the SAME
+    // `ux_contract::alerts::*` template + `substitute(...)` pipeline
+    // the TUI uses; DO NOT do template substitution in TS.
+    text: string;
 }
 
 export interface WireMission {

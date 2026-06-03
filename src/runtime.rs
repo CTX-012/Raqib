@@ -605,6 +605,35 @@ impl Runtime {
                 .alerts
                 .observe(now, workload, AlertId::GovernorArmed, armed);
         }
+
+        // v1.2.0 / DISPATCH 45 — system-scope ThermalPressure.
+        // Fires when ANY thermal zone in the latest snapshot is
+        // at or above `THERMAL_AMBER_C` (85 °C, per the v0.3.14
+        // contract docstring on `AlertId::ThermalPressure`).
+        // System-scope (one slot, no per-PID attribution; thermal
+        // is whole-die / zone-level on Linux). AUTHORITY LOCK:
+        // this fires an alert; the alert projects to a
+        // recommendation; the recommendation is DISPLAY ONLY.
+        // No kill, no signal, no actuation reached from this
+        // branch — the recommendation's reduce-load suggestion is
+        // a string the operator reads.
+        let thermal_breaching = self
+            .state
+            .last_snapshot
+            .as_ref()
+            .map(|s| {
+                s.vitals
+                    .thermal_zones
+                    .iter()
+                    .any(|z| f64::from(z.temp_celsius) >= ux_contract::thresholds::THERMAL_AMBER_C)
+            })
+            .unwrap_or(false);
+        self.state.alerts.observe(
+            now,
+            WorkloadRef::system(),
+            AlertId::ThermalPressure,
+            thermal_breaching,
+        );
     }
 
     /// Most-recent run records for `model` from the typed run store, or
@@ -1767,6 +1796,109 @@ mod tests {
         // Stop unused-variable warning in the WorkloadRef import path
         // if a future refactor drops the import block above.
         let _ = WorkloadRef::workload(0, "_");
+    }
+
+    /// v1.2.0 / DISPATCH 45 — ThermalPressure fires when any
+    /// thermal zone in the snapshot is at or above
+    /// `THERMAL_AMBER_C` (85 °C per the v0.3.14 contract). System-
+    /// scope alert; one slot, no per-PID attribution.
+    ///
+    /// Drives `observe_alerts` directly with a synthesized snapshot
+    /// carrying one moderately-hot zone, observes twice across the
+    /// sustain window, and asserts the slot reaches Active.
+    /// AUTHORITY LOCK: this test exercises the alert path only —
+    /// no kill, no signal, no actuation reached.
+    #[test]
+    fn thermal_pressure_alert_fires_when_zone_crosses_amber() {
+        use crate::platform::{GpuSnapshot, PlatformSnapshot, SystemMetrics};
+        use ux_contract::AlertId;
+        use ux_contract::host_vitals::{HostVitals, ThermalZone};
+
+        let mut rt = Runtime::new(Config::default());
+        let snap = PlatformSnapshot {
+            timestamp: chrono::Utc::now(),
+            system: SystemMetrics {
+                timestamp: chrono::Utc::now(),
+                total_memory: 16 * 1024 * 1024 * 1024,
+                used_memory: 8 * 1024 * 1024 * 1024,
+                available_memory: 8 * 1024 * 1024 * 1024,
+                cpu_count: 8,
+                load_average: [0.0, 0.0, 0.0],
+            },
+            processes: vec![],
+            gpu: GpuSnapshot { devices: vec![] },
+            vitals: HostVitals {
+                thermal_zones: vec![ThermalZone {
+                    label: "x86_pkg_temp".into(),
+                    temp_celsius: 90.0, // above amber (85.0), below red
+                }],
+            },
+        };
+        rt.state.last_snapshot = Some(snap.clone());
+
+        // Drive the metric-driven eval twice across the sustain
+        // window so the slot graduates from Pending to Active.
+        let t0 = Instant::now();
+        rt.observe_alerts(t0);
+        rt.observe_alerts(t0 + std::time::Duration::from_secs(5));
+
+        let visible = rt.state.alerts.visible();
+        assert!(
+            visible.iter().any(|e| e.alert_id == AlertId::ThermalPressure),
+            "ThermalPressure must be visible after a zone crosses \
+             THERMAL_AMBER_C; visible alerts: {:?}",
+            visible.iter().map(|e| e.alert_id).collect::<Vec<_>>(),
+        );
+    }
+
+    /// v1.2.0 / DISPATCH 45 — ThermalPressure does NOT fire when
+    /// every zone is below the amber threshold. Counterpart to
+    /// the above pin; together they guard the threshold boundary.
+    #[test]
+    fn thermal_pressure_alert_silent_below_amber() {
+        use crate::platform::{GpuSnapshot, PlatformSnapshot, SystemMetrics};
+        use ux_contract::AlertId;
+        use ux_contract::host_vitals::{HostVitals, ThermalZone};
+
+        let mut rt = Runtime::new(Config::default());
+        let snap = PlatformSnapshot {
+            timestamp: chrono::Utc::now(),
+            system: SystemMetrics {
+                timestamp: chrono::Utc::now(),
+                total_memory: 0,
+                used_memory: 0,
+                available_memory: 0,
+                cpu_count: 0,
+                load_average: [0.0, 0.0, 0.0],
+            },
+            processes: vec![],
+            gpu: GpuSnapshot { devices: vec![] },
+            vitals: HostVitals {
+                thermal_zones: vec![
+                    ThermalZone {
+                        label: "acpitz".into(),
+                        temp_celsius: 32.0,
+                    },
+                    ThermalZone {
+                        label: "x86_pkg_temp".into(),
+                        temp_celsius: 48.5,
+                    },
+                ],
+            },
+        };
+        rt.state.last_snapshot = Some(snap);
+
+        let t0 = Instant::now();
+        rt.observe_alerts(t0);
+        rt.observe_alerts(t0 + std::time::Duration::from_secs(5));
+
+        let visible = rt.state.alerts.visible();
+        assert!(
+            !visible.iter().any(|e| e.alert_id == AlertId::ThermalPressure),
+            "ThermalPressure must NOT fire when every zone is below \
+             THERMAL_AMBER_C; visible: {:?}",
+            visible.iter().map(|e| e.alert_id).collect::<Vec<_>>(),
+        );
     }
 
     #[test]

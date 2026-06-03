@@ -55,7 +55,19 @@ const THERMAL_SYSFS_ROOT: &str = "/sys/class/thermal";
 /// [`crate::platform::collect_snapshot`]) use this entry. Tests use
 /// `collect_from_root` (crate-private) with a tempdir.
 pub fn collect_host_vitals() -> HostVitals {
-    collect_from_root(Path::new(THERMAL_SYSFS_ROOT))
+    // v1.3.0 / DISPATCH 50 — `EDGE_MONITOR_THERMAL_ROOT` env override
+    // redirects the thermal sysfs root. Unblocks Jetson-deferred
+    // validation on x86: point the var at a tempdir of synthetic
+    // `thermal_zoneN/{type,temp}` files and the rest of the alert /
+    // recommendation path (v1.1.12 vitals → v1.2.0 ThermalPressure
+    // rec) fires end-to-end without real hot hardware. Unset =
+    // `/sys/class/thermal` (current behaviour). Invalid path =
+    // `collect_from_root` returns empty per its existing "no zones
+    // discovered" semantics — no crash, no panic.
+    let root = std::env::var_os("EDGE_MONITOR_THERMAL_ROOT")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from(THERMAL_SYSFS_ROOT));
+    collect_from_root(&root)
 }
 
 /// Variant of [`collect_host_vitals`] that reads zones from an
@@ -71,8 +83,13 @@ pub(crate) fn collect_from_root(root: &Path) -> HostVitals {
         // Root unreadable (missing sysfs, permission denied at the
         // root, alien `/proc` mount). Return empty per the contract's
         // "no zones discovered" semantics.
+        // v0.3.16 contract grew `power_rails`; INA3221 collection
+        // lands in v1.3.3. Until then the consumer always returns an
+        // empty rails vec — same shape the contract documents for
+        // hosts without an INA3221 driver.
         return HostVitals {
             thermal_zones: Vec::new(),
+            power_rails: Vec::new(),
         };
     };
 
@@ -106,6 +123,12 @@ pub(crate) fn collect_from_root(root: &Path) -> HostVitals {
 
     HostVitals {
         thermal_zones: zones,
+        // INA3221 collection deferred to v1.3.3 (ux_contract
+        // v0.3.16 landed the type; consumption follows in a later
+        // sub-version). Empty vec is the contract's valid "no
+        // rails discovered" state for x86 and any host without an
+        // INA3221 driver.
+        power_rails: Vec::new(),
     }
 }
 
@@ -279,6 +302,67 @@ mod tests {
 
         assert_eq!(vitals.thermal_zones.len(), 1);
         assert_eq!(vitals.thermal_zones[0].label, "x86_pkg_temp");
+    }
+
+    /// v1.3.0 / DISPATCH 50 — `EDGE_MONITOR_THERMAL_ROOT` redirects
+    /// `collect_host_vitals` from `/sys/class/thermal` to an
+    /// arbitrary path. Unblocks Jetson-deferred validation on x86:
+    /// a Tester (or operator on a cold dev host) points the var at a
+    /// tempdir of synthetic `thermal_zoneN/{type,temp}` fixtures and
+    /// drives the v1.1.12 thermal alert + v1.2.0 ThermalPressure rec
+    /// path end-to-end without real hot hardware.
+    ///
+    /// This test covers BOTH the redirect AND the
+    /// "invalid override degrades to empty" path in one process so
+    /// the env-var teardown happens once (env vars are process-global
+    /// and pollute parallel tests if leaked).
+    #[test]
+    fn thermal_root_env_override_redirects_collection() {
+        const ENV_VAR: &str = "EDGE_MONITOR_THERMAL_ROOT";
+
+        let tmp = TempDir::new().expect("tempdir");
+        write_zone_fixture(tmp.path(), 0, "synthetic_pkg", 90.5);
+
+        // SAFETY: env-var manipulation is process-global. This test
+        // is the only one in the suite that touches the var, so the
+        // window between set / read / restore can't race with
+        // another test. The prior-value save+restore at end keeps a
+        // pre-existing EDGE_MONITOR_THERMAL_ROOT in the harness env
+        // intact for any caller that wrapped `cargo test` with it.
+        let prior = std::env::var_os(ENV_VAR);
+
+        unsafe { std::env::set_var(ENV_VAR, tmp.path()); }
+        let redirected = collect_host_vitals();
+
+        unsafe { std::env::set_var(ENV_VAR, "/var/empty/no-such-thermal-root"); }
+        let degraded = collect_host_vitals();
+
+        match prior {
+            Some(v) => unsafe { std::env::set_var(ENV_VAR, &v); },
+            None => unsafe { std::env::remove_var(ENV_VAR); },
+        }
+
+        // Assertions after restore so a failure can't leave the env
+        // polluted for subsequent tests.
+        assert_eq!(
+            redirected.thermal_zones.len(),
+            1,
+            "override path must surface its single synthetic zone",
+        );
+        assert_eq!(redirected.thermal_zones[0].label, "synthetic_pkg");
+        assert!(
+            (redirected.thermal_zones[0].temp_celsius - 90.5).abs() < 0.01,
+            "synthetic 90.5 °C must round-trip via the millidegrees \
+             fixture (got {})",
+            redirected.thermal_zones[0].temp_celsius,
+        );
+
+        assert!(
+            degraded.thermal_zones.is_empty(),
+            "invalid override path must degrade to empty thermal_zones \
+             per `collect_from_root`'s `read_dir` Err arm; got {} zones",
+            degraded.thermal_zones.len(),
+        );
     }
 
     /// Millidegrees → Celsius conversion pinned. Kernel reports

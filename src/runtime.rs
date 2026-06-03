@@ -1832,6 +1832,7 @@ mod tests {
                     label: "x86_pkg_temp".into(),
                     temp_celsius: 90.0, // above amber (85.0), below red
                 }],
+                power_rails: Vec::new(),
             },
         };
         rt.state.last_snapshot = Some(snap.clone());
@@ -1884,6 +1885,7 @@ mod tests {
                         temp_celsius: 48.5,
                     },
                 ],
+                power_rails: Vec::new(),
             },
         };
         rt.state.last_snapshot = Some(snap);

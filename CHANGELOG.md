@@ -6,6 +6,129 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project aims to adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 once `v1.0.0` is tagged. Until then, minor versions may include breaking changes.
 
+## [1.3.0] — 2026-06-03 — Phase 4 step 1: EDGE_MONITOR_THERMAL_ROOT env override
+
+Phase 4 opens. The smallest possible step (~35 LoC source +
+test) that also unblocks every subsequent step. Shipped via
+DISPATCH 50 against the
+[`docs/PHASE4_DESIGN.md`](docs/PHASE4_DESIGN.md) scope that the
+same dispatch promoted from
+`tests/empirical/audit_2026-06-01/INSPECTOR_PHASE4_IMPL.md`.
+
+**AUTHORITY LOCK (the EIGHTH explicit reaffirmation):** env
+override is pure observation-path config. Reads a path → reads
+thermal from it. No actuation surface added. `default_ai_action
+= Allow` unchanged. `send_sigterm` stays manual-only. No
+`--enable-governor` flag. No new keybinding.
+
+### Added
+
+- **`EDGE_MONITOR_THERMAL_ROOT` env override** (`src/platform/host_vitals.rs`):
+  `collect_host_vitals()` reads the env var (when set) as the
+  thermal sysfs root, defaulting to `/sys/class/thermal` when
+  unset. Invalid override paths degrade to empty thermal_zones
+  (no crash — same shape as a missing real sysfs root).
+
+- **Test**: `thermal_root_env_override_redirects_collection`
+  covers BOTH the redirect (synthetic 90.5 °C zone via override
+  → surfaces with correct label + temp) AND the degrade-on-
+  invalid-path arm. Env-var save/restore inside the test
+  prevents pollution of other tests in the suite.
+
+### Why it matters — the Jetson-deferred unblock
+
+x86 dev hosts run cold (~30-50 °C); the v1.1.12 thermal alert
++ v1.2.0 ThermalPressure recommendation paths never light up in
+production on a dev host. With v1.3.0, pointing the env var at
+a tempdir of synthetic `thermal_zoneN/{type,temp}` files drives
+the whole pipeline end-to-end without Jetson hardware:
+
+    mkdir -p /tmp/fake_thermal/thermal_zone0
+    echo "x86_pkg_temp" > /tmp/fake_thermal/thermal_zone0/type
+    echo "90000" > /tmp/fake_thermal/thermal_zone0/temp
+    EDGE_MONITOR_THERMAL_ROOT=/tmp/fake_thermal \
+      ./target/release/edge_monitor --no-ui
+    # logs: INFO alert visible (headless) alert.fire=ThermalPressure scope=System
+
+A Tester (or operator with no Jetson at hand) can now validate
+v1.1.12 thermal-alert surfaces, v1.2.0 ThermalPressure
+recommendations, and the upcoming v1.3.1/v1.3.2 threshold
+overrides from any dev host. Closes the long-standing
+"deferred-for-Jetson-hardware-access" validation gap.
+
+### Changed — forced compat with `ux_contract` v0.3.16
+
+Agent A shipped `ux_contract` v0.3.16 alongside this release
+(`HostVitals.power_rails: Vec<PowerRail>` + `PowerRail` struct
+— the type surface for the INA3221 work landing later in v1.3.3).
+The consumer baseline at v1.2.0 stops compiling against the new
+contract because every `HostVitals { thermal_zones: ... }`
+initializer now needs `power_rails: Vec::new()` too. Six
+initializer sites adapted:
+
+  - `src/platform/host_vitals.rs:74` (empty-root degrade path)
+  - `src/platform/host_vitals.rs:107` (normal collect path)
+  - `src/recommend.rs:495` (ThermalPressure warning rec test)
+  - `src/recommend.rs:551` (ThermalPressure critical rec test)
+  - `src/runtime.rs:1830` (ThermalPressure fires test)
+  - `src/runtime.rs:1876` (ThermalPressure silent test)
+
+Each passes `power_rails: Vec::new()` — the contract's
+documented valid empty state for hosts without an INA3221
+driver (x86, headless, any Linux without the kernel module
+loaded). **No INA3221 COLLECTION lands here** — that's v1.3.3
+per [`docs/PHASE4_DESIGN.md`](docs/PHASE4_DESIGN.md) §4.
+
+### Phase 4 design promoted
+
+[`docs/PHASE4_DESIGN.md`](docs/PHASE4_DESIGN.md) now lives in
+`docs/` as the canonical scope per the plan-doc-discipline
+standing rule (see [`docs/ROADMAP.md`](docs/ROADMAP.md) "Process
+rules"). Built from `INSPECTOR_PHASE4_SCOPING.md` +
+`INSPECTOR_PHASE4_IMPL.md` + the operator-locked Q1–Q7 decisions
+from DISPATCH 47 §7:
+
+  - Q1: Contract-vs-config — **HYBRID** (wire caps absolute,
+    deployment thresholds become defaults, impl thresholds
+    absolute)
+  - Q2: Per-workload match shape — **EXACT name**
+  - Q3: Suppression flags — **BOTH** (`suppress_alerts` +
+    `suppress_recommendations`), independent
+  - Q4: Per-workload fields beyond thresholds + suppress —
+    **DEFER to v1.4.x**
+  - Q5: Agent A v0.3.16 dispatch — **PARALLEL** (already landed)
+  - Q6: Jetson pass owner — **Tester** (or operator hand-off)
+  - Q7: Cadence — **INCREMENTAL** v1.3.0 → v1.3.3
+
+[`docs/ROADMAP.md`](docs/ROADMAP.md) updated: v1.3.0 marked
+shipped, Phase 4 status flipped to IN PROGRESS, contract ladder
+extended to v0.3.16, ROS2-Hz candidate annotated as
+"deprecated by echo-once probe approach; revivable with rclrs."
+
+### Gates
+
+- `cargo build --release --workspace` clean (1.3.0)
+- `cargo clippy --workspace --all-targets -- -D warnings` clean
+- `cargo test --workspace --all-targets`: **952 / 0** (was 951
+  pre-v1.3.0; +1 for `thermal_root_env_override_redirects_collection`)
+- `RUSTDOCFLAGS=-D warnings cargo doc --workspace --no-deps`
+  clean
+- `./target/release/edge_monitor --version` → `edge_monitor 1.3.0`
+- **Synthetic-90 °C-zone proof on x86** captured at dispatch report:
+  `alert.fire=ThermalPressure scope=System pid=-1` line emitted
+  with `EDGE_MONITOR_THERMAL_ROOT=/tmp/fake_thermal` set against
+  a single-zone fixture.
+
+### Phase 4 next steps
+
+Per [`docs/PHASE4_DESIGN.md`](docs/PHASE4_DESIGN.md) §1:
+
+  - v1.3.1 — `[thresholds]` + `[samplers]` deployment overrides
+  - v1.3.2 — `[[workloads]]` per-workload rules + suppression flags
+  - v1.3.3 — INA3221 power rails (consumes the v0.3.16 surface
+    already in place)
+  - Jetson pass — empirical validation on Orin (post-v1.3.3)
+
 ## [1.2.0] — 2026-06-03 — Phase 3 capstone: ranked recommendations (observe-only)
 
 The Phase 3 finishing release. Ships the Recommendation surface

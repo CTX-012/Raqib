@@ -52,11 +52,11 @@ keep the trigger.
 
 Three incremental releases, each independently bisectable:
 
-| Release | Scope | Dependency on `ux_contract` |
-|---|---|---|
-| **v1.1.11** (this release) | AlertState → Runtime (foundation) + this design doc | None |
-| **v1.1.12** | Vitals-driven alert eval (thermal, power, throttling) | v0.3.13 (vitals types) |
-| **v1.2.0** | Ranked recommendations surface | v0.3.14 (recommend templates) |
+| Release | Scope | Dependency on `ux_contract` | Status |
+|---|---|---|---|
+| **v1.1.11** | AlertState → Runtime (foundation) + this design doc | None | **shipped** |
+| **v1.1.12** | Vitals subsystem (thermal collection + wire + TUI + Svelte) | v0.3.13 (`host_vitals` + `thermals::THERMAL_*_C`) | **shipped** |
+| **v1.2.0** | Ranked recommendations surface + thermal alert firing | v0.3.14 (recommend templates) | upcoming |
 
 ### v1.1.11 — AlertState lift
 
@@ -75,23 +75,53 @@ Per the dispatch's WIRE NOTE: the web wire does NOT grow an
 type and is properly v1.1.12+. v1.1.11 ships headless **logs**
 only.
 
-### v1.1.12 — vitals (in flight, depends on `ux_contract` v0.3.13)
+### v1.1.12 — vitals subsystem (shipped; depends on `ux_contract` v0.3.13)
 
-The vitals types — `Temp`, `Power`, `Throttling` — land in
-`ux_contract` v0.3.13 (Agent A's parallel scope as of the
-DISPATCH 35 / DISPATCH 36 split). Once v0.3.13 ships, v1.1.12
-adds:
+Shipped 2026-06-03 via DISPATCH 39. Consumes
+`ux_contract::host_vitals::{HostVitals, ThermalZone}` and
+`ux_contract::thresholds::{THERMAL_AMBER_C, THERMAL_RED_C}`.
 
-- Vitals reads on the platform layer (NVML temp / power on
-  RTX; `/sys/class/thermal/` on Jetson Orin; INA3221 deferred).
-- Vitals-driven alerts at the **operator-locked thresholds**:
-  **85 °C amber** (Attention) / **95 °C red** (Critical).
-- The web wire grows an `alerts: Vec<AlertEntry>` list (the
-  wire-type-needs-`ux_contract` blocker the v1.1.11 dispatch
-  surfaced).
+What landed:
 
-INA3221 (per-rail power on Jetson) is **deferred** — the
-v1.1.12 reads cover NVML and `/sys/class/thermal/` only.
+- **Platform-layer collection** (`src/platform/host_vitals.rs`):
+  reads `/sys/class/thermal/thermal_zone*/{type,temp}` via
+  `std::fs`. Per-zone errors silently skipped (RAPL "unreadable →
+  None" pattern). `cooling_device*` siblings filtered out.
+  Labels stably sorted at the producer. Empty `thermal_zones`
+  means "no zones discovered"; consumer hides the panel.
+- **Web wire** (`src/web/wire.rs`): `WireThermalZone { label,
+  temp_celsius, severity }` and `WireThermalSeverity { Nominal,
+  Amber, Red }`. Severity pre-classified server-side via
+  `classify_thermal` against the contract thresholds — single
+  source of truth; the TUI and Svelte each read the contract
+  directly, no `>= 85` literals in either consumer.
+  `#[serde(default)]` makes the `thermal_zones` field
+  backward-compat additive.
+- **TUI** (`src/ui/panels/vitals.rs`): top-3 hottest zones on a
+  new 5th row of the existing vitals panel; "N of M zones shown"
+  hint when there are more. Hidden when empty. Colored by the
+  hottest zone's tier.
+- **Svelte** (`web/src/components/VitalsPanel.svelte`): matches
+  TUI's top-3 + count behaviour so both surfaces present the
+  same hottest zones in the same order. `text-critical` /
+  `text-attention` / `text-fg` mapping driven by the
+  server-classified severity variant; NO numeric thresholds in
+  TypeScript.
+
+**Explicit non-actions** (authority lock):
+
+- NO alert variant for thermal added to `AlertState`. v1.1.12 is
+  display only.
+- NO actuation, NO `send_sigterm` wiring, NO `--enable-governor`
+  flag. `default_ai_action = Allow` unchanged.
+
+Deferred to v1.2.0+ (per DISPATCH 39 scope lock):
+
+- Thermal-driven alert FIRING (the lift is foundation; alerts
+  fire when the recommendations surface lands).
+- INA3221 per-rail power on Jetson.
+- NVML temperature / power reads (the v1.1.12 reads are sysfs
+  only; NVML follows as a separate platform-layer addition).
 
 ### v1.2.0 — recommendations (depends on `ux_contract` v0.3.14)
 
@@ -111,8 +141,8 @@ observe-only.
 | Contract version | Provides | Status |
 |---|---|---|
 | v0.3.12 | `ActivityState` (lifted in v1.1.10) | shipped |
-| v0.3.13 | Vitals types (`Temp`, `Power`, `Throttling`, vitals alert IDs) | in flight (Agent A) |
-| v0.3.14 | Recommendation templates + ranking enum | held until v1.2.0 surface designed |
+| v0.3.13 | `host_vitals::{HostVitals, ThermalZone}` + `thresholds::THERMAL_AMBER_C` (85.0) / `THERMAL_RED_C` (95.0). Consumed by v1.1.12. | shipped |
+| v0.3.14 | Recommendation templates + ranking enum + thermal alert IDs | held until v1.2.0 surface designed |
 
 If a v1.1.11+ implementation step reveals a contract gap
 (missing string, alert ID, threshold, type), the dispatch must

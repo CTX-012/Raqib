@@ -6,6 +6,101 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project aims to adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 once `v1.0.0` is tagged. Until then, minor versions may include breaking changes.
 
+## [1.1.12] — 2026-06-03 — Vitals subsystem (thermal: sysfs + wire + TUI + Svelte)
+
+Phase 3 step 2 of 3. DISPATCH 39 scope-locked from Inspector
+DISPATCH 38. Consumes `ux_contract` v0.3.13's `host_vitals`
+module + `THERMAL_AMBER_C` / `THERMAL_RED_C` threshold constants.
+
+**Authority lock (still binding):** OBSERVE-ONLY. This release
+adds thermal DISPLAY, not actuation. No alert fires on thermal
+in this version (deferred to v1.2.0+). `default_ai_action =
+Allow` unchanged. `send_sigterm` stays manual-only. No
+`--enable-governor` flag.
+
+### Added
+
+- **Host-level vitals collection** (`src/platform/host_vitals.rs`,
+  COMMIT 1): reads `/sys/class/thermal/thermal_zone*/{type,temp}`
+  via `std::fs`. Returns `ux_contract::host_vitals::HostVitals`
+  with per-zone `(label, temp_celsius)` pairs. Per-zone read
+  errors silently skipped (RAPL "unreadable → None" pattern);
+  empty `thermal_zones` means "no zones discovered" per contract
+  semantics. `cooling_device*` siblings filtered out. Labels
+  stably sorted at the producer. `PlatformSnapshot` grows a
+  `vitals: HostVitals` field (zero-cost addition: dropped the
+  `Serialize` derive from `PlatformSnapshot` after Q1 grep
+  confirmed nothing serializes it directly — the wire layer
+  derives its own `WireSnapshot`).
+- **Wire layer** (`src/web/wire.rs`, COMMIT 2):
+  `WireThermalZone { label, temp_celsius, severity }`,
+  `WireThermalSeverity { Nominal, Amber, Red }` with snake_case
+  serialization, and `classify_thermal` that runs the
+  contract-threshold check ONCE server-side. `WireVitals` grows
+  a `#[serde(default)] thermal_zones: Vec<WireThermalZone>` —
+  backward-compat additive. TypeScript types updated in
+  `web/src/lib/types.ts`.
+- **TUI row** (`src/ui/panels/vitals.rs`, COMMIT 3): 5th
+  `Constraint::Length(1)` row on the existing vitals panel.
+  TOP-3 hottest zones inline (`thermal: x86_pkg_temp: 71.2°C
+  ...`) colored by the hottest zone's tier; "N of M zones
+  shown" appended when there are more than 3. Hidden when no
+  zones discovered. Reads
+  `ux_contract::thresholds::THERMAL_AMBER_C` / `THERMAL_RED_C`
+  directly — same constants as the wire layer's `classify_thermal`,
+  no drift mode.
+- **Svelte dashboard** (`web/src/components/VitalsPanel.svelte`,
+  COMMIT 4): matches TUI's top-3 + count behaviour so both
+  surfaces present the same hottest zones in the same order.
+  Maps the server-classified severity variant to
+  `text-critical` / `text-attention` / `text-fg`; NO numeric
+  thresholds in TypeScript. Hidden when `thermal_zones` is
+  empty/absent.
+
+### Changed
+
+- **`Cargo.toml` ux_contract pin updated to `version = "0.3.13"`**
+  (was `"0.3.12"`). v1.1.12 consumes v0.3.13's `host_vitals` and
+  `THERMAL_*_C` constants.
+- **`PlatformSnapshot` no longer derives `Serialize`.** Inspector
+  DISPATCH 38 Q1 grep confirmed `serde_json` is only called on
+  `WireSnapshot` (the watch-channel payload, which derives
+  Serialize itself); nothing serializes `PlatformSnapshot`
+  directly. Dropping the derive lets us add a HostVitals-typed
+  field without forcing a serde shim on the zero-dep contract
+  crate.
+
+### Notes
+
+- All STOP-AND-SURFACE triggers cleared. The thermal read is
+  pure `std::fs` (trigger 1 cleared), the wire addition is
+  `#[serde(default)]` additive (trigger 2 cleared), the
+  `PlatformSnapshot` field-add did not ripple to fixtures
+  (trigger 3 cleared), no thermal alert fires (trigger 4 lock
+  held), and the Svelte build pipeline ran clean with
+  `npx vite build` (trigger 5 cleared).
+- Tests: 916 → 927 (+11 net):
+  - +6 in `host_vitals::tests` (six fixture scenarios:
+    happy-path zone enumeration, skip-unreadable-zone, empty
+    sysfs root, missing root, ignore-cooling-devices,
+    millidegrees→Celsius conversion).
+  - +2 in `web::wire::tests` (`classify_thermal_boundaries`
+    boundary pin, `thermal_severity_serializes_snake_case`
+    wire-shape pin).
+  - +3 in `ui::panels::vitals::tests` (top-3-selection,
+    under-cap returns all, color-maps-to-contract-thresholds).
+  - 1 existing `empty_snapshot_serializes_to_valid_json`
+    extended to assert the additive `thermal_zones: []` field.
+- Sanity-run on the x86 dev host (3 thermal zones: 2× acpitz at
+  16.8 / 27.8 °C, 1× x86_pkg_temp at 32.0 °C — all nominal):
+  binary boots clean, no thermal-read errors, no crashes.
+- All four code commits are independently bisectable
+  (COMMIT 1 `6ac2559`, COMMIT 2 `4248ac5`, COMMIT 3 `a5d856a`,
+  COMMIT 4 `38f64c0`).
+- `docs/PHASE3_DESIGN.md` updated per the living-doc-per-release
+  process — v1.1.12 marked SHIPPED in the build-sequence and
+  `ux_contract` prereqs tables.
+
 ## [1.1.11] — 2026-06-01 — AlertState→Runtime (Phase 3 foundation)
 
 Phase 3 step 1 of 3 (incremental: v1.1.11 → v1.1.12 → v1.2.0).

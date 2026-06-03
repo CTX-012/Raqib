@@ -53,7 +53,7 @@ const THERMAL_SYSFS_ROOT: &str = "/sys/class/thermal";
 ///
 /// Production callers (the platform-layer collection in
 /// [`crate::platform::collect_snapshot`]) use this entry. Tests use
-/// [`collect_from_root`] with a tempdir.
+/// `collect_from_root` (crate-private) with a tempdir.
 pub fn collect_host_vitals() -> HostVitals {
     collect_from_root(Path::new(THERMAL_SYSFS_ROOT))
 }

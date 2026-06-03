@@ -116,7 +116,8 @@ pub struct WireThermalZone {
     /// one decimal place; we send the raw f32 so the formatter
     /// stays in the rendering layer.
     pub temp_celsius: f32,
-    /// Pre-classified severity bucket. See [`classify_thermal`].
+    /// Pre-classified severity bucket. See the crate-private
+    /// `classify_thermal` helper below for the threshold mapping.
     pub severity: WireThermalSeverity,
 }
 

@@ -56,6 +56,7 @@ Three incremental releases, each independently bisectable:
 |---|---|---|---|
 | **v1.1.11** | AlertState → Runtime (foundation) + this design doc | None | **shipped** |
 | **v1.1.12** | Vitals subsystem (thermal collection + wire + TUI + Svelte) | v0.3.13 (`host_vitals` + `thermals::THERMAL_*_C`) | **shipped** |
+| **v1.1.13** | Alerts on the web wire (`WireAlertEntry`) — closes v1.1.11 deferral | v0.3.13 (`AlertId` + `alerts::*` templates already present) | **shipped** |
 | **v1.2.0** | Ranked recommendations surface + thermal alert firing | v0.3.14 (recommend templates) | upcoming |
 
 ### v1.1.11 — AlertState lift
@@ -122,6 +123,52 @@ Deferred to v1.2.0+ (per DISPATCH 39 scope lock):
 - INA3221 per-rail power on Jetson.
 - NVML temperature / power reads (the v1.1.12 reads are sysfs
   only; NVML follows as a separate platform-layer addition).
+
+### v1.1.13 — alerts on the web wire (shipped; closes v1.1.11 deferral)
+
+Shipped 2026-06-03 via DISPATCH 42. Consumes `ux_contract`
+v0.3.13 (the existing `AlertId`, `alerts::*` templates, and
+`alert_tier` mapping cover everything the wire surfaces). NO new
+contract type needed — Inspector DISPATCH 41 confirmed.
+
+Closes the v1.1.11 deferral. v1.1.11 lifted `AlertState` to
+`Runtime` so the eval fires on every tick regardless of UI mode,
+and added `log_visible_alerts` for headless tracing. It DEFERRED
+the web-wire surface ("needs a `ux_contract` type"). DISPATCH 41
+re-read found that v0.3.13's surface was already sufficient and
+v1.2.0 (ranked recommendations) rides on alerts-on-wire, so the
+deferral had to close before the capstone.
+
+What landed:
+
+- **`WireAlertEntry`** (`src/web/wire.rs`): `{ alert_id,
+  pid, workload_name, severity, text }`. The `alert_id` is the
+  snake-case projection of `ux_contract::AlertId`; `severity` is
+  the snake-case projection of `crate::ui::panels::alerts::AlertTier`
+  (`'attention' | 'critical'`); `text` is the byte-for-byte
+  rendering the TUI banner shows, produced server-side via the
+  SAME `panels::alerts::substitute(template_for(id), entry,
+  live_values_for(entry, state))` pipeline.
+- **`WireSnapshot.alerts: Vec<WireAlertEntry>`** with
+  `#[serde(default)]` — backward-compat additive (same shape as
+  `thermal_zones` in v1.1.12 and `activity_state` in v1.1.10).
+- **`AlertsPanel.svelte`** rendering the wire alerts: pill-shaped
+  lines, colored by the server-classified severity
+  (`bg-critical` / `bg-attention`), positioned above the main
+  panel grid so visible alerts catch the operator's eye first.
+  Self-hides when no alerts are visible.
+- **Cross-layer hygiene**: `panels::alerts::template_for` widened
+  from private to `pub(crate)` for the wire builder. Single call
+  site (one line in panels/alerts.rs); the visibility bump is
+  annotated with a v1.1.13 / DISPATCH 42 comment.
+
+**Explicit non-actions** (authority lock):
+
+- NO new alert IDs (ThermalPressure stays v1.2.0+ scope).
+- NO recommendation structure (also v1.2.0+).
+- NO web-side ack flow (ack is a TUI keybinding today; web ack
+  is v1.2.0+ scope and was not asked for in this dispatch).
+- NO actuation surface.
 
 ### v1.2.0 — recommendations (depends on `ux_contract` v0.3.14)
 

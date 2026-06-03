@@ -29,6 +29,24 @@ export interface WireVitals {
     cpu_count: number;
     process_count: number;
     gpu: WireGpu | null;
+    // v1.1.12 / CAR-22 — host-level thermal zones, pre-classified
+    // server-side against ux_contract::thresholds::THERMAL_AMBER_C
+    // (85 °C) and THERMAL_RED_C (95 °C). Empty when no zones were
+    // discovered; the panel hides the section in that case. Optional
+    // for backward compat: a pre-v1.1.12 server would not emit it.
+    thermal_zones?: WireThermalZone[];
+}
+
+export interface WireThermalZone {
+    // Canonical zone label, e.g. "x86_pkg_temp", "cpu-thermal".
+    label: string;
+    temp_celsius: number;
+    // Pre-classified by the Rust wire layer against
+    // ux_contract::thresholds::THERMAL_AMBER_C / THERMAL_RED_C.
+    // Render the dot/row color by mapping these literal variants
+    // to tailwind classes — DO NOT redo the threshold check in TS,
+    // the contract is the single source of truth.
+    severity: 'nominal' | 'amber' | 'red';
 }
 
 export interface WireGpu {

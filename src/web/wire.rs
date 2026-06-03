@@ -88,6 +88,72 @@ pub struct WireVitals {
     /// otherwise. Mirrors the TUI's "No GPU detected" fallback
     /// without leaking the raw NVML state.
     pub gpu: Option<WireGpu>,
+    /// v1.1.12 / CAR-22 — host-level thermal zones, pre-classified
+    /// server-side against
+    /// [`ux_contract::thresholds::THERMAL_AMBER_C`] /
+    /// [`ux_contract::thresholds::THERMAL_RED_C`]. The classification
+    /// happens here (not in the TS layer) so the TUI and the web read
+    /// the SAME threshold constants — single source of truth, no
+    /// drift if the contract bumps the values. Empty when no zones
+    /// were discovered; consumers (TUI + Svelte) hide the section.
+    /// Additive wire-schema bump: `#[serde(default)]` lets a pre-v1.1.12
+    /// reader treat the field as `Vec::new()`.
+    #[serde(default)]
+    pub thermal_zones: Vec<WireThermalZone>,
+}
+
+/// v1.1.12 / CAR-22 — wire-stable shape for one thermal zone.
+/// The severity is pre-classified server-side against the
+/// `ux_contract::thresholds` constants, so the renderer just maps
+/// the variant to a color (no `>= 85` literals in TypeScript).
+#[derive(Debug, Clone, Serialize)]
+pub struct WireThermalZone {
+    /// Canonical zone label (e.g. `"x86_pkg_temp"`,
+    /// `"cpu-thermal"`). Comes verbatim from
+    /// `/sys/class/thermal/thermal_zone*/type`.
+    pub label: String,
+    /// Temperature in degrees Celsius. The renderer formats with
+    /// one decimal place; we send the raw f32 so the formatter
+    /// stays in the rendering layer.
+    pub temp_celsius: f32,
+    /// Pre-classified severity bucket. See [`classify_thermal`].
+    pub severity: WireThermalSeverity,
+}
+
+/// v1.1.12 / CAR-22 — server-side classification of a thermal
+/// zone's temperature. Serialized to snake_case
+/// (`"nominal" / "amber" / "red"`) so the TS reader can pattern-match
+/// on string literals without importing the variant set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WireThermalSeverity {
+    Nominal,
+    Amber,
+    Red,
+}
+
+/// v1.1.12 / CAR-22 — classify a raw temperature into the
+/// nominal / amber / red bucket using the contract's threshold
+/// constants. Mirrors the reference implementation in
+/// `ux_contract::host_vitals::tests::reference_classification_uses_thresholds`:
+///
+/// - `>= THERMAL_RED_C` (95.0 °C) → [`WireThermalSeverity::Red`]
+/// - `>= THERMAL_AMBER_C` (85.0 °C) → [`WireThermalSeverity::Amber`]
+/// - else → [`WireThermalSeverity::Nominal`]
+///
+/// Server-side classification means the TUI and the web render
+/// against the SAME threshold values; the contract is the single
+/// source of truth and there are no `>= 85` literals duplicated
+/// on the consumer side.
+fn classify_thermal(temp_celsius: f32) -> WireThermalSeverity {
+    let c = f64::from(temp_celsius);
+    if c >= ux_contract::thresholds::THERMAL_RED_C {
+        WireThermalSeverity::Red
+    } else if c >= ux_contract::thresholds::THERMAL_AMBER_C {
+        WireThermalSeverity::Amber
+    } else {
+        WireThermalSeverity::Nominal
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -217,6 +283,7 @@ impl WireSnapshot {
                 cpu_count: 0,
                 process_count: 0,
                 gpu: None,
+                thermal_zones: Vec::new(),
             },
             workloads: Vec::new(),
             activity: Vec::new(),
@@ -263,6 +330,7 @@ impl WireVitals {
                 cpu_count: 0,
                 process_count: 0,
                 gpu: None,
+                thermal_zones: Vec::new(),
             };
         };
         let memory_total_mb = snap.system.total_memory / (1024 * 1024);
@@ -285,6 +353,20 @@ impl WireVitals {
         } else {
             None
         };
+        // v1.1.12 / CAR-22 — pre-classify server-side. The thermal
+        // zones come off the platform-layer host_vitals collection
+        // already sorted by label; we map each into a
+        // `WireThermalZone` with its severity attached.
+        let thermal_zones: Vec<WireThermalZone> = snap
+            .vitals
+            .thermal_zones
+            .iter()
+            .map(|z| WireThermalZone {
+                label: z.label.clone(),
+                temp_celsius: z.temp_celsius,
+                severity: classify_thermal(z.temp_celsius),
+            })
+            .collect();
         Self {
             memory_pct,
             memory_used_mb,
@@ -293,6 +375,7 @@ impl WireVitals {
             cpu_count: snap.system.cpu_count,
             process_count: snap.processes.len(),
             gpu,
+            thermal_zones,
         }
     }
 }
@@ -508,6 +591,80 @@ mod tests {
         assert!(v["workloads"].is_array());
         assert!(v["activity"].is_array());
         assert!(v["vitals"]["gpu"].is_null());
+        // v1.1.12 — thermal_zones is additive and ships as `[]` on
+        // the empty wire payload.
+        assert!(
+            v["vitals"]["thermal_zones"].is_array(),
+            "v1.1.12 wire schema must carry thermal_zones as an array",
+        );
+        assert_eq!(
+            v["vitals"]["thermal_zones"].as_array().unwrap().len(),
+            0,
+            "empty snapshot must carry an empty thermal_zones list",
+        );
+    }
+
+    /// v1.1.12 / CAR-22 — pin the boundary semantics of the
+    /// server-side classifier. `>=` semantics: the threshold value
+    /// itself is the LOWER edge of the next bucket. Mirrors the
+    /// contract-side reference implementation at
+    /// `ux_contract::host_vitals::tests::reference_classification_uses_thresholds`
+    /// so a future ux_contract bump that tweaks the thresholds is
+    /// caught on the consumer side too.
+    #[test]
+    fn classify_thermal_boundaries() {
+        use ux_contract::thresholds::{THERMAL_AMBER_C, THERMAL_RED_C};
+
+        // Below amber → Nominal. Just under the boundary AND well
+        // under the boundary.
+        assert_eq!(classify_thermal(45.0), WireThermalSeverity::Nominal);
+        assert_eq!(
+            classify_thermal(THERMAL_AMBER_C as f32 - 0.1),
+            WireThermalSeverity::Nominal,
+            "84.9 °C must classify as Nominal (just below the amber \
+             threshold)",
+        );
+        // Amber boundary: `>=` so 85.0 itself is Amber.
+        assert_eq!(
+            classify_thermal(THERMAL_AMBER_C as f32),
+            WireThermalSeverity::Amber,
+            "85.0 °C must classify as Amber (the threshold value \
+             itself is the lower edge of the amber bucket)",
+        );
+        // Just below red → still Amber.
+        assert_eq!(
+            classify_thermal(THERMAL_RED_C as f32 - 0.1),
+            WireThermalSeverity::Amber,
+            "94.9 °C must classify as Amber (just below the red \
+             threshold)",
+        );
+        // Red boundary: `>=` so 95.0 itself is Red.
+        assert_eq!(
+            classify_thermal(THERMAL_RED_C as f32),
+            WireThermalSeverity::Red,
+            "95.0 °C must classify as Red (the threshold value \
+             itself is the lower edge of the red bucket)",
+        );
+        // Well above red.
+        assert_eq!(classify_thermal(105.0), WireThermalSeverity::Red);
+    }
+
+    /// v1.1.12 / CAR-22 — server-side classification surfaces on the
+    /// JSON wire as snake_case strings (`"nominal" / "amber" /
+    /// "red"`). The TS layer pattern-matches on those literals; this
+    /// test pins the serialization shape so a future
+    /// `rename_all` regression is caught here.
+    #[test]
+    fn thermal_severity_serializes_snake_case() {
+        let cases: &[(WireThermalSeverity, &str)] = &[
+            (WireThermalSeverity::Nominal, "\"nominal\""),
+            (WireThermalSeverity::Amber, "\"amber\""),
+            (WireThermalSeverity::Red, "\"red\""),
+        ];
+        for (sev, expected) in cases {
+            let json = serde_json::to_string(sev).expect("serialize");
+            assert_eq!(&json, expected, "{sev:?} → {expected}");
+        }
     }
 
     #[test]

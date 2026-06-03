@@ -43,6 +43,13 @@ const DEFERRED_FILES: &[&str] = &[
 
 const SEPARATOR_ALLOWLIST: &[&str] = &[
     "", " ", "  ", "   ", "·", "—", "|", ":", "/", ",", "(", ")", "[", "]", " · ", " — ", " | ",
+    // v1.2.0 / DISPATCH 45 — sub-bullet decoration used by the
+    // alerts panel to attach a recommendation line under its
+    // parent alert banner. Decoration glyph on par with `·` /
+    // `—`; the actual rec text comes from `ux_contract::
+    // recommendation::display::*`, and the disclaimer comes from
+    // `RECOMMENDATION_NOT_ACTIONABLE`.
+    "↳", "  ↳ ",
 ];
 
 #[test]
@@ -93,20 +100,23 @@ fn render_positions_use_ux_contract() {
 /// whitespace token isn't a `"`. Handles `\"` and `\\` escapes; treats
 /// any other backslash escape as a literal pair (good enough for copy).
 fn extract_string_literal(after: &str) -> Option<String> {
-    let mut bytes = after.bytes().enumerate();
-    let body_start = loop {
-        let (i, b) = bytes.next()?;
-        if b == b'"' {
-            break i + 1;
+    // v1.2.0 / DISPATCH 45 — iterate chars, not bytes. The byte-
+    // iterator approach mangled multi-byte UTF-8 glyphs (e.g.
+    // `↳`) into `b as char` casts so the allowlist comparison
+    // never matched. Chars give the correct semantic boundaries.
+    let mut chars = after.chars();
+    loop {
+        let c = chars.next()?;
+        if c == '"' {
+            break;
         }
-        if !(b as char).is_whitespace() {
+        if !c.is_whitespace() {
             return None;
         }
-    };
+    }
     let mut out = String::new();
     let mut escape = false;
-    for (_, b) in bytes {
-        let c = b as char;
+    for c in chars {
         if escape {
             out.push(c);
             escape = false;
@@ -121,7 +131,6 @@ fn extract_string_literal(after: &str) -> Option<String> {
         }
         out.push(c);
     }
-    let _ = body_start; // silence unused; kept for diagnostic clarity
     None
 }
 

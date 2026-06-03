@@ -265,6 +265,16 @@ pub fn build_lines(_app: &App, state: &RuntimeState, theme: &UiTheme) -> Vec<Lin
     let total = state.alerts.active_count();
     let mut lines: Vec<Line<'static>> = Vec::with_capacity(visible.len() + 1);
 
+    // v1.2.0 / DISPATCH 45 — track whether ANY rec is visible
+    // (drives the once-per-section disclaimer at the bottom).
+    // Recs are projected per-alert inside the loop so each rec
+    // renders under the SPECIFIC alert entry that produced it
+    // (calling project_one(entry, state) preserves the
+    // entry-identity mapping; the alert_id can collide across
+    // multiple visible alerts of the same kind, which is why we
+    // can't pre-build a Map<AlertId, Vec<Rec>>).
+    let mut any_recs = false;
+
     for entry in &visible {
         let live = live_values_for(entry, state);
         let text = substitute(template_for(entry.alert_id), entry, &live);
@@ -279,6 +289,39 @@ pub fn build_lines(_app: &App, state: &RuntimeState, theme: &UiTheme) -> Vec<Lin
             .bg(tier_color(tier, theme))
             .add_modifier(Modifier::BOLD);
         lines.push(Line::from(Span::styled(format!(" {text} "), style)));
+
+        // v1.2.0 / DISPATCH 45 — render this alert's rec (if any)
+        // immediately under the banner. Per-alert projection keeps
+        // the entry-identity right when multiple alerts share an
+        // alert_id (e.g. 3 OomDetected on different PIDs each get
+        // their own rec). Recs are display-only — un-banner-styled
+        // text with a leading indent so the operator reads them as
+        // "follow-on context" rather than "additional alert".
+        // AUTHORITY LOCK: this is render, no actuation.
+        if let Some(rec) = crate::recommend::project_one(entry, state) {
+            any_recs = true;
+            let label = crate::recommend::render_label(&rec);
+            let rec_color = recommendation_color(rec.severity, theme);
+            lines.push(Line::from(vec![
+                Span::styled("  ↳ ", Style::default().fg(theme.muted)),
+                Span::styled(
+                    label,
+                    Style::default().fg(rec_color).add_modifier(Modifier::BOLD),
+                ),
+            ]));
+            // `reason` as a muted sub-line.
+            if !rec.reason.is_empty() {
+                lines.push(Line::from(vec![
+                    Span::styled("    ", Style::default().fg(theme.muted)),
+                    Span::styled(
+                        rec.reason.clone(),
+                        Style::default()
+                            .fg(theme.muted)
+                            .add_modifier(Modifier::ITALIC),
+                    ),
+                ]));
+            }
+        }
     }
 
     let hidden = total.saturating_sub(visible.len());
@@ -293,7 +336,42 @@ pub fn build_lines(_app: &App, state: &RuntimeState, theme: &UiTheme) -> Vec<Lin
         )));
     }
 
+    // v1.2.0 / DISPATCH 45 — operator-locked once-per-section
+    // disclaimer at the BOTTOM of the rec section. The text comes
+    // from `ux_contract::recommendation::display::RECOMMENDATION_NOT_ACTIONABLE`
+    // verbatim so the TUI and web render the SAME wording. Only
+    // shown when at least one recommendation is visible.
+    if any_recs {
+        lines.push(Line::from(Span::styled(
+            format!(
+                " {} ",
+                ux_contract::recommendation::display::RECOMMENDATION_NOT_ACTIONABLE,
+            ),
+            Style::default()
+                .fg(theme.muted)
+                .add_modifier(Modifier::ITALIC),
+        )));
+    }
+
     lines
+}
+
+/// v1.2.0 / DISPATCH 45 — theme color for one recommendation tier.
+/// Mirrors the contract's `RecommendationSeverity` → tier color
+/// mapping. The amber-vs-red gradient on the rec card matches the
+/// banner color: a Critical rec shares the critical-banner color
+/// with the GovernorArmed / OOM banner, a Warning rec shares the
+/// attention-banner color with the pressure banners.
+fn recommendation_color(
+    severity: ux_contract::recommendation::RecommendationSeverity,
+    theme: &UiTheme,
+) -> Color {
+    use ux_contract::recommendation::RecommendationSeverity;
+    match severity {
+        RecommendationSeverity::Critical => theme.critical,
+        RecommendationSeverity::Warning => theme.attention,
+        RecommendationSeverity::Info => theme.foreground,
+    }
 }
 
 pub fn render(f: &mut Frame, area: Rect, app: &App, state: &RuntimeState, theme: &UiTheme) {
@@ -312,13 +390,30 @@ pub fn region_height(state: &RuntimeState) -> u16 {
     // v1.1.11 / DISPATCH 36 — argument changed from `&App` to
     // `&RuntimeState` because the AlertState moved to `RuntimeState`.
     // Caller in `panels/mod.rs` updates accordingly.
-    let visible = state.alerts.visible().len();
+    //
+    // v1.2.0 / DISPATCH 45 — also reserves space for the per-alert
+    // recommendation lines (label + optional reason) and the
+    // once-per-section disclaimer footer. Mirror of
+    // `build_lines`'s per-entry accounting (project_one per
+    // visible alert) so the layout matches the actual render
+    // output line-for-line.
+    let visible_alerts = state.alerts.visible();
+    let mut rec_lines: usize = 0;
+    let mut any_recs = false;
+    for entry in &visible_alerts {
+        if let Some(rec) = crate::recommend::project_one(entry, state) {
+            any_recs = true;
+            rec_lines += if rec.reason.is_empty() { 1 } else { 2 };
+        }
+    }
+    let disclaimer = if any_recs { 1 } else { 0 };
+    let visible = visible_alerts.len();
     let plus_more = if state.alerts.active_count() > visible {
         1
     } else {
         0
     };
-    (visible + plus_more) as u16
+    (visible + rec_lines + plus_more + disclaimer) as u16
 }
 
 #[cfg(test)]
@@ -524,9 +619,24 @@ mod tests {
             );
         }
         let lines = build_lines(&app, &state, &test_theme());
-        assert_eq!(lines.len(), 4, "3 banners + 1 +N more line");
-        let last = lines_to_string(std::slice::from_ref(&lines[3]));
-        assert!(last.contains("+2 more"), "last line: {last}");
+        // v1.2.0 / DISPATCH 45: 3 banners + 3 recs × 2 lines (label
+        // + reason) + 1 "+2 more" + 1 once-per-section disclaimer
+        // = 11 lines. Pre-v1.2.0 was 4 (3 + +N more); the additive
+        // growth reflects rec rendering + disclaimer.
+        assert_eq!(
+            lines.len(),
+            11,
+            "3 banners + 3 recs × 2 + +N more + disclaimer",
+        );
+        // The "+2 more" line + disclaimer sit at the tail. Search
+        // rather than index — line positions shift if the rec
+        // shape changes.
+        let text = lines_to_string(&lines);
+        assert!(text.contains("+2 more"), "missing +N more: {text}");
+        assert!(
+            text.contains("Suggestion only — press k to act manually"),
+            "missing disclaimer: {text}",
+        );
     }
 
     #[test]
@@ -602,7 +712,14 @@ mod tests {
     fn region_height_matches_visible_plus_overflow_indicator() {
         let mut state = empty_state();
         let now = Instant::now();
-        // Two instant alerts → height = 2.
+        // Two instant alerts → 2 banner lines. v1.2.0 / DISPATCH 45:
+        // OomDetected projects to ConsiderRestart rec (label + reason
+        // → 2 lines each); a single disclaimer footer line is also
+        // reserved when any rec is visible.
+        //   2 banners
+        // + 2 recs × 2 lines = 4
+        // + 1 disclaimer
+        // = 7
         for pid in 100u32..102 {
             state.alerts.observe(
                 now,
@@ -611,8 +728,10 @@ mod tests {
                 true,
             );
         }
-        assert_eq!(region_height(&state), 2);
-        // Five instant alerts → height = 3 (cap) + 1 ("+N more") = 4.
+        assert_eq!(region_height(&state), 7);
+        // Five instant alerts → 3 visible banners (cap) + 1 "+N more"
+        // line; recs capped at REC_MAX_VISIBLE = 3 (× 2 lines = 6) +
+        // 1 disclaimer = 3 + 6 + 1 + 1 = 11.
         for pid in 102u32..105 {
             state.alerts.observe(
                 now,
@@ -621,6 +740,59 @@ mod tests {
                 true,
             );
         }
-        assert_eq!(region_height(&state), 4);
+        assert_eq!(region_height(&state), 11);
+    }
+
+    /// v1.2.0 / DISPATCH 45 — the once-per-section disclaimer is
+    /// rendered EXACTLY ONCE at the bottom of the alert region,
+    /// even when multiple recs are visible. Operator-locked.
+    #[test]
+    fn disclaimer_renders_once_per_section() {
+        let mut state = empty_state();
+        let now = Instant::now();
+        // Three Critical alerts that each project to a rec.
+        for pid in 1u32..=3 {
+            state.alerts.observe(
+                now,
+                WorkloadRef::workload(pid, "phi3"),
+                AlertId::OomDetected,
+                true,
+            );
+        }
+        let app = empty_app();
+        let theme = test_theme();
+        let lines = build_lines(&app, &state, &theme);
+        let text = lines_to_string(&lines);
+        let n = text.matches("Suggestion only — press k to act manually").count();
+        assert_eq!(
+            n, 1,
+            "disclaimer must render EXACTLY once per section, \
+             not per-rec. Got {n} occurrences. Full text: {text}",
+        );
+    }
+
+    /// v1.2.0 / DISPATCH 45 — when no recs are visible (e.g. only
+    /// GovernorArmed which is suppressed), the disclaimer is NOT
+    /// rendered. The footer space is reserved only when there's
+    /// something to disclaim.
+    #[test]
+    fn disclaimer_absent_when_no_recs_visible() {
+        let mut state = empty_state();
+        let now = Instant::now();
+        state.alerts.observe(
+            now,
+            WorkloadRef::workload(1, "phi3"),
+            AlertId::GovernorArmed,
+            true,
+        );
+        let app = empty_app();
+        let theme = test_theme();
+        let lines = build_lines(&app, &state, &theme);
+        let text = lines_to_string(&lines);
+        assert!(
+            !text.contains("Suggestion only"),
+            "GovernorArmed has no rec (suppressed); the disclaimer \
+             must not appear. Got: {text}",
+        );
     }
 }

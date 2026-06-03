@@ -34,8 +34,8 @@ edge_monitor exists to keep a developer ahead of the moment when an AI workload 
 - ROS1 detection — only ROS2; ROS1 processes appear as Unknown
 - Stderr persistence — transient only, gone after card dismissed
 - Historical analysis beyond 20 most recent runs per model
-- Sharing/export — deferred to v1.1
-- Tagging, notifications, filtering, custom themes — deferred to v1.1
+- ~~Sharing/export — deferred to v1.1~~ — **DROPPED per DISPATCH 49**; see [docs/ROADMAP.md](docs/ROADMAP.md) EXPLICITLY NOT DOING.
+- ~~Tagging, notifications, filtering, custom themes — deferred to v1.1~~ — **DROPPED per DISPATCH 49**; see [docs/ROADMAP.md](docs/ROADMAP.md) EXPLICITLY NOT DOING.
 
 ## §1 — Default screen
 
@@ -367,14 +367,24 @@ lookback = "1h"
 
 Substitutions: `{model}`, `{pid}`, `{lookback}`.
 
-## §11 — Sharing (deferred to v1.1)
+## §11 — Sharing — DROPPED (DISPATCH 49)
 
-Spec lives in `SHARING_SPEC.md` (forthcoming). Locked decisions for v1.1:
+**Status: DROPPED.** Originally deferred to v1.1; the v1.1.x line
+shipped (v1.1.1 → v1.1.13 + v1.2.0) without picking it up. The
+`SHARING_SPEC.md` referenced below was forthcoming and never
+landed. Operator formally dropped this clause at DISPATCH 49.
 
-- Format: Markdown for v1.1, HTML for v1.2
-- CLI: `edge_monitor report --runs <id1>,<id2> -o report.md`
-- Self-contained (no live data dependencies)
-- Contents: post-mortem card data + comparison section
+The historical design intent for the record (do not implement
+from this without re-opening the decision):
+
+> Spec was to live in `SHARING_SPEC.md` (forthcoming). Original
+> v1.1 decisions: Markdown for v1.1, HTML for v1.2;
+> `edge_monitor report --runs <id1>,<id2> -o report.md`;
+> self-contained (no live data dependencies); post-mortem card
+> data + comparison section.
+
+See [docs/ROADMAP.md](docs/ROADMAP.md) EXPLICITLY NOT DOING for
+the standing position.
 
 ## §12 — Terminal sizing
 
@@ -757,7 +767,7 @@ keyed on `workload.activity == null`.
 
 - `d` key, 6-panel detail layout, Resource Hogs, Unmapped Processes, ASCII art banners
 - Stderr persistence, ROS1 detection
-- Sharing/export, custom themes, workload tagging, notifications, search/filter, in-tool help layers (all v1.1+)
+- ~~Sharing/export, custom themes, workload tagging, notifications, search/filter, in-tool help layers (all v1.1+)~~ — **DROPPED per DISPATCH 49**; v1.1.x line shipped without any of these. See [docs/ROADMAP.md](docs/ROADMAP.md) EXPLICITLY NOT DOING. (In-tool help — the `?` overlay — actually shipped; the `/` filter UX is dropped per the same dispatch.)
 
 ---
 The note above is misplaced again. You're not asking for research — you're asking me to produce three concrete deliverables (the `ux_contract` crate scaffold, the Linux plan, the Windows plan) based on the contract we just locked. Everything I need is in our conversation. No web search.

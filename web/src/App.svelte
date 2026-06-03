@@ -48,7 +48,10 @@
          FIRST. Self-hides when no alerts are visible (matches the
          TUI's banner region behaviour). -->
     <div class="px-6 pt-4">
-        <AlertsPanel alerts={$snapshot.alerts} />
+        <AlertsPanel
+            alerts={$snapshot.alerts}
+            recommendations={$snapshot.recommendations}
+        />
     </div>
 
     <main class="grid grid-cols-1 lg:grid-cols-3 gap-6 px-6 py-4 flex-1">

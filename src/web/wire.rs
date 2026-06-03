@@ -248,6 +248,13 @@ fn alert_id_to_str(id: ux_contract::AlertId) -> &'static str {
         AlertId::GovernorArmed => "governor_armed",
         AlertId::OomDetected => "oom_detected",
         AlertId::WorkloadExited => "workload_exited",
+        // v1.2.0 / DISPATCH 45 — wire spelling for the new
+        // ThermalPressure variant. The Svelte AlertsPanel
+        // pattern-matches on the literal `"thermal_pressure"`
+        // string; keep in sync with the `severity_from_alert_id`
+        // tier mapping (Attention — see `alert_tier` in
+        // panels/alerts.rs).
+        AlertId::ThermalPressure => "thermal_pressure",
     }
 }
 

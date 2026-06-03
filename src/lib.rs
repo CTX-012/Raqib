@@ -23,6 +23,7 @@ pub mod history;
 pub mod lifecycle;
 pub mod model;
 pub mod platform;
+pub mod recommend;
 pub mod runtime;
 pub mod storage;
 pub mod telemetry;

@@ -50,7 +50,19 @@ pub fn alert_tier(alert: AlertId) -> AlertTier {
         AlertId::GovernorArmed | AlertId::OomDetected | AlertId::WorkloadExited => {
             AlertTier::Critical
         }
-        AlertId::VramPressure | AlertId::RamPressure | AlertId::KvPressure => AlertTier::Attention,
+        // v1.2.0 / DISPATCH 45 — ThermalPressure is a pressure-class
+        // alert (fires at THERMAL_AMBER_C = 85 °C per the v0.3.14
+        // contract docstring on the variant). Same tier as the other
+        // resource-pressure alerts (VRAM / RAM / KV). The
+        // amber-vs-red severity gradient on a zone hitting THERMAL_RED_C
+        // is surfaced through the recommendation projection
+        // (`RecommendationSeverity::Critical` vs `Warning`) — not by
+        // splitting the alert tier itself, which would mean two
+        // AlertIds and double-firing on the same root condition.
+        AlertId::VramPressure
+        | AlertId::RamPressure
+        | AlertId::KvPressure
+        | AlertId::ThermalPressure => AlertTier::Attention,
     }
 }
 
@@ -77,6 +89,15 @@ pub struct LiveValues {
     /// Reason string for `{reason}` (WorkloadExited only). L8 wires
     /// the real source; "—" fallback otherwise.
     pub reason: Option<String>,
+    /// v1.2.0 / DISPATCH 45 — temperature in degrees Celsius for
+    /// the `{temp_c}` substitution in the
+    /// `ux_contract::alerts::THERMAL_PRESSURE` template. Sourced
+    /// from the hottest thermal zone in
+    /// `RuntimeState.last_snapshot.vitals.thermal_zones` at render
+    /// time. `None` when the snapshot has no thermal data
+    /// (degrades to "—" in the substitution, same as `pct` /
+    /// `reason`).
+    pub temp_c: Option<f32>,
 }
 
 /// Resolve live values for an entry's `{pct}` / `{reason}`
@@ -91,6 +112,7 @@ pub fn live_values_for(entry: &AlertEntry, state: &RuntimeState) -> LiveValues {
                 .as_ref()
                 .map(|s| s.system.memory_usage_percent()),
             reason: None,
+            temp_c: None,
         },
         AlertId::VramPressure => {
             let pid = match entry.scope {
@@ -109,7 +131,7 @@ pub fn live_values_for(entry: &AlertEntry, state: &RuntimeState) -> LiveValues {
                 (Some(total), Some(used)) => Some((used as f64 / total as f64) * 100.0),
                 _ => None,
             };
-            LiveValues { pct, reason: None }
+            LiveValues { pct, reason: None, temp_c: None }
         }
         AlertId::KvPressure => {
             let pct = match entry.scope {
@@ -119,7 +141,7 @@ pub fn live_values_for(entry: &AlertEntry, state: &RuntimeState) -> LiveValues {
                     .and_then(|lt| lt.kv_cache_peak_pct.map(|v| v as f64)),
                 AlertScope::System => None,
             };
-            LiveValues { pct, reason: None }
+            LiveValues { pct, reason: None, temp_c: None }
         }
         AlertId::GovernorArmed | AlertId::OomDetected => {
             // Critical-tier alerts without a `{reason}` token. The
@@ -136,6 +158,30 @@ pub fn live_values_for(entry: &AlertEntry, state: &RuntimeState) -> LiveValues {
             LiveValues {
                 pct: None,
                 reason: entry.reason.clone(),
+                temp_c: None,
+            }
+        }
+        AlertId::ThermalPressure => {
+            // v1.2.0 / DISPATCH 45 — surface the hottest zone's
+            // temperature for the `{temp_c}` substitution. System-
+            // scope alert; PID and `{pct}` are not in the template.
+            // Picking max-temp matches the TUI vitals row's
+            // "top-3 hottest" presentation and gives the operator
+            // the single most-alarming number — the same number
+            // that drove the firing.
+            let temp_c = state.last_snapshot.as_ref().and_then(|s| {
+                s.vitals
+                    .thermal_zones
+                    .iter()
+                    .map(|z| z.temp_celsius)
+                    .max_by(|a, b| {
+                        a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+                    })
+            });
+            LiveValues {
+                pct: None,
+                reason: None,
+                temp_c,
             }
         }
     }
@@ -166,6 +212,18 @@ pub fn substitute(template: &str, entry: &AlertEntry, live: &LiveValues) -> Stri
         "{reason}",
         live.reason.as_deref().unwrap_or("—"),
     );
+    // v1.2.0 / DISPATCH 45 — `{temp_c}` for the THERMAL_PRESSURE
+    // template. One decimal place mirrors the vitals row's display
+    // format ("x86_pkg_temp: 71.2°C"). "—" fallback when the
+    // snapshot has no thermal data, same convention as `{pct}` and
+    // `{reason}`.
+    out = out.replace(
+        "{temp_c}",
+        &live
+            .temp_c
+            .map(|t| format!("{t:.1}"))
+            .unwrap_or_else(|| "—".to_string()),
+    );
     out
 }
 
@@ -183,6 +241,13 @@ pub(crate) fn template_for(alert: AlertId) -> &'static str {
         AlertId::GovernorArmed => ux_contract::alerts::GOVERNOR_ARMED,
         AlertId::OomDetected => ux_contract::alerts::OOM_DETECTED,
         AlertId::WorkloadExited => ux_contract::alerts::WORKLOAD_EXITED,
+        // v1.2.0 / DISPATCH 45 — ThermalPressure template carries
+        // `{temp_c}` (the offending zone temperature in °C) instead
+        // of {pid}/{workload}. System-scope alert (no per-PID
+        // attribution), so the substitution path uses
+        // `live_values_for` only for the temp value; pid / workload
+        // are absent from the template.
+        AlertId::ThermalPressure => ux_contract::alerts::THERMAL_PRESSURE,
     }
 }
 
@@ -315,6 +380,7 @@ mod tests {
         let live = LiveValues {
             pct: Some(91.4),
             reason: Some("OOM".into()),
+            temp_c: None,
         };
         let out = substitute(ux_contract::alerts::VRAM_PRESSURE, &entry, &live);
         assert_eq!(
@@ -359,6 +425,7 @@ mod tests {
         let live = LiveValues {
             pct: Some(92.0),
             reason: None,
+            temp_c: None,
         };
         let out = substitute(ux_contract::alerts::VRAM_PRESSURE, &entry, &live);
         assert!(

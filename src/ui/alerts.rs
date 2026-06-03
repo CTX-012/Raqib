@@ -272,7 +272,13 @@ fn priority_tier(alert: AlertId) -> u8 {
     // Lower = higher priority (sorts first).
     match alert {
         AlertId::GovernorArmed | AlertId::OomDetected | AlertId::WorkloadExited => 0,
-        AlertId::VramPressure | AlertId::RamPressure | AlertId::KvPressure => 1,
+        // v1.2.0 / DISPATCH 45 — ThermalPressure shares the
+        // pressure tier with VRAM/RAM/KV per
+        // `panels::alerts::alert_tier`. Same priority bucket.
+        AlertId::VramPressure
+        | AlertId::RamPressure
+        | AlertId::KvPressure
+        | AlertId::ThermalPressure => 1,
     }
 }
 

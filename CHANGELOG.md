@@ -6,6 +6,201 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project aims to adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 once `v1.0.0` is tagged. Until then, minor versions may include breaking changes.
 
+## [1.2.0] — 2026-06-03 — Phase 3 capstone: ranked recommendations (observe-only)
+
+The Phase 3 finishing release. Ships the Recommendation surface
+contemplated by DISPATCH 41 and locked by DISPATCH 45 against
+`ux_contract` v0.3.14. Every visible alert now has an associated
+"consider X" recommendation rendered under it in BOTH the TUI
+banner region and the web AlertsPanel; a single disclaimer at
+the bottom of the rec section reads `"Suggestion only — press
+k to act manually"`.
+
+**AUTHORITY LOCK (operator-signed, binding):** recommendations
+are DISPLAY STRINGS the user reads. NEVER callable, NEVER auto-
+triggered. The user acts ONLY via the existing manual `k` →
+kill_confirm card → SIGTERM path.
+
+Concretely, v1.2.0 does NOT change:
+
+- `default_ai_action = Allow` (no change)
+- `send_sigterm` stays manual-only (no tick-path kill wiring)
+- No `--enable-governor` flag
+- No new keybinding (the existing `k` flow is the action surface)
+
+The contract enforces "discriminator, not callable" at the type
+level: `SuggestedAction: Copy` and no method-on-value (pinned by
+`suggested_action_is_copy` in `ux_contract`). The consumer enforces
+"wiring stays observe-only" via `tests/recommendation_observe_
+only_guard.rs::recommendation_path_has_no_actuation_handle`,
+which scans `src/recommend.rs` for `Executor`, `send_sigterm`,
+`SIGTERM`/`SIGKILL`, `nix::sys::signal`, `libc::kill`, kill
+helpers, `Box<dyn Fn`, and the governor's audit/executor/policy
+paths. Together — type firewall + wiring firewall — they pin the
+boundary at both ends.
+
+### Added
+
+- **Recommendation projection module** (`src/recommend.rs`,
+  C1): pure derived view over `&RuntimeState`. Public surface is
+  `project_recommendations(state: &RuntimeState) ->
+  Vec<Recommendation>` (sorted by severity, capped at
+  `REC_MAX_VISIBLE` = 3). Internal `project_one(&AlertEntry,
+  &RuntimeState) -> Option<Recommendation>` preserves entry-
+  identity so two visible alerts of the same `AlertId` on
+  different PIDs get distinct recs. Per-`AlertId` signal table
+  (DISPATCH 41 §3):
+
+  | AlertId            | Action                | Scope    | Targets       |
+  | ---                | ---                   | ---      | ---           |
+  | `VramPressure`     | `ConsiderKill`        | Workload | single (PID)  |
+  | `KvPressure`       | `ConsiderKill`        | Workload | single (PID)  |
+  | `RamPressure`      | `ConsiderKill`        | System   | top-3 by rss  |
+  | `ThermalPressure`  | `ConsiderReduceLoad`  | System   | EMPTY         |
+  | `OomDetected`      | `ConsiderRestart`     | Workload | single (PID)  |
+  | `WorkloadExited`   | (suppressed)          | -        | -             |
+  | `GovernorArmed`    | (suppressed)          | -        | -             |
+
+  `WorkloadExited` suppression rationale: dead PID, "consider
+  restart" is ambiguous (PIDs are reused) and "consider kill"
+  is nonsensical. `GovernorArmed` suppression rationale: the
+  `kill_confirm` card already IS the action surface — a rec
+  under it would be redundant.
+
+- **`AlertId::ThermalPressure` firing** (`src/runtime.rs`, C2):
+  `observe_alerts` now checks `state.host_vitals.thermal_zones`
+  each tick and fires `ThermalPressure` when any zone is `>=
+  THERMAL_AMBER_C` (85 °C). Severity bumps to `Critical` when
+  the hottest zone crosses `THERMAL_RED_C` (95 °C). The
+  v1.1.12 thermal subsystem was foundation; v1.2.0 is when the
+  alert lights up. Live values for substitution include
+  `temp_c` (hottest zone reading).
+
+- **`Recommendation` on the web wire** (`src/web/wire.rs`, C3):
+  new `WireRecommendation { alert_id, scope, severity, action,
+  targets, label, reason }` with `WireRecommendedTarget { pid,
+  name, evidence }`. `WireSnapshot.recommendations` is
+  `#[serde(default)]` — additive, backward-compat with
+  pre-v1.2.0 server payloads. Severity is pre-classified
+  server-side (`'info' | 'warning' | 'critical'`); the label
+  is pre-rendered via `render_label(...)` so the TS layer does
+  NO template substitution. The discriminator `action`
+  (`'consider_kill' | 'consider_reduce_load' |
+  'consider_restart'`) is a STRING enum — there is no
+  `executeAction` in the TS layer.
+
+- **`RecommendationCard.svelte`** (`web/src/components/`, C3):
+  reads the pre-classified severity, maps to a tailwind class
+  (`text-critical` / `text-attention` / `text-fg`), and
+  renders the server-rendered label + optional reason. NO
+  `on:click`, NO action button. Single source of truth: the
+  contract.
+
+- **`AlertsPanel.svelte` rec rendering** (`web/src/components/`,
+  C3): groups recs by `alert_id` and renders each under its
+  parent alert banner. The once-per-section disclaimer
+  (`"Suggestion only — press k to act manually"`, mirroring
+  `ux_contract::recommendation::display::RECOMMENDATION_NOT_
+  ACTIONABLE` verbatim) renders ONCE at the bottom of the
+  section.
+
+- **TUI rec rendering** (`src/ui/panels/alerts.rs`, C4): each
+  visible alert banner is followed by a `↳`-prefixed sub-
+  bullet line with the rec label (in the rec's severity color,
+  bold) and an optional muted-italic reason line. Per-entry
+  projection (`project_one(entry, state)` PER alert) preserves
+  the natural 1-to-1 mapping; a prior HashMap-based
+  implementation caused a 1-to-many explosion (3 OomDetected
+  banners × 3 recs ⇒ 23 lines vs expected 11). `region_height`
+  mirrors the per-entry accounting so the layout matches
+  `build_lines` line-for-line. Once-per-section disclaimer at
+  the bottom.
+
+- **Consumer-side authority-lock guard**
+  (`tests/recommendation_observe_only_guard.rs`, C5): scans
+  `src/recommend.rs` for actuation imports and tokens after
+  stripping comments and string literals. Negative
+  self-test (`guard_would_catch_a_real_breach`) confirms the
+  scanner detects a synthetic `use Executor;
+  Executor::new()` breach. Comment stripper self-test
+  (`comment_stripper_does_not_clobber_code`) confirms it
+  doesn't swallow real code tokens.
+
+### Changed
+
+- **`ux_contract` path-dep bumped** from `0.3.13` to `0.3.14`
+  (consumes `Recommendation`, `SuggestedAction`,
+  `RecommendationScope`, `RecommendationSeverity`,
+  `RecommendedTarget`, the `display::*` template family,
+  `AlertId::ThermalPressure`, `alerts::THERMAL_PRESSURE`,
+  `REC_MAX_VISIBLE` = 3, `REC_TARGETS_MAX` = 3,
+  `thresholds::THERMAL_AMBER_C` / `THERMAL_RED_C`).
+
+- **`AlertId` exhaustive matches** consume the new
+  `ThermalPressure` variant at five sites: `alert_tier`
+  (Attention tier), `template_for`
+  (`ux_contract::alerts::THERMAL_PRESSURE`), `priority_tier`
+  (tier 1), `alert_id_to_str` (`"thermal_pressure"`), and the
+  existing alerts-panel tests.
+
+- **`LiveValues` grew a `temp_c: Option<f32>` field**, populated
+  by `live_values_for` from the hottest thermal zone when the
+  alert is `ThermalPressure`. `substitute` handles the new
+  `{temp_c}` template placeholder.
+
+### Internal
+
+- **Side fix in the copy-guard**
+  (`tests/copy_strings_via_contract.rs`):
+  `extract_string_literal` previously iterated bytes and cast
+  each `b as char` — multi-byte UTF-8 glyphs like `↳` were
+  mangled into per-byte cast chars and the allowlist
+  comparison silently mismatched. Rewritten to iterate
+  `chars()` directly so multi-byte separators work. `↳` and
+  `  ↳ ` added to `SEPARATOR_ALLOWLIST` as decoration glyphs
+  on par with `·` and `—`; the actual rec copy still comes
+  from `ux_contract::recommendation::display::*`.
+
+### Tests
+
+- 951 passing (was 803 pre-Phase-3, +148 across v1.1.11 → v1.2.0).
+- New rec-projection tests:
+  `vram_pressure_projects_to_single_target_consider_kill`,
+  `ram_pressure_projects_to_top_n_by_rss`,
+  `thermal_pressure_critical_when_red_threshold_crossed`,
+  `workload_exited_is_suppressed`, `governor_armed_is_suppressed`,
+  `severity_tracks_underlying_alert`,
+  `targets_cap_at_REC_TARGETS_MAX`, plus 2 label rendering tests
+  (9 total in `src/recommend.rs`).
+- ThermalPressure firing: `thermal_pressure_alert_fires_when_
+  zone_crosses_amber`, `thermal_pressure_alert_silent_below_
+  amber`.
+- TUI rec rendering: `disclaimer_renders_once_per_section`,
+  `disclaimer_absent_when_no_recs_visible`,
+  `region_height_matches_visible_plus_overflow_indicator`
+  (updated for v1.2.0 line accounting),
+  `alert_region_renders_plus_n_when_active_count_above_three`
+  (updated for v1.2.0: 3 banners + 6 rec lines + 1 +N more +
+  1 disclaimer = 11).
+- Wire serialization: `wire_recommendation_serialises_with_
+  pre_rendered_label`, `wire_snapshot_recommendations_default_
+  empty_for_backward_compat`, plus end-to-end projection from
+  RuntimeState through wire.
+- Authority-lock guard: 3 tests
+  (`recommendation_path_has_no_actuation_handle`,
+  `guard_would_catch_a_real_breach`,
+  `comment_stripper_does_not_clobber_code`).
+
+### Phase 3 closes here
+
+With v1.2.0 shipped, `docs/PHASE3_DESIGN.md` is marked
+**COMPLETE**. The Phase 3 release sequence —
+v1.1.11 (AlertState→Runtime) → v1.1.12 (vitals subsystem) →
+v1.1.13 (alerts on the web wire) → v1.2.0 (recommendations
+capstone) — has landed in order. The authority lock holds at
+both type and wiring boundaries; the operator still pulls the
+trigger.
+
 ## [1.1.13] — 2026-06-03 — Alerts on the web wire (closes v1.1.11 deferral)
 
 Phase 3 foundation step before the v1.2.0 capstone. DISPATCH 42

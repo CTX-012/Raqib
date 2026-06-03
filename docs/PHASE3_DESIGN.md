@@ -57,7 +57,20 @@ Three incremental releases, each independently bisectable:
 | **v1.1.11** | AlertState → Runtime (foundation) + this design doc | None | **shipped** |
 | **v1.1.12** | Vitals subsystem (thermal collection + wire + TUI + Svelte) | v0.3.13 (`host_vitals` + `thermals::THERMAL_*_C`) | **shipped** |
 | **v1.1.13** | Alerts on the web wire (`WireAlertEntry`) — closes v1.1.11 deferral | v0.3.13 (`AlertId` + `alerts::*` templates already present) | **shipped** |
-| **v1.2.0** | Ranked recommendations surface + thermal alert firing | v0.3.14 (recommend templates) | upcoming |
+| **v1.2.0** | Ranked recommendations surface + thermal alert firing | v0.3.14 (recommend templates) | **shipped** |
+
+**Phase 3 COMPLETE** as of v1.2.0 (2026-06-03). The capstone
+landed all four scope items: (a) `Recommendation` projection
+from `RuntimeState`, (b) `AlertId::ThermalPressure` firing on
+the v1.1.12 thermal infrastructure, (c) wire + Svelte
+`RecommendationCard` rendering with the once-per-section
+disclaimer, (d) the consumer-side authority-lock guard
+(`tests/recommendation_observe_only_guard.rs`) pinning the
+"display only, no callable" boundary at the wiring layer to
+complement the contract's type-level `SuggestedAction: Copy`
+enforcement. Operator authority lock holds: `default_ai_action
+= Allow` unchanged, `send_sigterm` stays manual-only, the user
+acts via the existing `k` → kill_confirm card → SIGTERM path.
 
 ### v1.1.11 — AlertState lift
 
@@ -170,18 +183,83 @@ What landed:
   is v1.2.0+ scope and was not asked for in this dispatch).
 - NO actuation surface.
 
-### v1.2.0 — recommendations (depends on `ux_contract` v0.3.14)
+### v1.2.0 — recommendations (shipped; depends on `ux_contract` v0.3.14)
 
-Ranked recommendations: instead of a single alert firing per
-breach, the surface presents the operator with a ranked list
-("kill this", "reduce batch size", "wait it out"). Templates +
-ranking logic land in `ux_contract` v0.3.14, held until the
-v1.2.0 UI surface design is locked.
+Shipped 2026-06-03 via DISPATCH 45. The Phase 3 capstone.
 
-This is the FIRST phase where the surface is something more
-opinionated than "here's a fact about the system." Even so,
-the operator still pulls the trigger — Phase 3 stays
-observe-only.
+What landed (the six-commit plan C1–C6):
+
+- **C1 — `src/recommend.rs`**: derived-view projection
+  `project_recommendations(state: &RuntimeState) ->
+  Vec<Recommendation>`. Sorted by severity, capped at
+  `REC_MAX_VISIBLE` = 3. Internal `project_one(&AlertEntry,
+  &RuntimeState) -> Option<Recommendation>` per-entry so two
+  visible alerts on the same `AlertId` for different PIDs get
+  distinct recs. Per-alert-id signal table:
+
+  | AlertId            | Action                | Targets       |
+  | ---                | ---                   | ---           |
+  | `VramPressure`     | `ConsiderKill`        | single (PID)  |
+  | `KvPressure`       | `ConsiderKill`        | single (PID)  |
+  | `RamPressure`      | `ConsiderKill`        | top-3 by rss  |
+  | `ThermalPressure`  | `ConsiderReduceLoad`  | EMPTY         |
+  | `OomDetected`      | `ConsiderRestart`     | single (PID)  |
+  | `WorkloadExited`   | (suppressed)          | -             |
+  | `GovernorArmed`    | (suppressed)          | -             |
+
+- **C2 — `AlertId::ThermalPressure` firing** in `src/runtime.rs`.
+  `observe_alerts` checks `state.host_vitals.thermal_zones`
+  per tick and fires the alert when any zone is `>=
+  THERMAL_AMBER_C` (85 °C); severity bumps to Critical when
+  the hottest zone crosses `THERMAL_RED_C` (95 °C). The
+  v1.1.12 thermal subsystem was foundation; v1.2.0 lights up
+  the alert. `LiveValues` grew a `temp_c: Option<f32>` field
+  for `{temp_c}` substitution.
+
+- **C3 — Web wire + Svelte**. `WireRecommendation` +
+  `WireRecommendedTarget` on the wire,
+  `WireSnapshot.recommendations` `#[serde(default)]` for
+  backward compat. Server pre-classifies severity and pre-
+  renders the label; the TS layer does NO template
+  substitution. New `RecommendationCard.svelte` reads the
+  pre-classified severity → tailwind class mapping; NO
+  `on:click`, NO action button. `AlertsPanel.svelte` groups
+  recs by `alert_id` and renders the once-per-section
+  disclaimer.
+
+- **C4 — TUI rendering** in `src/ui/panels/alerts.rs`. Each
+  visible alert banner is followed by a `↳`-prefixed sub-
+  bullet line (rec label in the rec's severity color, bold)
+  and an optional muted-italic reason line. Per-entry
+  `project_one(...)` call preserves the 1-to-1 mapping (a
+  prior HashMap implementation caused a 1-to-many explosion).
+  `region_height` mirrors the per-entry accounting line-for-
+  line. The disclaimer
+  (`ux_contract::recommendation::display::RECOMMENDATION_NOT
+  _ACTIONABLE` = `"Suggestion only — press k to act
+  manually"`) renders ONCE at the bottom.
+
+- **C5 — Consumer authority-lock guard**
+  (`tests/recommendation_observe_only_guard.rs`). Scans
+  `src/recommend.rs` for actuation imports (`Executor`,
+  `send_sigterm`, `SIGTERM`/`SIGKILL`, `nix::sys::signal`,
+  `libc::kill`, `kill_pid`/`kill_workload`, `Box<dyn Fn`,
+  `governor::audit`/`executor`/`policy`) after stripping
+  comments and strings. Includes a negative self-test
+  against a synthetic breach. Pins the operator-locked
+  boundary at the consumer side, complementing the
+  contract's `SuggestedAction: Copy` type-level lock.
+
+- **C6 — Polish**. Version bump (1.1.13 → 1.2.0), this
+  CHANGELOG entry, `Cargo.lock` self-version refresh, this
+  `docs/PHASE3_DESIGN.md` update marking Phase 3 COMPLETE.
+
+**Authority lock preserved (operator-signed, binding):**
+recommendations are DISPLAY STRINGS the user reads. NEVER
+callable, NEVER auto-triggered. The user acts ONLY via the
+existing manual `k` → kill_confirm card → SIGTERM path.
+`default_ai_action = Allow` unchanged. `send_sigterm` stays
+manual-only. No `--enable-governor` flag. No new keybinding.
 
 ## 4. `ux_contract` prereqs
 
@@ -189,7 +267,7 @@ observe-only.
 |---|---|---|
 | v0.3.12 | `ActivityState` (lifted in v1.1.10) | shipped |
 | v0.3.13 | `host_vitals::{HostVitals, ThermalZone}` + `thresholds::THERMAL_AMBER_C` (85.0) / `THERMAL_RED_C` (95.0). Consumed by v1.1.12. | shipped |
-| v0.3.14 | Recommendation templates + ranking enum + thermal alert IDs | held until v1.2.0 surface designed |
+| v0.3.14 | Recommendation templates + ranking enum + thermal alert IDs (`Recommendation`, `SuggestedAction`, `RecommendationScope`, `RecommendationSeverity`, `RecommendedTarget`, `display::*` templates, `AlertId::ThermalPressure`, `alerts::THERMAL_PRESSURE`, `REC_MAX_VISIBLE` = 3, `REC_TARGETS_MAX` = 3). Consumed by v1.2.0. | shipped |
 
 If a v1.1.11+ implementation step reveals a contract gap
 (missing string, alert ID, threshold, type), the dispatch must

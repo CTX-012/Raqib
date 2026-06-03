@@ -77,6 +77,22 @@ pub struct WireSnapshot {
     /// got alert emission but the web wire didn't.
     #[serde(default)]
     pub alerts: Vec<WireAlertEntry>,
+    /// v1.2.0 / DISPATCH 45 — render-time projections from the
+    /// visible alerts above. Phase 3 capstone field; each entry
+    /// carries a pre-classified severity, the rendered label
+    /// string, and ranked target list per the contract's
+    /// `Recommendation` shape. Empty when no alerts project to
+    /// recs (e.g. only `GovernorArmed` / `WorkloadExited` are
+    /// visible, both suppressed by the recommendation projection).
+    /// `#[serde(default)]` for the same additive guarantee
+    /// `alerts` and `thermal_zones` carry.
+    ///
+    /// AUTHORITY LOCK: these are DISPLAY STRINGS the user reads.
+    /// The wire carries no executor, no callback, no signal.
+    /// `WireSuggestedAction` is the snake-case projection of the
+    /// contract's discriminator-only `SuggestedAction` enum.
+    #[serde(default)]
+    pub recommendations: Vec<WireRecommendation>,
 }
 
 /// Mission-line counts shown at the top of the dashboard.
@@ -295,6 +311,139 @@ impl WireAlertEntry {
     }
 }
 
+/// v1.2.0 / DISPATCH 45 — wire-stable shape for one recommendation.
+/// Mirrors the contract `Recommendation` plus a server-rendered
+/// label string and a snake-case-projected action discriminator,
+/// so the Svelte renderer maps directly to a color + line of
+/// text without re-running the template substitution in TypeScript.
+///
+/// AUTHORITY LOCK: this struct is DATA. `action: WireSuggestedAction`
+/// is a snake-case string projection of the contract's
+/// discriminator-only `SuggestedAction` enum. There is no
+/// callable, no executor handle, no signal path reachable from
+/// this value.
+#[derive(Debug, Clone, Serialize)]
+pub struct WireRecommendation {
+    /// Snake-case identifier of the underlying alert
+    /// (`"vram_pressure"`, `"thermal_pressure"`, etc.). Lets the
+    /// dashboard correlate a rec with the alert it derives from
+    /// for stylistic grouping.
+    pub alert_id: &'static str,
+    /// `"workload"` or `"system"`. Mirrors
+    /// `ux_contract::recommendation::RecommendationScope`.
+    pub scope: &'static str,
+    /// Pre-classified severity: `"info" / "warning" / "critical"`.
+    /// Mirrors `RecommendationSeverity`. Drives ordering and
+    /// color in the renderer.
+    pub severity: WireRecommendationSeverity,
+    /// Snake-case action discriminator:
+    /// `"consider_kill" / "consider_reduce_load" / "consider_restart"`.
+    /// The Svelte dashboard pattern-matches on this string for
+    /// any per-action styling beyond severity.
+    pub action: WireSuggestedAction,
+    /// Ranked targets. Empty for system-scope recs without
+    /// per-PID attribution (thermal).
+    pub targets: Vec<WireRecommendedTarget>,
+    /// Server-rendered label (template substituted server-side
+    /// via `recommend::render_label`). The Svelte renderer shows
+    /// this string verbatim; NO template substitution in TS.
+    pub label: String,
+    /// Producer-formatted rationale rendered as a one-line
+    /// sub-text under the label. Single source of truth for
+    /// rationale wording across TUI and web.
+    pub reason: String,
+}
+
+/// v1.2.0 / DISPATCH 45 — one ranked target of a recommendation.
+/// Carries the PID, the display name, and an optional
+/// metric-snapshot evidence string captured at fire time.
+#[derive(Debug, Clone, Serialize)]
+pub struct WireRecommendedTarget {
+    pub pid: u32,
+    pub name: String,
+    pub evidence: Option<String>,
+}
+
+/// v1.2.0 / DISPATCH 45 — server-side projection of the
+/// contract's `RecommendationSeverity` enum to a snake-case wire
+/// string. Mirrors the `WireAlertSeverity` / `WireThermalSeverity`
+/// pattern.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WireRecommendationSeverity {
+    Info,
+    Warning,
+    Critical,
+}
+
+/// v1.2.0 / DISPATCH 45 — server-side projection of the
+/// contract's `SuggestedAction` enum.
+///
+/// AUTHORITY LOCK: this is a snake-case STRING projection. There
+/// is no `WireSuggestedAction::execute()`, no callback, no signal
+/// path reachable from a value of this type. The Svelte dashboard
+/// pattern-matches on the literal for styling; the action a
+/// recommendation suggests is always taken via the operator's
+/// existing manual flow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WireSuggestedAction {
+    ConsiderKill,
+    ConsiderReduceLoad,
+    ConsiderRestart,
+}
+
+impl WireRecommendation {
+    /// Project one contract `Recommendation` onto the wire.
+    /// Calls `crate::recommend::render_label` for the
+    /// server-rendered label string so the TUI and web read
+    /// the IDENTICAL label.
+    ///
+    /// AUTHORITY LOCK: input is a `&Recommendation` (pure data
+    /// from the projection). No executor, no callback, no signal
+    /// path. Output is `WireRecommendation` (pure data). The
+    /// `recommendation_path_has_no_actuation_handle` test in C5
+    /// guards the module-level invariant.
+    fn from_rec(rec: &ux_contract::recommendation::Recommendation) -> Self {
+        use ux_contract::recommendation::{
+            RecommendationScope, RecommendationSeverity, SuggestedAction,
+        };
+        let severity = match rec.severity {
+            RecommendationSeverity::Info => WireRecommendationSeverity::Info,
+            RecommendationSeverity::Warning => WireRecommendationSeverity::Warning,
+            RecommendationSeverity::Critical => WireRecommendationSeverity::Critical,
+        };
+        let action = match rec.action {
+            SuggestedAction::ConsiderKill => WireSuggestedAction::ConsiderKill,
+            SuggestedAction::ConsiderReduceLoad => WireSuggestedAction::ConsiderReduceLoad,
+            SuggestedAction::ConsiderRestart => WireSuggestedAction::ConsiderRestart,
+        };
+        let scope = match rec.scope {
+            RecommendationScope::Workload => "workload",
+            RecommendationScope::System => "system",
+        };
+        let targets = rec
+            .targets
+            .iter()
+            .map(|t| WireRecommendedTarget {
+                pid: t.pid,
+                name: t.name.clone(),
+                evidence: t.evidence.clone(),
+            })
+            .collect();
+        let label = crate::recommend::render_label(rec);
+        Self {
+            alert_id: alert_id_to_str(rec.alert_id),
+            scope,
+            severity,
+            action,
+            targets,
+            label,
+            reason: rec.reason.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct WireGpu {
     pub vram_pct: f64,
@@ -404,6 +553,16 @@ impl WireSnapshot {
             .iter()
             .map(|entry| WireAlertEntry::from_entry(entry, state))
             .collect::<Vec<_>>();
+        // v1.2.0 / DISPATCH 45 — recommendation projection rides
+        // alongside the alerts. `recommend::project_recommendations`
+        // is the SAME derived view both surfaces consume; the TUI
+        // calls it directly, the wire calls it here. Both pass
+        // a read-only `&RuntimeState` and receive a `Vec` of pure
+        // data values — no executor, no callback.
+        let recommendations = crate::recommend::project_recommendations(state)
+            .iter()
+            .map(WireRecommendation::from_rec)
+            .collect::<Vec<_>>();
         Self {
             tick: state.tick_count,
             server_time: Utc::now(),
@@ -412,6 +571,7 @@ impl WireSnapshot {
             workloads,
             activity,
             alerts,
+            recommendations,
         }
     }
 
@@ -439,6 +599,7 @@ impl WireSnapshot {
             workloads: Vec::new(),
             activity: Vec::new(),
             alerts: Vec::new(),
+            recommendations: Vec::new(),
         }
     }
 }
@@ -765,6 +926,111 @@ mod tests {
             0,
             "empty snapshot must carry an empty alerts list",
         );
+        // v1.2.0 — recommendations is the new additive field;
+        // same additive-default shape as alerts and thermal_zones.
+        assert!(
+            v["recommendations"].is_array(),
+            "v1.2.0 wire schema must carry recommendations as an array",
+        );
+        assert_eq!(
+            v["recommendations"].as_array().unwrap().len(),
+            0,
+            "empty snapshot must carry an empty recommendations list",
+        );
+    }
+
+    /// v1.2.0 / DISPATCH 45 — end-to-end: drive AlertState with a
+    /// VRAM-pressure alert + a thermal scenario, compose a wire
+    /// snapshot, and assert the recommendations field carries
+    /// the projected recs with snake-case action/scope/severity
+    /// fields the Svelte dashboard pattern-matches on.
+    ///
+    /// AUTHORITY LOCK: this test exercises the wire mapping; no
+    /// kill / signal / actuation reached.
+    #[test]
+    fn recommendations_project_to_wire() {
+        use crate::ui::alerts::WorkloadRef;
+        use std::time::{Duration, Instant};
+        use ux_contract::AlertId;
+
+        let mut runtime = Runtime::new(Config::default());
+        let now = Instant::now();
+        // VRAM pressure on a single workload → ConsiderKill, Warning.
+        runtime.state_mut().alerts.observe(
+            now,
+            WorkloadRef::workload(4523, "Llama-70B"),
+            AlertId::VramPressure,
+            true,
+        );
+        runtime.state_mut().alerts.observe(
+            now + Duration::from_secs(5),
+            WorkloadRef::workload(4523, "Llama-70B"),
+            AlertId::VramPressure,
+            true,
+        );
+
+        let snap = WireSnapshot::from_runtime_state(runtime.state(), &[]);
+        assert!(
+            !snap.recommendations.is_empty(),
+            "VRAM pressure alert MUST project to a wire recommendation",
+        );
+        let r = &snap.recommendations[0];
+        assert_eq!(r.alert_id, "vram_pressure");
+        assert_eq!(r.scope, "workload");
+        assert_eq!(r.severity, WireRecommendationSeverity::Warning);
+        assert_eq!(r.action, WireSuggestedAction::ConsiderKill);
+        assert_eq!(r.targets.len(), 1);
+        assert_eq!(r.targets[0].pid, 4523);
+        // Label was rendered server-side via `recommend::render_label`
+        // — the Svelte renderer reads `label` verbatim.
+        assert!(r.label.contains("PID 4523"), "label: {}", r.label);
+        assert!(r.label.contains("Llama-70B"), "label: {}", r.label);
+
+        // Full snapshot round-trips through JSON cleanly (TS
+        // consumer's parser path).
+        let json = serde_json::to_string(&snap).expect("serialize");
+        let v: serde_json::Value = serde_json::from_str(&json).expect("parse");
+        assert_eq!(
+            v["recommendations"].as_array().unwrap().len(),
+            1,
+            "recommendation must round-trip through JSON",
+        );
+        // Snake-case spellings (drive the TS pattern-match).
+        assert_eq!(v["recommendations"][0]["action"], "consider_kill");
+        assert_eq!(v["recommendations"][0]["severity"], "warning");
+        assert_eq!(v["recommendations"][0]["scope"], "workload");
+    }
+
+    /// v1.2.0 / DISPATCH 45 — pin the snake-case JSON shape for
+    /// `WireSuggestedAction`. The Svelte client matches on the
+    /// literal strings; a future `rename_all` regression here
+    /// would split the surface across the two consumers.
+    #[test]
+    fn suggested_action_serializes_snake_case() {
+        let cases: &[(WireSuggestedAction, &str)] = &[
+            (WireSuggestedAction::ConsiderKill, "\"consider_kill\""),
+            (WireSuggestedAction::ConsiderReduceLoad, "\"consider_reduce_load\""),
+            (WireSuggestedAction::ConsiderRestart, "\"consider_restart\""),
+        ];
+        for (action, expected) in cases {
+            let json = serde_json::to_string(action).expect("serialize");
+            assert_eq!(&json, expected, "{action:?} → {expected}");
+        }
+    }
+
+    /// v1.2.0 / DISPATCH 45 — pin the snake-case JSON shape for
+    /// `WireRecommendationSeverity`.
+    #[test]
+    fn recommendation_severity_serializes_snake_case() {
+        let cases: &[(WireRecommendationSeverity, &str)] = &[
+            (WireRecommendationSeverity::Info, "\"info\""),
+            (WireRecommendationSeverity::Warning, "\"warning\""),
+            (WireRecommendationSeverity::Critical, "\"critical\""),
+        ];
+        for (sev, expected) in cases {
+            let json = serde_json::to_string(sev).expect("serialize");
+            assert_eq!(&json, expected, "{sev:?} → {expected}");
+        }
     }
 
     /// v1.1.13 / DISPATCH 42 — `WireSnapshot.alerts` is an additive

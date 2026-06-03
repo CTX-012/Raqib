@@ -24,6 +24,22 @@ export interface WireSnapshot {
     // binary is in the field (additive-default guarantee, same
     // shape as `thermal_zones?` and `activity_state?`).
     alerts?: WireAlertEntry[];
+    // v1.2.0 / DISPATCH 45 — render-time recommendation projection.
+    // Phase 3 capstone field; each entry derives from one of the
+    // visible alerts above and carries a server-rendered label,
+    // a snake-case action discriminator, and ranked targets.
+    // Empty when no alerts project to recs (e.g. only
+    // GovernorArmed / WorkloadExited visible — both suppressed by
+    // the projection). Optional for backward compat with
+    // pre-v1.2.0 server payloads.
+    //
+    // AUTHORITY LOCK: these are DISPLAY STRINGS the user reads.
+    // The TS layer renders the `label` verbatim and maps the
+    // severity literal to a tailwind class. There is no action
+    // callback, no kill button — the user acts via the existing
+    // manual TUI `k` keybinding flow (the disclaimer reminds
+    // them: "Suggestion only — press k to act manually").
+    recommendations?: WireRecommendation[];
 }
 
 export interface WireAlertEntry {
@@ -48,6 +64,39 @@ export interface WireAlertEntry {
     // `ux_contract::alerts::*` template + `substitute(...)` pipeline
     // the TUI uses; DO NOT do template substitution in TS.
     text: string;
+}
+
+export interface WireRecommendation {
+    // Snake-case identifier of the underlying alert that drove
+    // this rec (e.g. 'vram_pressure', 'thermal_pressure').
+    alert_id: string;
+    // 'workload' or 'system' — mirrors the contract's
+    // RecommendationScope.
+    scope: 'workload' | 'system';
+    // Pre-classified severity. Renderer maps the literal to a
+    // tailwind class; DO NOT introduce numeric thresholds here —
+    // the contract is the single source of truth.
+    severity: 'info' | 'warning' | 'critical';
+    // Snake-case action discriminator. The Svelte dashboard
+    // pattern-matches on this literal for any per-action styling
+    // beyond severity. AUTHORITY LOCK: this is a string, NOT a
+    // callable. There is no `executeAction()` in the TS layer.
+    action: 'consider_kill' | 'consider_reduce_load' | 'consider_restart';
+    // Ranked targets. Empty for system-scope recs without per-PID
+    // attribution (thermal).
+    targets: WireRecommendedTarget[];
+    // Server-rendered label string. The Svelte renderer shows
+    // this verbatim; NO template substitution in TS.
+    label: string;
+    // Producer-formatted rationale rendered as a one-line
+    // sub-text under the label.
+    reason: string;
+}
+
+export interface WireRecommendedTarget {
+    pid: number;
+    name: string;
+    evidence: string | null;
 }
 
 export interface WireMission {

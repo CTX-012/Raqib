@@ -169,7 +169,13 @@ pub fn substitute(template: &str, entry: &AlertEntry, live: &LiveValues) -> Stri
     out
 }
 
-fn template_for(alert: AlertId) -> &'static str {
+/// v1.1.13 / DISPATCH 42 — visibility widened to `pub(crate)` so
+/// the web wire-builder (`src/web/wire.rs::WireAlertEntry::from_entry`)
+/// can reach the same `ux_contract::alerts::*` template the TUI
+/// renders against. Same template → same wording on both surfaces
+/// → operator sees the SAME alert text whether they're on the TUI
+/// or the web dashboard. No new template/threshold introduced.
+pub(crate) fn template_for(alert: AlertId) -> &'static str {
     match alert {
         AlertId::VramPressure => ux_contract::alerts::VRAM_PRESSURE,
         AlertId::RamPressure => ux_contract::alerts::RAM_PRESSURE,

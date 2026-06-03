@@ -32,9 +32,10 @@
 //!
 //! Per-field: if the config supplies `Some(v)`, the field becomes
 //! `v`; otherwise the contract default. The struct is then
-//! [`EffectiveThresholds::validate`]'d before being returned —
-//! invalid combinations (amber ≥ red, critical < attention,
-//! out-of-range pct) produce [`crate::config::ConfigError::Invalid`]
+//! `EffectiveThresholds::validate`'d before being returned (private
+//! method — not part of the public API) — invalid combinations
+//! (amber ≥ red, critical < attention, out-of-range pct) produce
+//! [`crate::config::ConfigError::Invalid`]
 //! with an operator-actionable message. **No silent clamp.** v1.0.1's
 //! phantom-kill lesson stands: a system that silently overrides
 //! operator intent is worse than one that fails to start with a

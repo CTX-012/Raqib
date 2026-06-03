@@ -425,13 +425,16 @@ impl Runtime {
         let policy = config.build_policy();
         let governor = GovernorExecutor::new(policy);
         let manual_killer = ManualKiller::new();
-        let mut state = RuntimeState::default();
-        state.thresholds = thresholds;
-        // v1.3.1 — wire the resolved sustain into AlertState so the
-        // pressure-pending gate honours the operator's [thresholds]
-        // override. Pre-v1.3.1 the sustain was a contract const read
-        // inside `transition` directly.
-        state.alerts = crate::ui::alerts::AlertState::new(thresholds.alert_sustain_secs);
+        // v1.3.1 — construct RuntimeState with the resolved
+        // thresholds + alert sustain in one struct-literal so clippy
+        // doesn't flag the post-default reassignments. The other
+        // fields read from `RuntimeState::default()` (cheap — every
+        // remaining field is an empty container or `None`).
+        let state = RuntimeState {
+            thresholds,
+            alerts: crate::ui::alerts::AlertState::new(thresholds.alert_sustain_secs),
+            ..RuntimeState::default()
+        };
         let audit_writer = config.runtime.audit_log().and_then(|p| {
             AuditWriter::open(&p)
                 .inspect_err(|e| tracing::error!(error = %e, "failed to open audit log; continuing without persistence"))

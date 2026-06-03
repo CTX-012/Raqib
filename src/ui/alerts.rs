@@ -136,7 +136,7 @@ enum SlotState {
 /// v1.3.1 / DISPATCH 53 — gains `sustain_secs`, the
 /// resolved-effective alert-sustain window. Pre-v1.3.1 the sustain
 /// was a contract const read inline at `transition`; with the
-/// [thresholds] config layer the value flows from
+/// `[thresholds]` config layer the value flows from
 /// `EffectiveThresholds::alert_sustain_secs`. The state stores it
 /// at construction so per-tick `observe` calls don't have to thread
 /// it through every call site.
@@ -167,7 +167,7 @@ impl Default for AlertState {
 impl AlertState {
     /// v1.3.1 — clean break from the previous `new()` -> `default()`
     /// pattern. The sustain window is now a per-instance value
-    /// resolved against the operator's [thresholds] config; tests
+    /// resolved against the operator's `[thresholds]` config; tests
     /// that want the contract default call `AlertState::default()`
     /// or `AlertState::new(ALERT_SUSTAIN_SECS)`.
     pub fn new(sustain_secs: u64) -> Self {

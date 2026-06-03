@@ -6,6 +6,127 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project aims to adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 once `v1.0.0` is tagged. Until then, minor versions may include breaking changes.
 
+## [1.3.1] — 2026-06-03 — Phase 4 step 2: hybrid threshold config
+
+Phase 4's deployment-threshold-override layer. The contract's class-2
+constants (`THERMAL_AMBER_C / RED_C`, `VRAM/RAM/KV_*_PCT`,
+`ALERT_SUSTAIN_SECS`) become **per-deployment-overridable defaults**:
+an operator's `[thresholds]` section in `edge_monitor.toml` shadows
+them per-host; missing fields fall back to the contract value. Shipped
+via DISPATCH 53 against [`docs/PHASE4_DESIGN.md`](docs/PHASE4_DESIGN.md).
+
+**AUTHORITY LOCK (tenth confirmation):** observe-only. Config tunes
+WHAT VALUE is compared against — never WHAT HAPPENS on comparison.
+The `[thresholds]` schema has no `action_on_breach` field; the
+schema firewall makes auto-action impossible to configure even from
+TOML. `send_sigterm` stays manual-only; `default_ai_action = Allow`
+unchanged; no `--enable-governor` flag.
+
+### Added
+
+- **`EffectiveThresholds` resolver** (`src/thresholds.rs`, C1):
+  resolves `ThresholdsConfig` (9 `Option<>` fields) against the
+  contract defaults, validates the resolved set, returns `Result`.
+  Validation mirrors the contract's compile-time `const_assert`s at
+  runtime: `thermal_red > thermal_amber` (strict), `*_critical_pct
+  >= *_attention_pct` (3 pairs), every `*_pct` in `0..=100`,
+  `alert_sustain_secs in 1..=600`. **Rejects** invalid combinations
+  with an operator-actionable error naming the field + actual vs
+  expected (no silent clamp — v1.0.1 phantom-kill lesson).
+- **`Config.thresholds: ThresholdsConfig`** (`src/config.rs`, C1):
+  new top-level section; `#[serde(default)]` so existing TOMLs load
+  unchanged. Class-3 sampler/correctness constants are deliberately
+  absent from the schema.
+- **`RuntimeState::thresholds: EffectiveThresholds`** (`src/runtime.rs`,
+  C2): plumbed through the platform / observe / classify / render
+  pipelines. `Default` reads contract values.
+- **`Runtime::new` is now fallible** (`-> Result<Self, RuntimeError>`):
+  runs the resolver at construction; bad config produces
+  `RuntimeError::Config(msg)` and the binary aborts startup with
+  the resolver's message verbatim. 22 test call sites updated to
+  `.expect("Runtime::new must succeed with contract default config")`.
+- **`AlertState::new(sustain_secs: u64)` clean break** (`src/ui/alerts.rs`,
+  C3): AlertState stores its sustain window; `transition` reads it
+  instead of the contract const directly. Per-instance value so a
+  resolver override (`alert_sustain_secs = 3` for CI) actually
+  reaches the pressure-Pending gate. Manual `Default` impl reads
+  the contract default so `RuntimeState::default()` still works
+  unchanged in test fixtures.
+
+### Changed
+
+- **`compute_workload_status` gains `&EffectiveThresholds` param**
+  (`src/runtime.rs`, C2): VRAM / RAM / KV attention + critical tier
+  decisions read from the resolved struct.
+  `BASELINE_WARMUP_SECS` and `THROUGHPUT_ATTENTION_RATIO` stay
+  contract const (class-3 absolute — timing semantics).
+- **`degraded_line` gains `&EffectiveThresholds` param**
+  (`src/ui/panels/workloads.rs`, C2): the trigger-label decision
+  ("VRAM 91%") now uses the resolved threshold so an override
+  doesn't produce a row whose status dot says Attention while
+  the expansion line hides the offending metric.
+- **`classify_thermal` gains `&EffectiveThresholds` param**
+  (`src/web/wire.rs`, C2): web wire pre-classified severity follows
+  the override. Helper preserved per DISPATCH 53 decision 5
+  (mirrors v1.1.12's single-source-via-helper pattern).
+- **`thermal_color` / `render_thermal_summary` gain `&EffectiveThresholds`**
+  (`src/ui/panels/vitals.rs`, C2): TUI banner coloring follows
+  the override; no drift between wire JSON and TUI render.
+
+### Docs
+
+- **`edge_monitor.toml.example` gains `[thresholds]`** (C4): every
+  field commented-out (= contract default behavior). Documented with
+  validation rules + Jetson Orin tightening as canonical example.
+- **`docs/configuration.md` gains `[thresholds]` section** (C4):
+  field table, validation rules, override example, explicit
+  "class-3 absolute" callout pointing operators at the issue
+  tracker rather than letting them assume a sampler-knob config
+  flag exists.
+
+### Internal / scope
+
+- **`[samplers]` corrigendum (vs DISPATCH 48)**: the earlier Phase
+  4 sub-version table listed v1.3.1 as `[thresholds] + [samplers]`.
+  Under the locked hybrid model, every sampler-side constant is
+  class-3 ABSOLUTE (each pinned by an existing test: the v1.1.9
+  leak-fix invariant `ROS2_ECHO_PROBE_INTERVAL * 2 <=
+  ROS2_ACTIVITY_STALENESS`, the v1.1.6 Humble timeout, the P5
+  DISPATCH 9B embeddings calibration). v1.3.1 ships `[thresholds]`
+  only; `[samplers]` does NOT exist. `docs/PHASE4_DESIGN.md`
+  updated to reflect this.
+- v1.3.0's `EDGE_MONITOR_THERMAL_ROOT` env override is the
+  testing primitive that lets the new override path's
+  effective-amber threshold be exercised on x86 against a
+  synthetic high-temp zone — the GATES section of the v1.3.1
+  dispatch report captures the combined env-override +
+  config-override proof.
+
+### Tests
+
+- 970 passing (was 952 at v1.3.0; +18: 16 resolver/validator unit
+  tests in C1 + 2 wiring-pin tests in C3).
+- Resolver coverage: defaults round-trip, override happy path, 10
+  rejection cases (thermal pair strict + equal, thermal amber
+  non-positive, vram/ram/kv critical < attention, pct typo above
+  100, pct below zero, sustain at 0, sustain above 600), 3
+  boundary cases (sustain at 1 and 600, pct at 0).
+- Wiring pins:
+  - `alertstate_sustain_wires_from_threshold_config` — sets
+    `alert_sustain_secs = 17`, asserts the AlertState constructed
+    by `Runtime::new` reports `sustain_secs() == 17`.
+  - `runtime_new_rejects_invalid_thresholds` — sets an inverted
+    thermal pair, asserts `Runtime::new` returns
+    `RuntimeError::Config(msg)` whose msg names both fields.
+
+### Process notes
+
+- 5 atomic commits per the Phase 3 cadence (C1 resolver, C2 wiring,
+  C3 AlertState break, C4 docs, C5 chore). Each individually green
+  (the default path reads contract values, so behavior is
+  unchanged at every step). Bisectable.
+- Authority lock held; no actuation surface introduced.
+
 ## [1.3.0] — 2026-06-03 — Phase 4 step 1: EDGE_MONITOR_THERMAL_ROOT env override
 
 Phase 4 opens. The smallest possible step (~35 LoC source +

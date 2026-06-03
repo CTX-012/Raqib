@@ -67,8 +67,9 @@ v1.2.0 HEAD (`26a84b0`). Versions in **bold** mark phase boundaries.
 | v1.1.12 | 2026-06-03 | Vitals subsystem: thermal collection + wire + TUI + Svelte (sysfs only; INA3221 deferred); third observe-only sign-off | Phase 3 |
 | v1.1.13 | 2026-06-03 | Alerts on the web wire (closes v1.1.11 deferral) — `WireAlertEntry`; fourth observe-only sign-off | Phase 3 |
 | **v1.2.0** | 2026-06-03 | **Phase 3 capstone — ranked recommendations** (observe-only). Type firewall (`SuggestedAction: Copy`) + wiring firewall (`tests/recommendation_observe_only_guard.rs`). Fifth observe-only sign-off. | **Phase 3 SHIPPED** |
+| **v1.3.0** | 2026-06-03 | **Phase 4 step 1** — `EDGE_MONITOR_THERMAL_ROOT` env override (~35 LoC). Unblocks Jetson-deferred thermal validation on x86 via synthetic sysfs. Forced compat: consumes `ux_contract` v0.3.16 (`HostVitals.power_rails`). | **Phase 4 IN PROGRESS** |
 
-**Total versions on the ladder: 19 (v1.0.0 through v1.2.0, plus
+**Total versions on the ladder: 20 (v1.0.0 through v1.3.0, plus
 v0.1.0 prototype, minus the retracted v1.1.0).**
 
 ### Phase summaries (what each delivered)
@@ -86,6 +87,12 @@ v0.1.0 prototype, minus the retracted v1.1.0).**
   between each step. The release-sequence breakdown lives in
   [`docs/PHASE3_DESIGN.md`](PHASE3_DESIGN.md) as the per-phase
   pattern this roadmap inherits.
+- **Phase 4 — IN PROGRESS (v1.3.0 shipped 2026-06-03)** — config-
+  driven policy + INA3221 + Jetson hardware pass. v1.3.0 closes the
+  smallest-first-ship step (`EDGE_MONITOR_THERMAL_ROOT`) and
+  unblocks x86 validation of every prior thermal surface. Sub-
+  versions v1.3.1 → v1.3.3 remain scoped per
+  [`docs/PHASE4_DESIGN.md`](PHASE4_DESIGN.md).
 
 ### `ux_contract` ladder (the shared contract crate)
 
@@ -98,6 +105,7 @@ binaries consume via path dep. Tag set: `v0.3.0` through `v0.3.15`.
 | v0.3.13 | `HostVitals` + `ThermalZone` + `thresholds::THERMAL_AMBER_C` (85) / `THERMAL_RED_C` (95) | v1.1.12 vitals |
 | v0.3.14 | `Recommendation`, `SuggestedAction` (Copy firewall), `RecommendationScope`, `RecommendationSeverity`, `RecommendedTarget`, `display::*` templates, `REC_MAX_VISIBLE` = 3, `REC_TARGETS_MAX` = 3, `RECOMMENDATION_NOT_ACTIONABLE` | v1.2.0 capstone |
 | v0.3.15 | `AlertId::ThermalPressure` (template + tier) | v1.2.0 capstone (consumed alongside v0.3.14 surface) |
+| v0.3.16 | `HostVitals.power_rails: Vec<PowerRail>` + `PowerRail` struct (INA3221 type surface) | v1.3.0 (forced compat — empty rails vec) + v1.3.3 (collection) |
 
 The contract crate's authority-lock primitive lives at v0.3.14:
 `SuggestedAction` is `Copy` and has no method-on-value, pinned by
@@ -107,9 +115,11 @@ consumer-side mirror is
 
 ---
 
-## Phase 4 — SCOPED (operator-decided this session)
+## Phase 4 — IN PROGRESS (v1.3.0 shipped)
 
-**Status: SCOPED (no code yet)**
+**Status: IN PROGRESS** — v1.3.0 shipped 2026-06-03; v1.3.1–v1.3.3
+remain scoped. Canonical design lives at
+[`docs/PHASE4_DESIGN.md`](PHASE4_DESIGN.md).
 
 **Scope (locked by operator at DISPATCH 47 §7 + reaffirmed by
 DISPATCH 48 §1 authority line):**
@@ -128,13 +138,13 @@ v1.1.11 → v1.2.0 pattern). Per
 [`INSPECTOR_PHASE4_IMPL.md`](../tests/empirical/audit_2026-06-01/INSPECTOR_PHASE4_IMPL.md)
 §6, the proposed sequence:
 
-| Sub-version | Scope | Size | Contract prereq |
-|---|---|---|---|
-| v1.3.0 | Thermal env override (`EDGE_MONITOR_THERMAL_ROOT`) | ~35 LoC | none |
-| v1.3.1 | `[thresholds]` + `[samplers]` deployment overrides | ~150-250 LoC | **operator decision on contract-vs-config (impl §7 Q1)** |
-| v1.3.2 | `[[workloads]]` per-workload rules + suppression flags | ~200-300 LoC | none beyond v1.3.1 |
-| v1.3.3 | INA3221 power rails | ~180 LoC + ~50 LoC ux_contract v0.3.16 | **Agent A dispatch v0.3.16 FIRST** |
-| Jetson pass | Empirical validation on Orin | empirical-only | none |
+| Sub-version | Scope | Size | Contract prereq | Status |
+|---|---|---|---|---|
+| **v1.3.0** | Thermal env override (`EDGE_MONITOR_THERMAL_ROOT`) | ~35 LoC + forced v0.3.16 compat | `ux_contract` v0.3.16 (landed parallel) | **shipped 2026-06-03** |
+| v1.3.1 | `[thresholds]` + `[samplers]` deployment overrides | ~150-250 LoC | Q1 HYBRID locked (PHASE4_DESIGN §3) | scoped |
+| v1.3.2 | `[[workloads]]` per-workload rules + suppression flags | ~200-300 LoC | none beyond v1.3.1 | scoped |
+| v1.3.3 | INA3221 power rails | ~180 LoC consumer | `ux_contract` v0.3.16 (already landed) | scoped |
+| Jetson pass | Empirical validation on Orin | empirical-only | none | scoped (post-v1.3.3) |
 
 **Total estimate**: ~600-800 LoC + Jetson hardware pass.
 
@@ -149,25 +159,31 @@ the field doesn't exist. The authority audit at
 §8 enumerates every proposed Phase 4 element and confirms each is
 observation- or display-side.
 
-**Design doc**: the canonical Phase 4 design will land at
-`docs/PHASE4_DESIGN.md` when LinuxImpl starts v1.3.0 (same pattern
-as `docs/PHASE3_DESIGN.md`). Until then, the
+**Design doc**: canonical Phase 4 design lives at
+[`docs/PHASE4_DESIGN.md`](PHASE4_DESIGN.md) (landed with v1.3.0 per
+DISPATCH 50). The
 [`INSPECTOR_PHASE4_IMPL.md`](../tests/empirical/audit_2026-06-01/INSPECTOR_PHASE4_IMPL.md)
-report is the authoritative impl-shape reference.
+report remains the verbose impl-shape reference; the design doc
+captures the locked operator decisions (Q1–Q7) verbatim.
 
-**Open decisions for operator** (per impl §9):
+**Operator decisions (LOCKED at DISPATCH 47 §7, DISPATCH 49,
+DISPATCH 50)** — full text in
+[`docs/PHASE4_DESIGN.md`](PHASE4_DESIGN.md) §3:
 
-1. Contract-vs-config tension — which Option (i absolute / ii
-   defaults / iii hybrid)? Inspector lean: **(iii) hybrid**.
-2. Per-workload match shape — exact name (lean) or regex/glob?
-3. `suppress_alerts` vs `suppress_recommendations` — both
-   independently (lean)?
-4. Per-workload rule fields beyond thresholds + suppress flags?
-   Lean: defer to v1.4.x.
-5. Agent A dispatch for ux_contract v0.3.16 — fire in parallel
-   (lean)?
-6. Jetson pass owner — Tester remote SSH or operator?
-7. Sub-version cadence — incremental (lean) or bundled?
+1. Contract-vs-config tension: **Option (iii) HYBRID**. Wire caps
+   absolute; deployment thresholds become defaults
+   (config-overridable); implementation thresholds absolute.
+2. Per-workload match shape: **EXACT name**. Regex/glob deferred
+   to v1.4.x if needed.
+3. Suppression flags: **BOTH** `suppress_alerts` and
+   `suppress_recommendations`, independently togglable.
+4. Per-workload fields beyond thresholds + suppress: **DEFER to
+   v1.4.x**.
+5. Agent A dispatch for `ux_contract` v0.3.16: **fired parallel,
+   already landed**.
+6. Jetson pass owner: **Tester** (or operator hand-off at v1.3.3
+   ship).
+7. Sub-version cadence: **INCREMENTAL** (v1.3.0 → v1.3.3).
 
 ---
 
@@ -191,8 +207,16 @@ scopes them — **not** by silent assumption.
 
 - **ROS2 Hz sampling** — `DESIGN_HANDOFF.md:109, :1248, :1306` mark
   Hz as "deferred to v1.1." The v1.1.x line completed without
-  picking it up. Status: still deferred; no operator-side drop or
-  revive decision yet. **Surface for explicit drop/keep call.**
+  picking it up. **Status (DISPATCH 50 annotation): deprecated by
+  the echo-once probe approach the L13 ros2_shellout sampler
+  ships** (process-level RAM/CPU + activity state + echo-once
+  probes for cadence proxies). Hz-per-topic would need a proper
+  rclrs binding to attach a subscription per node — that's a
+  bigger lift than the original "v1.1 Hz" deferral implied.
+  **Revivable** if/when an operator scopes the rclrs path; until
+  then it stays in this candidate list rather than as a binding
+  deferral. (No operator drop call this dispatch — left as honest
+  "open, not in active scope.")
 
 ### Future contract surface (CANDIDATE)
 
@@ -236,7 +260,7 @@ The authority position, in writing.
 Automated actuation of any kind (auto-kill on threshold breach,
 tick-path `send_sigterm` wiring, `--enable-governor` flag) is **NOT
 a planned phase.** The observe-only line has been held with
-**explicit operator sign-off SEVEN times**:
+**explicit operator sign-off EIGHT times**:
 
 1. **v1.0.1** — Inspector #1 phantom-kill bug → `default_ai_action`
    flipped from `Kill` to `Allow`; the FIRST authority pin.
@@ -252,6 +276,9 @@ a planned phase.** The observe-only line has been held with
 7. **DISPATCH 47** — Phase 4 implementation pre-pass authority
    confirmation; `[[workloads]]` schema designed without an `action_
    on_breach` field as a schema-level firewall.
+8. **v1.3.0 / DISPATCH 50** — Phase 4 step 1 sign-off
+   (`EDGE_MONITOR_THERMAL_ROOT`); env override is pure observation-
+   path config, no actuation surface added.
 
 **Standing position**: automated actuation is a separate, deliberate
 decision requiring its **own dedicated safety-design track**
@@ -357,3 +384,4 @@ TUI-not-task-manager).
 | Date | Change |
 |---|---|
 | 2026-06-03 | Initial author (DISPATCH 49). Built from `git tag -l` + CHANGELOG + Inspector Phase 4 reports + DESIGN_HANDOFF. Phase 4 scope: SCOPED. Five stale deferrals: DROPPED. |
+| 2026-06-03 | Updated for v1.3.0 ship (DISPATCH 50). Phase 4: IN PROGRESS. v1.3.0 shipped row added; ux_contract v0.3.16 row added. Phase 4 design promoted to `docs/PHASE4_DESIGN.md`. Operator decisions Q1-Q7 marked LOCKED. ROS2-Hz annotated as deprecated-by-echo-once / revivable-with-rclrs. Observe-only sign-off count: 7 → 8. |

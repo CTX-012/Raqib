@@ -427,6 +427,11 @@ impl Runtime {
         let manual_killer = ManualKiller::new();
         let mut state = RuntimeState::default();
         state.thresholds = thresholds;
+        // v1.3.1 — wire the resolved sustain into AlertState so the
+        // pressure-pending gate honours the operator's [thresholds]
+        // override. Pre-v1.3.1 the sustain was a contract const read
+        // inside `transition` directly.
+        state.alerts = crate::ui::alerts::AlertState::new(thresholds.alert_sustain_secs);
         let audit_writer = config.runtime.audit_log().and_then(|p| {
             AuditWriter::open(&p)
                 .inspect_err(|e| tracing::error!(error = %e, "failed to open audit log; continuing without persistence"))
@@ -1742,6 +1747,55 @@ mod tests {
     ///
     /// AUTHORITY LOCK: the only mutation is `observe`/`ack`, never
     /// any kill path. v1.1.11 is observation-only.
+    /// v1.3.1 / DISPATCH 53 — wiring pin: an operator's
+    /// `alert_sustain_secs` override in `[thresholds]` reaches the
+    /// `AlertState` constructed at `Runtime::new`. Pre-v1.3.1 the
+    /// sustain was a contract const read inline at `transition`;
+    /// the new path resolves into `EffectiveThresholds`, plumbs
+    /// onto `state.thresholds`, and seeds `AlertState::new(...)`.
+    /// If a refactor breaks the wiring (e.g. drops the explicit
+    /// `state.alerts = AlertState::new(...)` line and re-uses the
+    /// default), this test catches it before the operator's config
+    /// silently no-ops.
+    #[test]
+    fn alertstate_sustain_wires_from_threshold_config() {
+        let mut cfg = Config::default();
+        cfg.thresholds.alert_sustain_secs = Some(17);
+        let rt = Runtime::new(cfg)
+            .expect("override 17 must validate (in 1..=600)");
+        assert_eq!(
+            rt.state().alerts.sustain_secs(),
+            17,
+            "Runtime::new must wire EffectiveThresholds.alert_sustain_secs into AlertState",
+        );
+    }
+
+    /// v1.3.1 / DISPATCH 53 — `Runtime::new` rejects an invalid
+    /// `[thresholds]` config at startup, returning `RuntimeError::Config`
+    /// with the resolver's operator-actionable message. Pinned so a
+    /// refactor that bypasses validation (e.g. drops the `?` chain
+    /// from `Runtime::new` body, or replaces resolve+validate with
+    /// a silent default-fallback) trips this test before shipping.
+    #[test]
+    fn runtime_new_rejects_invalid_thresholds() {
+        let mut cfg = Config::default();
+        cfg.thresholds.thermal_amber_c = Some(95.0);
+        cfg.thresholds.thermal_red_c = Some(85.0); // < amber: invalid
+        // Cannot use `.expect_err(...)` because `Runtime` doesn't
+        // derive Debug (it owns non-Debug Tokio + fingerprinter
+        // handles). Match on the result directly.
+        match Runtime::new(cfg) {
+            Ok(_) => panic!("inverted thermal pair must reject; resolver accepted"),
+            Err(RuntimeError::Config(msg)) => {
+                assert!(
+                    msg.contains("thermal_red_c") && msg.contains("thermal_amber_c"),
+                    "message must name both fields; got: {msg}"
+                );
+            }
+            Err(other) => panic!("expected RuntimeError::Config; got {other:?}"),
+        }
+    }
+
     #[test]
     fn alertstate_constructed_in_headless_mode() {
         use crate::ui::alerts::WorkloadRef;

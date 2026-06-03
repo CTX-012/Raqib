@@ -104,7 +104,7 @@ fn agent_category_serializes_as_agent_string_on_the_wire() {
     // The conversion lives in `WireSnapshot::from_runtime_state`;
     // a default Runtime has no AI processes, so we synthesize the
     // string via the public mapping instead.
-    let runtime = Runtime::new(Config::default());
+    let runtime = Runtime::new(Config::default()).expect("Runtime::new must succeed with contract default config");
     let snap = WireSnapshot::from_runtime_state(runtime.state(), &[]);
     // Default runtime has zero workloads, so we can't directly
     // observe an Agent row on the wire from here. The dispatch
@@ -174,7 +174,7 @@ fn ordered_rows_does_not_synthesize_phantom_rows_for_empty_categories() {
     use edge_monitor::config::Config;
     use edge_monitor::runtime::Runtime;
     use edge_monitor::web::WireSnapshot;
-    let runtime = Runtime::new(Config::default());
+    let runtime = Runtime::new(Config::default()).expect("Runtime::new must succeed with contract default config");
     let snap = WireSnapshot::from_runtime_state(runtime.state(), &[]);
     assert!(
         snap.workloads.is_empty(),

@@ -182,9 +182,14 @@ pub(crate) fn project_one(
             // System-scope, EMPTY targets (honest: thermal is
             // not per-PID attributable on Linux — zones are
             // whole-die / chip-level).
+            //
+            // v1.3.1 — severity bump uses the resolved
+            // `thermal_red_c` from RuntimeState so an operator's
+            // [thresholds] override (typical Jetson Tj_max tuning)
+            // reaches the Critical/Warning split.
             let hottest = hottest_zone_temp(state);
             let crossed_red = hottest
-                .is_some_and(|t| f64::from(t) >= ux_contract::thresholds::THERMAL_RED_C);
+                .is_some_and(|t| f64::from(t) >= state.thresholds.thermal_red_c);
             let severity = if crossed_red {
                 RecommendationSeverity::Critical
             } else {
@@ -393,7 +398,7 @@ mod tests {
     /// scope. The target's PID matches the alert's PID.
     #[test]
     fn vram_pressure_projects_to_single_target_consider_kill() {
-        let mut runtime = Runtime::new(Config::default());
+        let mut runtime = Runtime::new(Config::default()).expect("Runtime::new must succeed with contract default config");
         let state = runtime.state_mut();
         let now = Instant::now();
         state.alerts.observe(
@@ -425,7 +430,7 @@ mod tests {
     /// capped at REC_TARGETS_MAX.
     #[test]
     fn ram_pressure_projects_to_top_n_by_rss() {
-        let mut runtime = Runtime::new(Config::default());
+        let mut runtime = Runtime::new(Config::default()).expect("Runtime::new must succeed with contract default config");
         // Seed AI processes with descending rss values.
         let state_mut = runtime.state_mut();
         state_mut.annotated = vec![
@@ -477,7 +482,7 @@ mod tests {
         use crate::platform::PlatformSnapshot;
         use ux_contract::host_vitals::{HostVitals, ThermalZone};
 
-        let mut runtime = Runtime::new(Config::default());
+        let mut runtime = Runtime::new(Config::default()).expect("Runtime::new must succeed with contract default config");
         // Seed a snapshot with a moderately-hot zone (between
         // amber and red).
         runtime.state_mut().last_snapshot = Some(PlatformSnapshot {
@@ -536,7 +541,7 @@ mod tests {
         use crate::platform::PlatformSnapshot;
         use ux_contract::host_vitals::{HostVitals, ThermalZone};
 
-        let mut runtime = Runtime::new(Config::default());
+        let mut runtime = Runtime::new(Config::default()).expect("Runtime::new must succeed with contract default config");
         runtime.state_mut().last_snapshot = Some(PlatformSnapshot {
             timestamp: chrono::Utc::now(),
             system: crate::platform::SystemMetrics {
@@ -580,7 +585,7 @@ mod tests {
     /// Critical-severity ConsiderRestart rec on the exited PID.
     #[test]
     fn oom_detected_projects_to_consider_restart_critical() {
-        let mut runtime = Runtime::new(Config::default());
+        let mut runtime = Runtime::new(Config::default()).expect("Runtime::new must succeed with contract default config");
         let now = Instant::now();
         runtime.state_mut().alerts.observe_exit(
             now,
@@ -602,7 +607,7 @@ mod tests {
     /// the rationale.
     #[test]
     fn workload_exited_and_governor_armed_are_suppressed() {
-        let mut runtime = Runtime::new(Config::default());
+        let mut runtime = Runtime::new(Config::default()).expect("Runtime::new must succeed with contract default config");
         let now = Instant::now();
         runtime.state_mut().alerts.observe_exit(
             now,
@@ -632,7 +637,7 @@ mod tests {
     /// always sees a bounded list.
     #[test]
     fn recommendations_sorted_critical_first_and_capped() {
-        let mut runtime = Runtime::new(Config::default());
+        let mut runtime = Runtime::new(Config::default()).expect("Runtime::new must succeed with contract default config");
         let now = Instant::now();
         // 4 alerts → 4 recs candidate, but capped at
         // REC_MAX_VISIBLE = 3. Critical (Oom) must sort first.

@@ -5,9 +5,9 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Gauge, Paragraph};
 
 use crate::runtime::RuntimeState;
+use crate::thresholds::EffectiveThresholds;
 use crate::ui::theme::UiTheme;
 use ux_contract::host_vitals::ThermalZone;
-use ux_contract::thresholds::{THERMAL_AMBER_C, THERMAL_RED_C};
 
 use super::panel_block;
 
@@ -25,11 +25,16 @@ const TUI_TOP_THERMAL_ZONES: usize = 3;
 /// the TUI uses one cutoff and the web uses another. The wire and
 /// the TUI each read the contract directly rather than sharing a
 /// helper so neither side accidentally caches a stale classification.
-fn thermal_color(theme: &UiTheme, temp_celsius: f32) -> Color {
+fn thermal_color(theme: &UiTheme, temp_celsius: f32, thresholds: &EffectiveThresholds) -> Color {
+    // v1.3.1 — read from the resolved EffectiveThresholds so an
+    // operator's [thresholds] override reaches the TUI render path,
+    // identical to the wire's `classify_thermal` and the runtime's
+    // ThermalPressure observe call. No drift between the wire JSON
+    // and the TUI banner.
     let c = f64::from(temp_celsius);
-    if c >= THERMAL_RED_C {
+    if c >= thresholds.thermal_red_c {
         theme.critical
-    } else if c >= THERMAL_AMBER_C {
+    } else if c >= thresholds.thermal_amber_c {
         theme.attention
     } else {
         theme.foreground
@@ -66,7 +71,13 @@ fn top_hottest(zones: &[ThermalZone]) -> (Vec<&ThermalZone>, usize) {
 /// `zones.len() <= TUI_TOP_THERMAL_ZONES` we show every zone with
 /// no count line; otherwise we show the top-N and append
 /// `"N of M zones shown"` so the operator knows there's more.
-fn render_thermal_summary(f: &mut Frame, area: Rect, theme: &UiTheme, zones: &[ThermalZone]) {
+fn render_thermal_summary(
+    f: &mut Frame,
+    area: Rect,
+    theme: &UiTheme,
+    zones: &[ThermalZone],
+    thresholds: &EffectiveThresholds,
+) {
     if zones.is_empty() {
         return;
     }
@@ -83,7 +94,7 @@ fn render_thermal_summary(f: &mut Frame, area: Rect, theme: &UiTheme, zones: &[T
     // gauges. Use the hottest-tier color as the dominant signal.
     let dominant = top
         .first()
-        .map(|z| thermal_color(theme, z.temp_celsius))
+        .map(|z| thermal_color(theme, z.temp_celsius, thresholds))
         .unwrap_or(theme.foreground);
     let mut spans: Vec<Span<'static>> = vec![
         Span::styled("thermal: ", Style::default().fg(theme.muted)),
@@ -187,12 +198,17 @@ pub fn render(f: &mut Frame, area: Rect, state: &RuntimeState, theme: &UiTheme) 
     // path; the renderer reads `snap.vitals.thermal_zones` (populated
     // by `platform::host_vitals::collect_host_vitals`) and shows
     // values + color. Alert firing on thermal is v1.2.0+ scope.
-    render_thermal_summary(f, cols[4], theme, &snap.vitals.thermal_zones);
+    render_thermal_summary(f, cols[4], theme, &snap.vitals.thermal_zones, &state.thresholds);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    // v1.3.1 — top-of-file `use` for these moved out alongside the
+    // resolved-threshold refactor; the boundary-case tests below
+    // still pin against the contract defaults, so re-import here
+    // for the cfg(test) block only.
+    use ux_contract::thresholds::{THERMAL_AMBER_C, THERMAL_RED_C};
 
     fn z(label: &str, temp: f32) -> ThermalZone {
         ThermalZone {
@@ -250,27 +266,27 @@ mod tests {
     fn thermal_color_maps_to_contract_thresholds() {
         let theme = UiTheme::default();
         // Below amber → foreground.
-        assert_eq!(thermal_color(&theme, 45.0), theme.foreground);
+        assert_eq!(thermal_color(&theme, 45.0, &EffectiveThresholds::default()), theme.foreground);
         assert_eq!(
-            thermal_color(&theme, THERMAL_AMBER_C as f32 - 0.1),
+            thermal_color(&theme, THERMAL_AMBER_C as f32 - 0.1, &EffectiveThresholds::default()),
             theme.foreground,
             "84.9 °C must color as foreground (just below amber)",
         );
         // Amber boundary: `>=` so 85.0 is attention.
         assert_eq!(
-            thermal_color(&theme, THERMAL_AMBER_C as f32),
+            thermal_color(&theme, THERMAL_AMBER_C as f32, &EffectiveThresholds::default()),
             theme.attention,
         );
         assert_eq!(
-            thermal_color(&theme, THERMAL_RED_C as f32 - 0.1),
+            thermal_color(&theme, THERMAL_RED_C as f32 - 0.1, &EffectiveThresholds::default()),
             theme.attention,
             "94.9 °C must color as attention (just below red)",
         );
         // Red boundary: `>=` so 95.0 is critical.
         assert_eq!(
-            thermal_color(&theme, THERMAL_RED_C as f32),
+            thermal_color(&theme, THERMAL_RED_C as f32, &EffectiveThresholds::default()),
             theme.critical,
         );
-        assert_eq!(thermal_color(&theme, 105.0), theme.critical);
+        assert_eq!(thermal_color(&theme, 105.0, &EffectiveThresholds::default()), theme.critical);
     }
 }

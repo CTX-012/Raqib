@@ -343,7 +343,7 @@ fn from_focused_returns_none_when_pid_not_in_state() {
     use edge_monitor::config::Config;
     use edge_monitor::runtime::Runtime;
 
-    let runtime = Runtime::new(Config::default());
+    let runtime = Runtime::new(Config::default()).expect("Runtime::new must succeed with contract default config");
     let detail = LiveDetail::from_focused(runtime.state(), 99_999);
     assert!(detail.is_none(), "unknown PID must not produce a snapshot");
 }

@@ -32,7 +32,7 @@ use edge_monitor::ui::theme::{UiTheme, current_theme};
 fn rendered_title_fg(theme: &UiTheme) -> Color {
     let backend = TestBackend::new(80, 24);
     let mut terminal = Terminal::new(backend).expect("test backend");
-    let runtime = Runtime::new(Config::default());
+    let runtime = Runtime::new(Config::default()).expect("Runtime::new must succeed with contract default config");
     let app = App::new();
 
     // Prime: Runtime::new doesn't tick on construction, so render

@@ -34,6 +34,11 @@ pub enum RuntimeError {
     Platform(#[from] PlatformError),
     #[error("lifecycle tracking failed: {0}")]
     Lifecycle(String),
+    /// v1.3.1 / DISPATCH 53 — `EffectiveThresholds::resolve` rejected
+    /// the operator's `[thresholds]` config section. Carries the
+    /// resolver's operator-actionable message verbatim.
+    #[error("invalid threshold config: {0}")]
+    Config(String),
 }
 
 /// Per-process annotation paired with its raw classification.
@@ -114,6 +119,19 @@ pub struct RuntimeState {
     /// previous "session-scoped" behaviour (the runtime IS the
     /// session at this layer).
     pub alerts: crate::ui::alerts::AlertState,
+    /// v1.3.1 / DISPATCH 53 — resolved class-2 deployment thresholds.
+    /// Read by `observe_alerts`, `classify_workload_status`, the
+    /// recommendation projector, the vitals + workloads panels, and
+    /// the web wire's `classify_thermal`. The resolver
+    /// ([`crate::thresholds::EffectiveThresholds::resolve`]) runs
+    /// once at `Runtime::new`; bad TOML produces
+    /// `RuntimeError::Config` and the binary fails to start rather
+    /// than silently clamp operator intent.
+    ///
+    /// `Default` (via `RuntimeState::default()`) reads the contract
+    /// defaults — tests that don't care about config get
+    /// contract-value behavior automatically.
+    pub thresholds: crate::thresholds::EffectiveThresholds,
     pub tick_count: u64,
     pub last_tick: Option<Instant>,
 }
@@ -392,11 +410,23 @@ pub struct Runtime {
 }
 
 impl Runtime {
-    pub fn new(config: Config) -> Self {
+    /// v1.3.1 — fallible because `EffectiveThresholds::resolve`
+    /// validates the operator's `[thresholds]` config section and
+    /// rejects invalid combinations (amber ≥ red, critical <
+    /// attention, out-of-range pct, sustain ≤ 0 or > 600). The
+    /// resolver's [`crate::config::ConfigError::Invalid`] message is
+    /// wrapped in [`RuntimeError::Config`] so the binary fails to
+    /// start with an operator-actionable error rather than silently
+    /// clamping. v1.0.1 phantom-kill lesson: silent override is
+    /// worse than a fail-to-start with a fixable error.
+    pub fn new(config: Config) -> Result<Self, RuntimeError> {
+        let thresholds = crate::thresholds::EffectiveThresholds::resolve(&config.thresholds)
+            .map_err(|e| RuntimeError::Config(e.to_string()))?;
         let policy = config.build_policy();
         let governor = GovernorExecutor::new(policy);
         let manual_killer = ManualKiller::new();
-        let state = RuntimeState::default();
+        let mut state = RuntimeState::default();
+        state.thresholds = thresholds;
         let audit_writer = config.runtime.audit_log().and_then(|p| {
             AuditWriter::open(&p)
                 .inspect_err(|e| tracing::error!(error = %e, "failed to open audit log; continuing without persistence"))
@@ -432,7 +462,7 @@ impl Runtime {
         } else {
             Some(expand_tilde(&config.storage.fingerprint_cache))
         });
-        Self {
+        Ok(Self {
             config,
             tracker: LifecycleTracker::new(),
             governor,
@@ -454,7 +484,7 @@ impl Runtime {
             clk_tck: read_clk_tck(),
             sys_for_metrics: platform::new_system_for_metrics(),
             armed_pid: None,
-        }
+        })
     }
 
     pub fn config(&self) -> &Config {
@@ -538,7 +568,14 @@ impl Runtime {
     fn observe_alerts(&mut self, now: Instant) {
         use crate::ui::alerts::WorkloadRef;
         use ux_contract::AlertId;
-        use ux_contract::thresholds::{KV_ATTENTION_PCT, RAM_ATTENTION_PCT, VRAM_ATTENTION_PCT};
+
+        // v1.3.1 — read the resolved thresholds once at the top of
+        // the function. `state.thresholds` is contract defaults when
+        // no [thresholds] config is set; an operator's deployment
+        // overrides reach the comparisons below via the resolver.
+        // Copying eight f64s + one u64 is cheaper than chasing
+        // references through the loop.
+        let thresholds = self.state.thresholds;
 
         // RAM pressure — system-scope, only one slot for the whole host.
         let ram_pct = self
@@ -546,7 +583,7 @@ impl Runtime {
             .last_snapshot
             .as_ref()
             .map(|s| s.system.memory_usage_percent());
-        let ram_breaching = ram_pct.is_some_and(|p| p >= RAM_ATTENTION_PCT);
+        let ram_breaching = ram_pct.is_some_and(|p| p >= thresholds.ram_attention_pct);
         self.state.alerts.observe(
             now,
             WorkloadRef::system(),
@@ -585,14 +622,14 @@ impl Runtime {
                 (Some(total), Some(used)) => Some((used as f64 / total as f64) * 100.0),
                 _ => None,
             };
-            let vram_breaching = vram_pct.is_some_and(|p| p >= VRAM_ATTENTION_PCT);
+            let vram_breaching = vram_pct.is_some_and(|p| p >= thresholds.vram_attention_pct);
             self.state
                 .alerts
                 .observe(now, workload, AlertId::VramPressure, vram_breaching);
 
             // KV cache: LLM-only signal.
             let kv = kv_pct.map(|v| v as f64);
-            let kv_breaching = kv.is_some_and(|p| p >= KV_ATTENTION_PCT);
+            let kv_breaching = kv.is_some_and(|p| p >= thresholds.kv_attention_pct);
             self.state
                 .alerts
                 .observe(now, workload, AlertId::KvPressure, kv_breaching);
@@ -625,7 +662,7 @@ impl Runtime {
                 s.vitals
                     .thermal_zones
                     .iter()
-                    .any(|z| f64::from(z.temp_celsius) >= ux_contract::thresholds::THERMAL_AMBER_C)
+                    .any(|z| f64::from(z.temp_celsius) >= thresholds.thermal_amber_c)
             })
             .unwrap_or(false);
         self.state.alerts.observe(
@@ -1476,12 +1513,17 @@ pub struct WorkloadStatusInputs {
 /// L3 produces only the enum value. Symbol/colour rendering belongs
 /// to L21 + the workloads panel — this function must not reach into
 /// `ratatui` or `Span` types.
-pub fn compute_workload_status(inputs: &WorkloadStatusInputs) -> ux_contract::WorkloadStatus {
+pub fn compute_workload_status(
+    inputs: &WorkloadStatusInputs,
+    thresholds: &crate::thresholds::EffectiveThresholds,
+) -> ux_contract::WorkloadStatus {
     use ux_contract::WorkloadStatus;
-    use ux_contract::thresholds::{
-        BASELINE_WARMUP_SECS, KV_ATTENTION_PCT, KV_CRITICAL_PCT, RAM_ATTENTION_PCT,
-        THROUGHPUT_ATTENTION_RATIO, VRAM_ATTENTION_PCT, VRAM_CRITICAL_PCT,
-    };
+    // v1.3.1 — class-3 absolute constants (BASELINE_WARMUP_SECS,
+    // THROUGHPUT_ATTENTION_RATIO) still come from the contract;
+    // class-2 deployment thresholds (VRAM / RAM / KV pressure) come
+    // from `thresholds` so an operator's [thresholds] override
+    // reaches every status-classification path.
+    use ux_contract::thresholds::{BASELINE_WARMUP_SECS, THROUGHPUT_ATTENTION_RATIO};
 
     if inputs.telemetry_age < Duration::from_secs(BASELINE_WARMUP_SECS) {
         return WorkloadStatus::Loading;
@@ -1489,8 +1531,8 @@ pub fn compute_workload_status(inputs: &WorkloadStatusInputs) -> ux_contract::Wo
 
     let critical = inputs.governor_armed
         || inputs.oom_detected
-        || inputs.vram_pct.is_some_and(|v| v >= VRAM_CRITICAL_PCT)
-        || inputs.kv_cache_pct.is_some_and(|kv| kv >= KV_CRITICAL_PCT);
+        || inputs.vram_pct.is_some_and(|v| v >= thresholds.vram_critical_pct)
+        || inputs.kv_cache_pct.is_some_and(|kv| kv >= thresholds.kv_critical_pct);
     if critical {
         return WorkloadStatus::Critical;
     }
@@ -1502,9 +1544,9 @@ pub fn compute_workload_status(inputs: &WorkloadStatusInputs) -> ux_contract::Wo
                 baseline > 0.0 && current <= baseline * THROUGHPUT_ATTENTION_RATIO
             });
     let attention = throughput_regressed
-        || inputs.vram_pct.is_some_and(|v| v >= VRAM_ATTENTION_PCT)
-        || inputs.ram_pct.is_some_and(|r| r >= RAM_ATTENTION_PCT)
-        || inputs.kv_cache_pct.is_some_and(|kv| kv >= KV_ATTENTION_PCT);
+        || inputs.vram_pct.is_some_and(|v| v >= thresholds.vram_attention_pct)
+        || inputs.ram_pct.is_some_and(|r| r >= thresholds.ram_attention_pct)
+        || inputs.kv_cache_pct.is_some_and(|kv| kv >= thresholds.kv_attention_pct);
     if attention {
         return WorkloadStatus::Attention;
     }
@@ -1669,7 +1711,8 @@ mod tests {
     #[test]
     fn tick_populates_state() {
         let cfg = Config::default();
-        let mut rt = Runtime::new(cfg);
+        let mut rt = Runtime::new(cfg)
+            .expect("Runtime::new must succeed with contract default config");
         // Platform sampling can fail in restricted CI; tolerate that.
         let Ok(state) = rt.tick() else { return };
         assert!(state.last_snapshot.is_some());
@@ -1719,7 +1762,7 @@ mod tests {
         // requiring a real platform snapshot. Construct the state
         // directly with an annotated AI process so `state.ai_processes`
         // yields it, then call observe_alerts.
-        let mut rt = Runtime::new(Config::default());
+        let mut rt = Runtime::new(Config::default()).expect("Runtime::new must succeed with contract default config");
         let armed_pid = 4242u32;
         rt.set_armed_pid(Some(armed_pid));
         // Seed an annotated process matching armed_pid so the
@@ -1814,7 +1857,7 @@ mod tests {
         use ux_contract::AlertId;
         use ux_contract::host_vitals::{HostVitals, ThermalZone};
 
-        let mut rt = Runtime::new(Config::default());
+        let mut rt = Runtime::new(Config::default()).expect("Runtime::new must succeed with contract default config");
         let snap = PlatformSnapshot {
             timestamp: chrono::Utc::now(),
             system: SystemMetrics {
@@ -1861,7 +1904,7 @@ mod tests {
         use ux_contract::AlertId;
         use ux_contract::host_vitals::{HostVitals, ThermalZone};
 
-        let mut rt = Runtime::new(Config::default());
+        let mut rt = Runtime::new(Config::default()).expect("Runtime::new must succeed with contract default config");
         let snap = PlatformSnapshot {
             timestamp: chrono::Utc::now(),
             system: SystemMetrics {
@@ -2053,7 +2096,7 @@ mod tests {
         let mut inputs = healthy_inputs();
         inputs.telemetry_age = Duration::from_secs(0);
         assert_eq!(
-            compute_workload_status(&inputs),
+            compute_workload_status(&inputs, &crate::thresholds::EffectiveThresholds::default()),
             ux_contract::WorkloadStatus::Loading
         );
     }
@@ -2065,7 +2108,7 @@ mod tests {
         inputs.telemetry_age =
             Duration::from_secs(ux_contract::thresholds::BASELINE_WARMUP_SECS - 1);
         assert_eq!(
-            compute_workload_status(&inputs),
+            compute_workload_status(&inputs, &crate::thresholds::EffectiveThresholds::default()),
             ux_contract::WorkloadStatus::Loading
         );
     }
@@ -2075,7 +2118,7 @@ mod tests {
         let mut inputs = healthy_inputs();
         inputs.telemetry_age = Duration::from_secs(ux_contract::thresholds::BASELINE_WARMUP_SECS);
         assert_eq!(
-            compute_workload_status(&inputs),
+            compute_workload_status(&inputs, &crate::thresholds::EffectiveThresholds::default()),
             ux_contract::WorkloadStatus::Healthy
         );
     }
@@ -2085,7 +2128,7 @@ mod tests {
         let mut inputs = healthy_inputs();
         inputs.vram_pct = Some(ux_contract::thresholds::VRAM_CRITICAL_PCT);
         assert_eq!(
-            compute_workload_status(&inputs),
+            compute_workload_status(&inputs, &crate::thresholds::EffectiveThresholds::default()),
             ux_contract::WorkloadStatus::Critical
         );
     }
@@ -2095,7 +2138,7 @@ mod tests {
         let mut inputs = healthy_inputs();
         inputs.vram_pct = Some(ux_contract::thresholds::VRAM_ATTENTION_PCT);
         assert_eq!(
-            compute_workload_status(&inputs),
+            compute_workload_status(&inputs, &crate::thresholds::EffectiveThresholds::default()),
             ux_contract::WorkloadStatus::Attention
         );
     }
@@ -2105,7 +2148,7 @@ mod tests {
         let mut inputs = healthy_inputs();
         inputs.vram_pct = Some(ux_contract::thresholds::VRAM_ATTENTION_PCT - 0.1);
         assert_eq!(
-            compute_workload_status(&inputs),
+            compute_workload_status(&inputs, &crate::thresholds::EffectiveThresholds::default()),
             ux_contract::WorkloadStatus::Healthy
         );
     }
@@ -2115,7 +2158,7 @@ mod tests {
         let mut inputs = healthy_inputs();
         inputs.kv_cache_pct = Some(ux_contract::thresholds::KV_CRITICAL_PCT);
         assert_eq!(
-            compute_workload_status(&inputs),
+            compute_workload_status(&inputs, &crate::thresholds::EffectiveThresholds::default()),
             ux_contract::WorkloadStatus::Critical
         );
     }
@@ -2125,7 +2168,7 @@ mod tests {
         let mut inputs = healthy_inputs();
         inputs.kv_cache_pct = Some(ux_contract::thresholds::KV_ATTENTION_PCT);
         assert_eq!(
-            compute_workload_status(&inputs),
+            compute_workload_status(&inputs, &crate::thresholds::EffectiveThresholds::default()),
             ux_contract::WorkloadStatus::Attention
         );
     }
@@ -2135,7 +2178,7 @@ mod tests {
         let mut inputs = healthy_inputs();
         inputs.ram_pct = Some(ux_contract::thresholds::RAM_ATTENTION_PCT);
         assert_eq!(
-            compute_workload_status(&inputs),
+            compute_workload_status(&inputs, &crate::thresholds::EffectiveThresholds::default()),
             ux_contract::WorkloadStatus::Attention
         );
     }
@@ -2151,7 +2194,7 @@ mod tests {
         let mut inputs = healthy_inputs();
         inputs.ram_pct = Some(99.0);
         assert_eq!(
-            compute_workload_status(&inputs),
+            compute_workload_status(&inputs, &crate::thresholds::EffectiveThresholds::default()),
             ux_contract::WorkloadStatus::Attention
         );
     }
@@ -2161,7 +2204,7 @@ mod tests {
         let mut inputs = healthy_inputs();
         inputs.governor_armed = true;
         assert_eq!(
-            compute_workload_status(&inputs),
+            compute_workload_status(&inputs, &crate::thresholds::EffectiveThresholds::default()),
             ux_contract::WorkloadStatus::Critical
         );
     }
@@ -2171,7 +2214,7 @@ mod tests {
         let mut inputs = healthy_inputs();
         inputs.oom_detected = true;
         assert_eq!(
-            compute_workload_status(&inputs),
+            compute_workload_status(&inputs, &crate::thresholds::EffectiveThresholds::default()),
             ux_contract::WorkloadStatus::Critical
         );
     }
@@ -2182,7 +2225,7 @@ mod tests {
         // 31 tok/s vs baseline 40 → 0.775, below the 0.80 ratio.
         inputs.throughput_vs_baseline = Some((31.0, 40.0));
         assert_eq!(
-            compute_workload_status(&inputs),
+            compute_workload_status(&inputs, &crate::thresholds::EffectiveThresholds::default()),
             ux_contract::WorkloadStatus::Attention
         );
     }
@@ -2194,14 +2237,14 @@ mod tests {
         // × 0.80" → Attention; 32.0 lands on Attention.
         inputs.throughput_vs_baseline = Some((32.0, 40.0));
         assert_eq!(
-            compute_workload_status(&inputs),
+            compute_workload_status(&inputs, &crate::thresholds::EffectiveThresholds::default()),
             ux_contract::WorkloadStatus::Attention
         );
 
         // 32.01 / 40.0 = 0.80025 — just above the threshold → Healthy.
         inputs.throughput_vs_baseline = Some((32.01, 40.0));
         assert_eq!(
-            compute_workload_status(&inputs),
+            compute_workload_status(&inputs, &crate::thresholds::EffectiveThresholds::default()),
             ux_contract::WorkloadStatus::Healthy
         );
     }
@@ -2216,7 +2259,7 @@ mod tests {
         let mut inputs = healthy_inputs();
         inputs.throughput_vs_baseline = None;
         assert_eq!(
-            compute_workload_status(&inputs),
+            compute_workload_status(&inputs, &crate::thresholds::EffectiveThresholds::default()),
             ux_contract::WorkloadStatus::Healthy
         );
     }
@@ -2226,7 +2269,7 @@ mod tests {
         // Healthy baseline: every metric is comfortably under its
         // Attention band, no governor / OOM, baseline matches current.
         assert_eq!(
-            compute_workload_status(&healthy_inputs()),
+            compute_workload_status(&healthy_inputs(), &crate::thresholds::EffectiveThresholds::default()),
             ux_contract::WorkloadStatus::Healthy
         );
     }
@@ -2240,7 +2283,7 @@ mod tests {
         inputs.vram_pct = Some(ux_contract::thresholds::VRAM_CRITICAL_PCT);
         inputs.throughput_vs_baseline = Some((10.0, 40.0));
         assert_eq!(
-            compute_workload_status(&inputs),
+            compute_workload_status(&inputs, &crate::thresholds::EffectiveThresholds::default()),
             ux_contract::WorkloadStatus::Critical
         );
     }
@@ -2257,7 +2300,7 @@ mod tests {
         inputs.vram_pct = Some(ux_contract::thresholds::VRAM_CRITICAL_PCT);
         inputs.oom_detected = true;
         assert_eq!(
-            compute_workload_status(&inputs),
+            compute_workload_status(&inputs, &crate::thresholds::EffectiveThresholds::default()),
             ux_contract::WorkloadStatus::Loading
         );
     }
@@ -2365,7 +2408,7 @@ mod tests {
         let mut inputs = healthy_inputs();
         inputs.throughput_vs_baseline = Some((40.0, 0.0));
         assert_eq!(
-            compute_workload_status(&inputs),
+            compute_workload_status(&inputs, &crate::thresholds::EffectiveThresholds::default()),
             ux_contract::WorkloadStatus::Healthy
         );
     }

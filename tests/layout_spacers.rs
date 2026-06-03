@@ -36,7 +36,7 @@ fn rendered_row_cells(setup: impl FnOnce(&mut App), y: u16) -> Vec<String> {
     let theme = current_theme("dark");
     let backend = TestBackend::new(120, 40);
     let mut terminal = Terminal::new(backend).expect("test backend");
-    let runtime = Runtime::new(Config::default());
+    let runtime = Runtime::new(Config::default()).expect("Runtime::new must succeed with contract default config");
     let mut app = App::new();
     setup(&mut app);
     terminal

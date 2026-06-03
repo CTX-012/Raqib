@@ -35,7 +35,7 @@ fn footer_key_letters_render_in_accent() {
     let theme = current_theme("dark");
     let backend = TestBackend::new(120, 40);
     let mut terminal = Terminal::new(backend).expect("test backend");
-    let runtime = Runtime::new(Config::default());
+    let runtime = Runtime::new(Config::default()).expect("Runtime::new must succeed with contract default config");
     let app = App::new();
 
     terminal
@@ -74,7 +74,7 @@ fn footer_descriptions_render_in_muted() {
     let theme = current_theme("dark");
     let backend = TestBackend::new(120, 40);
     let mut terminal = Terminal::new(backend).expect("test backend");
-    let runtime = Runtime::new(Config::default());
+    let runtime = Runtime::new(Config::default()).expect("Runtime::new must succeed with contract default config");
     let app = App::new();
 
     terminal
@@ -179,7 +179,7 @@ fn vitals_panel_renders_with_muted_block_border() {
     let theme = current_theme("dark");
     let backend = TestBackend::new(120, 40);
     let mut terminal = Terminal::new(backend).expect("test backend");
-    let runtime = Runtime::new(Config::default());
+    let runtime = Runtime::new(Config::default()).expect("Runtime::new must succeed with contract default config");
     let app = App::new();
 
     terminal
@@ -212,7 +212,7 @@ fn workloads_panel_renders_with_accent_block_border_when_focused() {
     let theme = current_theme("dark");
     let backend = TestBackend::new(120, 40);
     let mut terminal = Terminal::new(backend).expect("test backend");
-    let runtime = Runtime::new(Config::default());
+    let runtime = Runtime::new(Config::default()).expect("Runtime::new must succeed with contract default config");
     let app = App::new();
 
     terminal
@@ -251,7 +251,7 @@ fn switching_theme_changes_footer_key_letter_color() {
     fn footer_q_fg(theme: &UiTheme) -> Option<ratatui::style::Color> {
         let backend = TestBackend::new(120, 40);
         let mut terminal = Terminal::new(backend).expect("test backend");
-        let runtime = Runtime::new(Config::default());
+        let runtime = Runtime::new(Config::default()).expect("Runtime::new must succeed with contract default config");
         let app = App::new();
         terminal
             .draw(|f| panels::render(f, runtime.state(), &app, theme, None, None))

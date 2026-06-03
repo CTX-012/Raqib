@@ -379,7 +379,7 @@ fn enter_with_no_kill_confirm_falls_through_to_postmortem_path() {
 const TEST_PID: u32 = 4242;
 
 fn fresh_runtime() -> Runtime {
-    Runtime::new(Config::default())
+    Runtime::new(Config::default()).expect("Runtime::new must succeed with contract default config")
 }
 
 /// L19 — stderr captured during the run is queryable immediately after

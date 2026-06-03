@@ -178,11 +178,20 @@ pub enum WireThermalSeverity {
 /// against the SAME threshold values; the contract is the single
 /// source of truth and there are no `>= 85` literals duplicated
 /// on the consumer side.
-fn classify_thermal(temp_celsius: f32) -> WireThermalSeverity {
+fn classify_thermal(
+    temp_celsius: f32,
+    thresholds: &crate::thresholds::EffectiveThresholds,
+) -> WireThermalSeverity {
+    // v1.3.1 — `&EffectiveThresholds` parameter so an operator's
+    // [thresholds] override reaches the wire's pre-classified
+    // severity. The function stays a helper (per DISPATCH 53
+    // decision 5: preserve the v1.1.12 single-source pattern). The
+    // contract constants remain the deployment DEFAULTS; the
+    // resolved struct shadows them per-deployment.
     let c = f64::from(temp_celsius);
-    if c >= ux_contract::thresholds::THERMAL_RED_C {
+    if c >= thresholds.thermal_red_c {
         WireThermalSeverity::Red
-    } else if c >= ux_contract::thresholds::THERMAL_AMBER_C {
+    } else if c >= thresholds.thermal_amber_c {
         WireThermalSeverity::Amber
     } else {
         WireThermalSeverity::Nominal
@@ -618,7 +627,8 @@ impl WireMission {
             .iter()
             .filter(|p| {
                 let inputs = build_status_inputs(p, state);
-                let status = crate::runtime::compute_workload_status(&inputs);
+                let status =
+                    crate::runtime::compute_workload_status(&inputs, &state.thresholds);
                 matches!(
                     status,
                     ux_contract::WorkloadStatus::Attention | ux_contract::WorkloadStatus::Critical
@@ -677,7 +687,7 @@ impl WireVitals {
             .map(|z| WireThermalZone {
                 label: z.label.clone(),
                 temp_celsius: z.temp_celsius,
-                severity: classify_thermal(z.temp_celsius),
+                severity: classify_thermal(z.temp_celsius, &state.thresholds),
             })
             .collect();
         Self {
@@ -710,7 +720,7 @@ impl WireWorkload {
             .filter(|&t| t > 0);
         let ram_pct = compute_ram_pct(p.rss_mb, total_ram_bytes);
         let inputs = build_status_inputs(p, state);
-        let status = crate::runtime::compute_workload_status(&inputs);
+        let status = crate::runtime::compute_workload_status(&inputs, &state.thresholds);
         Self {
             pid: p.pid,
             name: p.name.clone(),
@@ -953,7 +963,7 @@ mod tests {
         use std::time::{Duration, Instant};
         use ux_contract::AlertId;
 
-        let mut runtime = Runtime::new(Config::default());
+        let mut runtime = Runtime::new(Config::default()).expect("Runtime::new must succeed with contract default config");
         let now = Instant::now();
         // VRAM pressure on a single workload → ConsiderKill, Warning.
         runtime.state_mut().alerts.observe(
@@ -1172,7 +1182,7 @@ mod tests {
         use std::time::{Duration, Instant};
         use ux_contract::AlertId;
 
-        let mut runtime = Runtime::new(Config::default());
+        let mut runtime = Runtime::new(Config::default()).expect("Runtime::new must succeed with contract default config");
         let state = runtime.state_mut();
         let t0 = Instant::now();
         // (1) Instant-fire Critical: GovernorArmed on PID 206 / phi3.
@@ -1252,36 +1262,36 @@ mod tests {
 
         // Below amber → Nominal. Just under the boundary AND well
         // under the boundary.
-        assert_eq!(classify_thermal(45.0), WireThermalSeverity::Nominal);
+        assert_eq!(classify_thermal(45.0, &crate::thresholds::EffectiveThresholds::default()), WireThermalSeverity::Nominal);
         assert_eq!(
-            classify_thermal(THERMAL_AMBER_C as f32 - 0.1),
+            classify_thermal(THERMAL_AMBER_C as f32 - 0.1, &crate::thresholds::EffectiveThresholds::default()),
             WireThermalSeverity::Nominal,
             "84.9 °C must classify as Nominal (just below the amber \
              threshold)",
         );
         // Amber boundary: `>=` so 85.0 itself is Amber.
         assert_eq!(
-            classify_thermal(THERMAL_AMBER_C as f32),
+            classify_thermal(THERMAL_AMBER_C as f32, &crate::thresholds::EffectiveThresholds::default()),
             WireThermalSeverity::Amber,
             "85.0 °C must classify as Amber (the threshold value \
              itself is the lower edge of the amber bucket)",
         );
         // Just below red → still Amber.
         assert_eq!(
-            classify_thermal(THERMAL_RED_C as f32 - 0.1),
+            classify_thermal(THERMAL_RED_C as f32 - 0.1, &crate::thresholds::EffectiveThresholds::default()),
             WireThermalSeverity::Amber,
             "94.9 °C must classify as Amber (just below the red \
              threshold)",
         );
         // Red boundary: `>=` so 95.0 itself is Red.
         assert_eq!(
-            classify_thermal(THERMAL_RED_C as f32),
+            classify_thermal(THERMAL_RED_C as f32, &crate::thresholds::EffectiveThresholds::default()),
             WireThermalSeverity::Red,
             "95.0 °C must classify as Red (the threshold value \
              itself is the lower edge of the red bucket)",
         );
         // Well above red.
-        assert_eq!(classify_thermal(105.0), WireThermalSeverity::Red);
+        assert_eq!(classify_thermal(105.0, &crate::thresholds::EffectiveThresholds::default()), WireThermalSeverity::Red);
     }
 
     /// v1.1.12 / CAR-22 — server-side classification surfaces on the
@@ -1304,7 +1314,7 @@ mod tests {
 
     #[test]
     fn snapshot_from_default_runtime_has_zero_workloads() {
-        let runtime = Runtime::new(Config::default());
+        let runtime = Runtime::new(Config::default()).expect("Runtime::new must succeed with contract default config");
         let snap = WireSnapshot::from_runtime_state(runtime.state(), &[]);
         assert_eq!(snap.mission.workloads, 0);
         assert_eq!(snap.mission.degraded, 0);

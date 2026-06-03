@@ -1,4 +1,5 @@
 mod gpu_nvidia;
+pub mod host_vitals;
 mod linux_proc;
 
 pub use gpu_nvidia::{GpuCollector, GpuSnapshot};
@@ -77,14 +78,33 @@ impl SystemMetrics {
     }
 }
 
-/// Complete platform snapshot: system + processes + GPU metrics.
-/// Produced each tick by the platform layer.
-#[derive(Debug, Clone, Serialize)]
+/// Complete platform snapshot: system + processes + GPU metrics +
+/// host-level vitals (v1.1.12 / CAR-22 — thermal zones).
+///
+/// v1.1.12 / DISPATCH 39: the `Serialize` derive was DROPPED because
+/// (a) `ux_contract::host_vitals::HostVitals` is intentionally
+/// zero-dep (no `serde` derives, same stance as
+/// `ux_contract::activity::ActivityState`), and (b) `grep -rn
+/// 'serde_json.*PlatformSnapshot\|serialize.*PlatformSnapshot' src/`
+/// confirms nothing in the codebase serializes `PlatformSnapshot`
+/// directly — the web wire serializes `WireSnapshot` (built from
+/// `PlatformSnapshot` via `WireSnapshot::from_runtime_state`) and
+/// `tracing` log emission uses `Debug` rather than `Serialize`.
+/// Inspector DISPATCH 38 Q1 → option (a) "drop the derive" cleanly
+/// applies; no serde shim needed.
+#[derive(Debug, Clone)]
 pub struct PlatformSnapshot {
     pub timestamp: DateTime<Utc>,
     pub system: SystemMetrics,
     pub processes: Vec<ProcessSample>,
     pub gpu: GpuSnapshot,
+    /// v1.1.12 / CAR-22 — host-level vitals (per-zone thermal
+    /// readings). Empty `thermal_zones` means "no zones discovered"
+    /// per the contract; consumers hide the panel rather than
+    /// rendering an empty section. Per-zone read errors are
+    /// silently skipped inside `host_vitals::collect_host_vitals`
+    /// — the snapshot itself never fails because of thermal.
+    pub vitals: ux_contract::host_vitals::HostVitals,
 }
 
 /// Collects all running processes and system metrics from the platform.
@@ -107,12 +127,19 @@ pub fn collect_snapshot(sys: &mut sysinfo::System) -> PlatformResult<PlatformSna
     let system = collect_system_metrics(sys)?;
     let processes = collect_all_processes()?;
     let gpu = collect_gpu_metrics()?;
+    // v1.1.12 / CAR-22 — host-level vitals (thermal zones from
+    // /sys/class/thermal/). One call, host-level, NOT in any per-PID
+    // loop. Per-zone errors degrade silently inside
+    // `collect_host_vitals` so a thermal read failure can't fail the
+    // whole snapshot. INA3221 power deferred per DISPATCH 39 scope.
+    let vitals = host_vitals::collect_host_vitals();
 
     Ok(PlatformSnapshot {
         timestamp,
         system,
         processes,
         gpu,
+        vitals,
     })
 }
 

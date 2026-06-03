@@ -1,12 +1,102 @@
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::Style;
+use ratatui::style::{Color, Style};
+use ratatui::text::{Line, Span};
 use ratatui::widgets::{Gauge, Paragraph};
 
 use crate::runtime::RuntimeState;
 use crate::ui::theme::UiTheme;
+use ux_contract::host_vitals::ThermalZone;
+use ux_contract::thresholds::{THERMAL_AMBER_C, THERMAL_RED_C};
 
 use super::panel_block;
+
+/// v1.1.12 / CAR-22 — number of hottest thermal zones to show
+/// inline. Jetson Orin AGX exposes ~9 zones, x86 dev hosts ~3;
+/// 3 covers a typical x86 host in full and gives the operator
+/// the headline signal on Jetson with a "+N more" hint. Sized
+/// to fit alongside the existing RAM / VRAM / load / proc rows
+/// without growing the panel.
+const TUI_TOP_THERMAL_ZONES: usize = 3;
+
+/// v1.1.12 / CAR-22 — map a raw zone temperature to a TUI color.
+/// Mirrors the web wire's `classify_thermal` semantics with the
+/// SAME `ux_contract::thresholds` constants — no drift mode where
+/// the TUI uses one cutoff and the web uses another. The wire and
+/// the TUI each read the contract directly rather than sharing a
+/// helper so neither side accidentally caches a stale classification.
+fn thermal_color(theme: &UiTheme, temp_celsius: f32) -> Color {
+    let c = f64::from(temp_celsius);
+    if c >= THERMAL_RED_C {
+        theme.critical
+    } else if c >= THERMAL_AMBER_C {
+        theme.attention
+    } else {
+        theme.foreground
+    }
+}
+
+/// v1.1.12 / CAR-22 — pick the `TUI_TOP_THERMAL_ZONES` hottest
+/// zones from the snapshot, sorted descending by temperature.
+/// Stable on ties (preserves the producer's label sort).
+/// Returns `(top_3, total_zone_count)` so the renderer can show
+/// "3 of 9 zones shown" when there are more.
+///
+/// Public-in-module so the unit test can drive it directly without
+/// instantiating a `Frame`.
+fn top_hottest(zones: &[ThermalZone]) -> (Vec<&ThermalZone>, usize) {
+    let total = zones.len();
+    let mut by_temp: Vec<&ThermalZone> = zones.iter().collect();
+    // `partial_cmp` is fine because thermal temps are never NaN in
+    // practice (kernel returns integer millidegrees); on the off
+    // chance one slips through, treat it as the coldest reading so
+    // it sorts to the back of the top-N list.
+    by_temp.sort_by(|a, b| {
+        b.temp_celsius
+            .partial_cmp(&a.temp_celsius)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    by_temp.truncate(TUI_TOP_THERMAL_ZONES);
+    (by_temp, total)
+}
+
+/// v1.1.12 / CAR-22 — render the thermal summary into `area`.
+/// Hidden when `zones` is empty (the contract semantic — empty
+/// means "no zones discovered", so we suppress the section). When
+/// `zones.len() <= TUI_TOP_THERMAL_ZONES` we show every zone with
+/// no count line; otherwise we show the top-N and append
+/// `"N of M zones shown"` so the operator knows there's more.
+fn render_thermal_summary(f: &mut Frame, area: Rect, theme: &UiTheme, zones: &[ThermalZone]) {
+    if zones.is_empty() {
+        return;
+    }
+    let (top, total) = top_hottest(zones);
+    let inline: String = top
+        .iter()
+        .map(|z| format!("{}: {:.1}°C", z.label, z.temp_celsius))
+        .collect::<Vec<_>>()
+        .join("  ");
+    // Color the LINE by the hottest zone — the operator's eye gets
+    // dragged to the worst signal first. Per-zone color would
+    // require building a `Line` with per-span styles, which is
+    // workable but reads as visual noise alongside RAM / VRAM
+    // gauges. Use the hottest-tier color as the dominant signal.
+    let dominant = top
+        .first()
+        .map(|z| thermal_color(theme, z.temp_celsius))
+        .unwrap_or(theme.foreground);
+    let mut spans: Vec<Span<'static>> = vec![
+        Span::styled("thermal: ", Style::default().fg(theme.muted)),
+        Span::styled(inline, Style::default().fg(dominant)),
+    ];
+    if total > TUI_TOP_THERMAL_ZONES {
+        spans.push(Span::styled(
+            format!("    {} of {} zones shown", top.len(), total),
+            Style::default().fg(theme.muted),
+        ));
+    }
+    f.render_widget(Paragraph::new(Line::from(spans)), area);
+}
 
 pub fn render(f: &mut Frame, area: Rect, state: &RuntimeState, theme: &UiTheme) {
     let block = panel_block("Vitals", false, theme);
@@ -20,9 +110,17 @@ pub fn render(f: &mut Frame, area: Rect, state: &RuntimeState, theme: &UiTheme) 
         return;
     };
 
+    // v1.1.12 / CAR-22 — the thermal row is a 5th
+    // `Constraint::Length(1)` row, hidden (rendered as a no-op) when
+    // no zones are discovered. The constraint stays the same so the
+    // layout is identical whether thermal is hidden or shown — the
+    // alternative (conditional row count) would make the panel
+    // resize between ticks if thermal discovery raced the first
+    // sample.
     let cols = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
+            Constraint::Length(1),
             Constraint::Length(1),
             Constraint::Length(1),
             Constraint::Length(1),
@@ -83,4 +181,96 @@ pub fn render(f: &mut Frame, area: Rect, state: &RuntimeState, theme: &UiTheme) 
     ))
     .style(Style::default().fg(theme.foreground));
     f.render_widget(proc_line, cols[3]);
+
+    // v1.1.12 / CAR-22 — thermal summary row (hidden when no zones).
+    // AUTHORITY LOCK: this is display only. No alert fires from this
+    // path; the renderer reads `snap.vitals.thermal_zones` (populated
+    // by `platform::host_vitals::collect_host_vitals`) and shows
+    // values + color. Alert firing on thermal is v1.2.0+ scope.
+    render_thermal_summary(f, cols[4], theme, &snap.vitals.thermal_zones);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn z(label: &str, temp: f32) -> ThermalZone {
+        ThermalZone {
+            label: label.to_string(),
+            temp_celsius: temp,
+        }
+    }
+
+    /// v1.1.12 / CAR-22 — `top_hottest` picks the three HIGHEST
+    /// temperatures from a >3 zone set and reports the total count
+    /// so the renderer can show "3 of 9 zones shown". Pinned because
+    /// the descending-sort + truncate ordering is the property
+    /// operators rely on to spot the worst thermal signal at a
+    /// glance.
+    #[test]
+    fn thermal_summary_top3_hottest() {
+        let zones = vec![
+            z("acpitz", 48.0),
+            z("TCPU", 38.5),
+            z("x86_pkg_temp", 71.2),
+            z("nvme_composite", 52.0),
+            z("iwlwifi_1", 41.0),
+            z("pch_skylake", 47.0),
+        ];
+        let (top, total) = top_hottest(&zones);
+
+        assert_eq!(total, 6, "total reports the full zone count");
+        assert_eq!(top.len(), 3, "exactly TUI_TOP_THERMAL_ZONES zones");
+        // Descending by temperature: 71.2, 52.0, 48.0.
+        assert_eq!(top[0].label, "x86_pkg_temp");
+        assert!((top[0].temp_celsius - 71.2).abs() < 0.01);
+        assert_eq!(top[1].label, "nvme_composite");
+        assert_eq!(top[2].label, "acpitz");
+    }
+
+    /// When `zones.len() <= TUI_TOP_THERMAL_ZONES`, `top_hottest`
+    /// returns every zone (no truncation) and `total == top.len()`
+    /// so the renderer can suppress the "N of M shown" count line.
+    #[test]
+    fn thermal_summary_under_cap_returns_all_zones() {
+        let zones = vec![z("acpitz", 48.0), z("x86_pkg_temp", 71.2)];
+        let (top, total) = top_hottest(&zones);
+        assert_eq!(total, 2);
+        assert_eq!(top.len(), 2, "no truncation under the cap");
+        assert_eq!(top[0].label, "x86_pkg_temp"); // still hottest-first
+    }
+
+    /// Color mapping uses the contract thresholds (85/95). Boundary
+    /// semantics mirror the wire's `classify_thermal` and the
+    /// contract's `reference_classification_uses_thresholds`. Drives
+    /// the dark theme's color set (the colors themselves don't
+    /// matter — what matters is that we map to `attention` at the
+    /// amber threshold and `critical` at the red one).
+    #[test]
+    fn thermal_color_maps_to_contract_thresholds() {
+        let theme = UiTheme::default();
+        // Below amber → foreground.
+        assert_eq!(thermal_color(&theme, 45.0), theme.foreground);
+        assert_eq!(
+            thermal_color(&theme, THERMAL_AMBER_C as f32 - 0.1),
+            theme.foreground,
+            "84.9 °C must color as foreground (just below amber)",
+        );
+        // Amber boundary: `>=` so 85.0 is attention.
+        assert_eq!(
+            thermal_color(&theme, THERMAL_AMBER_C as f32),
+            theme.attention,
+        );
+        assert_eq!(
+            thermal_color(&theme, THERMAL_RED_C as f32 - 0.1),
+            theme.attention,
+            "94.9 °C must color as attention (just below red)",
+        );
+        // Red boundary: `>=` so 95.0 is critical.
+        assert_eq!(
+            thermal_color(&theme, THERMAL_RED_C as f32),
+            theme.critical,
+        );
+        assert_eq!(thermal_color(&theme, 105.0), theme.critical);
+    }
 }

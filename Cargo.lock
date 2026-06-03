@@ -2544,7 +2544,7 @@ dependencies = [
 
 [[package]]
 name = "ux_contract"
-version = "0.3.15"
+version = "0.3.16"
 
 [[package]]
 name = "valuable"

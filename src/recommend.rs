@@ -497,6 +497,7 @@ mod tests {
                     label: "x86_pkg_temp".into(),
                     temp_celsius: 90.0, // amber but not red
                 }],
+                power_rails: Vec::new(),
             },
         });
         let now = Instant::now();
@@ -553,6 +554,7 @@ mod tests {
                     label: "x86_pkg_temp".into(),
                     temp_celsius: 96.5, // above red (95.0)
                 }],
+                power_rails: Vec::new(),
             },
         });
         let now = Instant::now();

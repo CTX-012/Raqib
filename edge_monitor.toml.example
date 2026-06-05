@@ -191,3 +191,94 @@ theme = "dark"
 # 0-second sustain would disable smoothing entirely (which is what
 # the contract default of 5 s was introduced to prevent).
 # alert_sustain_secs = 3
+
+
+# ── v1.3.2 / DISPATCH 57: per-workload suppression rules ────────────
+#
+# `[[workloads]]` rules let an operator silence routine pressure
+# alerts and/or recommendations for specific noisy workloads. Three
+# fields, all observation-side:
+#
+#   name                    — exact match against /proc/<pid>/comm
+#   suppress_alerts         — mute the workload's per-PID pressure
+#                             observations (VRAM / KV / GovernorArmed)
+#   suppress_recommendations — mute the workload's projected recs
+#
+# The two flags are independently togglable. Setting both to true
+# is equivalent to a workload-level mute; the resolver logs an
+# `info!` line at startup noting the redundancy.
+#
+# ## Match: `comm`, NOT process command-line
+#
+# Linux exposes the kernel's `task_struct->comm` (truncated to
+# TASK_COMM_LEN-1 = 15 bytes) at /proc/<pid>/comm. We match against
+# THAT string, exact, case-sensitive — NOT the full command-line
+# from /proc/<pid>/cmdline. So a process launched as `/usr/local/
+# bin/ollama serve` is named `"ollama"` for matching, not
+# `"/usr/local/bin/ollama serve"`. Use `cat /proc/<pid>/comm` to
+# confirm the exact string for any running workload.
+#
+# A 15-char truncation note: long binary names like
+# `my_long_workload_binary_name` get truncated to the first 15
+# bytes (`my_long_workloa`). The resolver will WARN at startup if
+# your rule name is longer than 15 chars and accepts it anyway —
+# the warning lets you notice the truncation, but a process CAN
+# self-set its `comm` via `prctl(PR_SET_NAME, ...)` to a string the
+# kernel then truncates separately, so a >15-char rule may still
+# be intentional.
+#
+# ## OOM is un-suppressable
+#
+# `suppress_alerts = true` does NOT silence `AlertId::OomDetected`.
+# OOM is the first brick in the actuation safety wall — a workload
+# that the kernel's OOM-killer terminated MUST always surface,
+# even when the operator silenced its routine pressure alerts.
+# This is structural: OOM fires through the exit path (lifecycle
+# tracker), which doesn't read the rule. The OOM recommendation
+# CAN still be muted via `suppress_recommendations = true` (the
+# alarm fires, the suggested-action text can be silenced).
+#
+# ## Truth table
+#
+# | suppress_alerts | suppress_recommendations | routine pressure alert (VRAM/KV/etc.) | routine rec | OOM alert | OOM rec |
+# | ---            | ---                      | ---                                   | ---         | ---       | ---     |
+# | false          | false                    | shown                                 | shown       | shown     | shown   |
+# | true           | false                    | hidden                                | hidden*     | shown     | shown   |
+# | false          | true                     | shown                                 | hidden      | shown     | hidden  |
+# | true           | true                     | hidden                                | hidden      | shown     | hidden  |
+#
+# * Note: when suppress_alerts=true, the routine pressure alert is
+#   never observed, so no rec is projected from it. The
+#   "rec hidden" cell is a consequence of the alert not existing
+#   rather than the rec being individually muted.
+#
+# ## System-scope alerts (RAM, ThermalPressure) ignore these rules
+#
+# System-scope alerts have no workload identity — they fire whole-
+# host, not per-workload. Neither flag affects them; tune them via
+# `[thresholds]` above instead.
+
+# [[workloads]]
+# name = "ollama"
+# # Ollama's tokens/sec is captured only via `edge_monitor exec`
+# # (see CLAUDE.md known limitations). The routine VRAM/KV recs
+# # often suggest killing it for runaway, but the operator
+# # already knows the passive-monitoring limitation — mute the
+# # recs to reduce display noise. Alerts continue to surface.
+# suppress_alerts = false
+# suppress_recommendations = true
+
+# [[workloads]]
+# name = "rviz2"
+# # ROS2 visualization — not a graph participant. Pressure
+# # alerts AND recs are noise here; mute both.
+# suppress_alerts = true
+# suppress_recommendations = true
+
+# [[workloads]]
+# name = "phi3"
+# # Small LLM for development; routine pressure noise is
+# # expected during model load. Mute the alerts; surface the
+# # recs in case something actually pathological happens.
+# suppress_alerts = true
+# suppress_recommendations = false

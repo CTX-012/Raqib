@@ -68,8 +68,10 @@ v1.2.0 HEAD (`26a84b0`). Versions in **bold** mark phase boundaries.
 | v1.1.13 | 2026-06-03 | Alerts on the web wire (closes v1.1.11 deferral) — `WireAlertEntry`; fourth observe-only sign-off | Phase 3 |
 | **v1.2.0** | 2026-06-03 | **Phase 3 capstone — ranked recommendations** (observe-only). Type firewall (`SuggestedAction: Copy`) + wiring firewall (`tests/recommendation_observe_only_guard.rs`). Fifth observe-only sign-off. | **Phase 3 SHIPPED** |
 | **v1.3.0** | 2026-06-03 | **Phase 4 step 1** — `EDGE_MONITOR_THERMAL_ROOT` env override (~35 LoC). Unblocks Jetson-deferred thermal validation on x86 via synthetic sysfs. Forced compat: consumes `ux_contract` v0.3.16 (`HostVitals.power_rails`). | **Phase 4 IN PROGRESS** |
+| **v1.3.1** | 2026-06-03 | **Phase 4 step 2** — `[thresholds]` deployment-threshold overrides (HYBRID per Q1: deployment thresholds become defaults, wire caps + impl thresholds stay absolute). Sixth (D53) + seventh (D58 / `[samplers]` corrigendum) + ninth (D60 / `auto_actuate` inert gate) observe-only sign-offs. | Phase 4 |
+| **v1.3.2** | 2026-06-05 | **Phase 4 step 3** — `[[workloads]]` per-workload suppression rules (exactly 3 observation-side fields; OOM un-suppressable by construction; web `Cache-Control: no-cache` + `ETag` fix bundled). Tenth observe-only sign-off. Two new firewall layers: field-count guard + the OOM structural carve-out. | Phase 4 |
 
-**Total versions on the ladder: 20 (v1.0.0 through v1.3.0, plus
+**Total versions on the ladder: 22 (v1.0.0 through v1.3.2, plus
 v0.1.0 prototype, minus the retracted v1.1.0).**
 
 ### Phase summaries (what each delivered)
@@ -141,8 +143,8 @@ v1.1.11 → v1.2.0 pattern). Per
 | Sub-version | Scope | Size | Contract prereq | Status |
 |---|---|---|---|---|
 | **v1.3.0** | Thermal env override (`EDGE_MONITOR_THERMAL_ROOT`) | ~35 LoC + forced v0.3.16 compat | `ux_contract` v0.3.16 (landed parallel) | **shipped 2026-06-03** |
-| v1.3.1 | `[thresholds]` + `[samplers]` deployment overrides | ~150-250 LoC | Q1 HYBRID locked (PHASE4_DESIGN §3) | scoped |
-| v1.3.2 | `[[workloads]]` per-workload rules + suppression flags | ~200-300 LoC | none beyond v1.3.1 | scoped |
+| **v1.3.1** | `[thresholds]` deployment overrides (samplers dropped per D58 corrigendum) | ~150-250 LoC | Q1 HYBRID locked (PHASE4_DESIGN §3) | **shipped 2026-06-03** |
+| **v1.3.2** | `[[workloads]]` per-workload rules (3 fields) + suppression flags + web cache-header fix | ~600 LoC incl. tests | none beyond v1.3.1 | **shipped 2026-06-05** |
 | v1.3.3 | INA3221 power rails | ~180 LoC consumer | `ux_contract` v0.3.16 (already landed) | scoped |
 | Jetson pass | Empirical validation on Orin | empirical-only | none | scoped (post-v1.3.3) |
 
@@ -260,7 +262,7 @@ The authority position, in writing.
 Automated actuation of any kind (auto-kill on threshold breach,
 tick-path `send_sigterm` wiring, `--enable-governor` flag) is **NOT
 a planned phase.** The observe-only line has been held with
-**explicit operator sign-off EIGHT times**:
+**explicit operator sign-off TEN times**:
 
 1. **v1.0.1** — Inspector #1 phantom-kill bug → `default_ai_action`
    flipped from `Kill` to `Allow`; the FIRST authority pin.
@@ -279,6 +281,20 @@ a planned phase.** The observe-only line has been held with
 8. **v1.3.0 / DISPATCH 50** — Phase 4 step 1 sign-off
    (`EDGE_MONITOR_THERMAL_ROOT`); env override is pure observation-
    path config, no actuation surface added.
+9. **v1.3.1 + DISPATCH 60** — Phase 4 step 2 sign-off
+   (`[thresholds]` deployment overrides + the inert
+   `governor.auto_actuate` opt-in gate). Added the THIRD firewall
+   layer: schema name-based firewall
+   (`tests/config_schema_firewall.rs` — CI-rejects `action_on_breach`,
+   `auto_kill`, etc. before a contributor can wire them).
+10. **v1.3.2 / DISPATCH 57** — Phase 4 step 3 sign-off
+    (`[[workloads]]` per-workload suppression rules; OOM
+    un-suppressable by structural carve-out). Added the FOURTH
+    firewall layer: schema count-based firewall
+    (`tests/workload_rule_field_count_guard.rs` — CI-rejects any 4th
+    field on `WorkloadRule`, even benign ones). The `inert
+    auto_actuate` from sign-off 9 remains unread; this dispatch
+    added no reader.
 
 **Standing position**: automated actuation is a separate, deliberate
 decision requiring its **own dedicated safety-design track**
@@ -385,3 +401,4 @@ TUI-not-task-manager).
 |---|---|
 | 2026-06-03 | Initial author (DISPATCH 49). Built from `git tag -l` + CHANGELOG + Inspector Phase 4 reports + DESIGN_HANDOFF. Phase 4 scope: SCOPED. Five stale deferrals: DROPPED. |
 | 2026-06-03 | Updated for v1.3.0 ship (DISPATCH 50). Phase 4: IN PROGRESS. v1.3.0 shipped row added; ux_contract v0.3.16 row added. Phase 4 design promoted to `docs/PHASE4_DESIGN.md`. Operator decisions Q1-Q7 marked LOCKED. ROS2-Hz annotated as deprecated-by-echo-once / revivable-with-rclrs. Observe-only sign-off count: 7 → 8. |
+| 2026-06-05 | Updated for v1.3.2 ship (DISPATCH 57; v1.3.1's row backfilled in the same pass). v1.3.1 + v1.3.2 shipped rows added. Phase 4 design v1.3.2 sub-section promoted with the as-shipped 3-field `WorkloadRule` shape (per-workload thresholds dropped from v1.3.2 scope per the C2 field-count discipline; deferred to v1.4.x). Observe-only sign-off count: 8 → 10 (D60 inert `auto_actuate` gate + v1.3.2 `[[workloads]]` schema). Four firewall layers now hold the lock: TYPE / WIRING / SCHEMA-name / SCHEMA-count. |

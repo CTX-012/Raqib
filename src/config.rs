@@ -92,7 +92,7 @@ pub struct GovernorConfig {
     /// `policy.default_ai_action` AND have `send_sigterm` wired
     /// before any signal goes out; all three layers must be
     /// operator-flipped before automated kills can happen. See
-    /// [`super::Config::validate`] for the cross-layer comment
+    /// [`Config::validate`] for the cross-layer comment
     /// pointing forward to where those assertions will live.
     pub auto_actuate: bool,
 }

@@ -119,6 +119,23 @@ pub(crate) fn project_one(
     entry: &AlertEntry,
     state: &RuntimeState,
 ) -> Option<Recommendation> {
+    // v1.3.2 / DISPATCH 57 C4 — per-workload `suppress_recommendations`
+    // gate. Independent of `suppress_alerts` (C3): a workload may
+    // surface alerts but be muted from the suggested-action surface,
+    // or vice versa. Lookup is by `entry.workload_name` (the alert's
+    // owning workload). System-scope alerts (RAM, Thermal) have an
+    // empty `workload_name` by construction (`WorkloadRef::system()`
+    // sets `name = ""`), and `resolve_workload_rules` rejects rules
+    // with empty `name`, so the gate is structurally narrow: it ONLY
+    // applies to workload-scope alerts. Per Q3 (ii) — OOM alert
+    // fires via the C3 carve-out, but the OOM rec follows this
+    // gate: the alarm always fires; the suggested-action text can
+    // still be muted.
+    if let Some(rule) = state.workload_rules.get(&entry.workload_name)
+        && rule.suppress_recommendations
+    {
+        return None;
+    }
     match entry.alert_id {
         AlertId::VramPressure | AlertId::KvPressure => {
             // Single-target workload-scope. Drop if no PID
@@ -799,5 +816,157 @@ mod tests {
         let s = render_label(&multi);
         assert!(s.contains("a (PID 1)"));
         assert!(s.contains("b (PID 2)"));
+    }
+
+    /// v1.3.2 / DISPATCH 57 C4 — a `[[workloads]]` rule with
+    /// `suppress_recommendations = true` for a workload makes
+    /// `project_one` return None for any alert whose
+    /// `workload_name` matches the rule. The underlying alert is
+    /// unaffected — only the projected recommendation is muted.
+    #[test]
+    fn suppress_recommendations_mutes_per_workload_rec_for_matching_alerts() {
+        use crate::config::WorkloadRule;
+        let mut cfg = Config::default();
+        cfg.workloads.push(WorkloadRule {
+            name: "Llama-70B".into(),
+            suppress_alerts: false,
+            suppress_recommendations: true,
+        });
+        let mut runtime = Runtime::new(cfg).expect("Runtime::new must succeed");
+        let state = runtime.state_mut();
+        let now = Instant::now();
+        // Drive the alert across the sustain window so it surfaces
+        // as visible. The rule mutes the REC, not the alert.
+        state.alerts.observe(
+            now,
+            WorkloadRef::workload(4523, "Llama-70B"),
+            AlertId::VramPressure,
+            true,
+        );
+        state.alerts.observe(
+            now + std::time::Duration::from_secs(5),
+            WorkloadRef::workload(4523, "Llama-70B"),
+            AlertId::VramPressure,
+            true,
+        );
+        // The alert IS visible — only the rec is muted.
+        let visible = runtime.state().alerts.visible();
+        assert!(
+            visible
+                .iter()
+                .any(|e| e.alert_id == AlertId::VramPressure && e.workload_name == "Llama-70B"),
+            "alert must remain visible — suppress_recommendations mutes \
+             only the rec; visible: {visible:?}",
+        );
+        let recs = project_recommendations(runtime.state());
+        assert!(
+            recs.is_empty(),
+            "rec for a suppress_recommendations workload must be \
+             muted; got {recs:?}",
+        );
+    }
+
+    /// v1.3.2 / DISPATCH 57 C4 — the OOM rec follows the
+    /// suppress_recommendations gate. Q3 (ii) LEAN: the alarm
+    /// always fires (C3 carve-out), the suggested-action text can
+    /// still be muted. An operator who's already comfortable with
+    /// the kernel-OOM signal doesn't need a redundant "Consider
+    /// restarting" line.
+    #[test]
+    fn suppress_recommendations_also_mutes_oom_rec_alert_still_fires() {
+        use crate::config::WorkloadRule;
+        let mut cfg = Config::default();
+        cfg.workloads.push(WorkloadRule {
+            name: "phi3".into(),
+            suppress_alerts: false,
+            suppress_recommendations: true,
+        });
+        let mut runtime = Runtime::new(cfg).expect("Runtime::new must succeed");
+        let state = runtime.state_mut();
+        let now = Instant::now();
+        // OOM goes through the exit path and is instant-fire
+        // (single observe surfaces it). The alert WILL be visible;
+        // the rec must NOT be projected because the workload is
+        // muted on the rec side.
+        state.alerts.observe_exit(
+            now,
+            WorkloadRef::workload(5151, "phi3"),
+            AlertId::OomDetected,
+            None,
+        );
+        let visible = runtime.state().alerts.visible();
+        assert!(
+            visible
+                .iter()
+                .any(|e| e.alert_id == AlertId::OomDetected && e.workload_name == "phi3"),
+            "OOM alert MUST fire (C3 carve-out); visible: {visible:?}",
+        );
+        let recs = project_recommendations(runtime.state());
+        assert!(
+            recs.is_empty(),
+            "OOM rec for a suppress_recommendations workload MUST be \
+             muted (Q3 ii: alarm fires, action text can mute). \
+             got {recs:?}",
+        );
+    }
+
+    /// v1.3.2 / DISPATCH 57 C4 — system-scope recs (Thermal, RAM)
+    /// are NOT muted by any `[[workloads]]` rule. The workload-
+    /// name on a system-scope AlertEntry is empty by construction
+    /// (`WorkloadRef::system()`), and the resolver rejects rules
+    /// with empty names, so the lookup never matches.
+    #[test]
+    fn suppress_recommendations_does_not_mute_system_scope_recs() {
+        use crate::config::WorkloadRule;
+        use crate::platform::{PlatformSnapshot, SystemMetrics};
+        use ux_contract::host_vitals::{HostVitals, ThermalZone};
+        let mut cfg = Config::default();
+        cfg.workloads.push(WorkloadRule {
+            name: "phi3".into(),
+            suppress_alerts: false,
+            suppress_recommendations: true,
+        });
+        let mut runtime = Runtime::new(cfg).expect("Runtime::new must succeed");
+        let state = runtime.state_mut();
+        state.last_snapshot = Some(PlatformSnapshot {
+            timestamp: chrono::Utc::now(),
+            system: SystemMetrics {
+                timestamp: chrono::Utc::now(),
+                total_memory: 16 * 1024 * 1024 * 1024,
+                used_memory: 8 * 1024 * 1024 * 1024,
+                available_memory: 8 * 1024 * 1024 * 1024,
+                cpu_count: 8,
+                load_average: [0.0, 0.0, 0.0],
+            },
+            processes: vec![],
+            gpu: empty_gpu(),
+            vitals: HostVitals {
+                thermal_zones: vec![ThermalZone {
+                    label: "x86_pkg_temp".into(),
+                    temp_celsius: 90.0,
+                }],
+                power_rails: Vec::new(),
+            },
+        });
+        let now = Instant::now();
+        state.alerts.observe(
+            now,
+            WorkloadRef::system(),
+            AlertId::ThermalPressure,
+            true,
+        );
+        state.alerts.observe(
+            now + std::time::Duration::from_secs(5),
+            WorkloadRef::system(),
+            AlertId::ThermalPressure,
+            true,
+        );
+        let recs = project_recommendations(runtime.state());
+        assert!(
+            recs.iter().any(|r| r.alert_id == AlertId::ThermalPressure),
+            "ThermalPressure system-scope rec must surface despite \
+             any [[workloads]] rule (workload-rule lookup matches on \
+             workload_name which is empty for system-scope); got {recs:?}",
+        );
     }
 }

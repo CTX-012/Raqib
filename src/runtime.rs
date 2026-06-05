@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 use crate::analysis::compare::{RegressionConfig as DetectorConfig, detect_regressions_with};
 use crate::classifier;
-use crate::config::{Config, expand_tilde};
+use crate::config::{Config, WorkloadRule, expand_tilde};
 use crate::exit_classify::{ExitContext, classify_exit, read_recent_kernel_log};
 use crate::fingerprint::Fingerprinter;
 use crate::governor::manual::{AuditLogEntry, ManualKillAction};
@@ -132,6 +132,16 @@ pub struct RuntimeState {
     /// defaults — tests that don't care about config get
     /// contract-value behavior automatically.
     pub thresholds: crate::thresholds::EffectiveThresholds,
+    /// v1.3.2 / DISPATCH 57 — resolved per-workload suppression
+    /// rules, keyed by the rule's `name` (an exact match against
+    /// `/proc/<pid>/comm`). Empty when no `[[workloads]]` section
+    /// is configured. Read by `observe_alerts` (gates the per-PID
+    /// `observe` calls; the OOM exit-path is structurally
+    /// carved-out by not going through this loop) and
+    /// `recommend::project_one` (gates per-rec emission). The
+    /// resolver runs once at `Runtime::new`; bad rules fail-fast
+    /// rather than silently dropping.
+    pub workload_rules: HashMap<String, WorkloadRule>,
     pub tick_count: u64,
     pub last_tick: Option<Instant>,
 }
@@ -422,6 +432,14 @@ impl Runtime {
     pub fn new(config: Config) -> Result<Self, RuntimeError> {
         let thresholds = crate::thresholds::EffectiveThresholds::resolve(&config.thresholds)
             .map_err(|e| RuntimeError::Config(e.to_string()))?;
+        // v1.3.2 / DISPATCH 57 — resolve per-workload rules once at
+        // startup. Empty `name`, duplicate names, and other bad
+        // shapes fail-fast here rather than silently dropping at
+        // observe time. Q5 LOCKED warns (does not reject) when
+        // names exceed Linux's 15-byte comm truncation.
+        let workload_rules = config
+            .resolve_workload_rules()
+            .map_err(|e| RuntimeError::Config(e.to_string()))?;
         let policy = config.build_policy();
         let governor = GovernorExecutor::new(policy);
         let manual_killer = ManualKiller::new();
@@ -433,6 +451,7 @@ impl Runtime {
         let state = RuntimeState {
             thresholds,
             alerts: crate::ui::alerts::AlertState::new(thresholds.alert_sustain_secs),
+            workload_rules,
             ..RuntimeState::default()
         };
         let audit_writer = config.runtime.audit_log().and_then(|p| {
@@ -624,6 +643,28 @@ impl Runtime {
 
         for (pid, name, vram_bytes, kv_pct) in &workloads {
             let workload = WorkloadRef::workload(*pid, name);
+
+            // v1.3.2 / DISPATCH 57 — per-workload suppression gate.
+            // A `[[workloads]]` rule with `suppress_alerts = true`
+            // skips the routine pressure observations below; the
+            // workload's pressure alerts go silent. NOTE this gate
+            // is structurally narrow: it ONLY covers the per-PID
+            // metric-driven observes in this loop. OOM and
+            // WorkloadExited go through `observe_exit_alert` (the
+            // L8 exit-driven path), which is NOT gated — the OOM
+            // carve-out is automatic by virtue of the separate
+            // call site, not an explicit `OomDetected` exception
+            // inside this loop. System-scope alerts (RAM, thermal)
+            // also stay un-suppressable because they have no
+            // workload identity to look up against.
+            let suppress_alerts = self
+                .state
+                .workload_rules
+                .get(name)
+                .is_some_and(|rule| rule.suppress_alerts);
+            if suppress_alerts {
+                continue;
+            }
 
             // VRAM: device-relative percentage.
             let vram_pct = match (total_vram, *vram_bytes) {
@@ -2000,6 +2041,180 @@ mod tests {
             "ThermalPressure must NOT fire when every zone is below \
              THERMAL_AMBER_C; visible: {:?}",
             visible.iter().map(|e| e.alert_id).collect::<Vec<_>>(),
+        );
+    }
+
+    /// v1.3.2 / DISPATCH 57 C3 — a `[[workloads]]` rule with
+    /// `suppress_alerts = true` makes the routine pressure
+    /// observations (VRAM / KV / GovernorArmed) for that workload
+    /// silent. The OOM carve-out is verified separately below.
+    ///
+    /// Synthesizes a config with one rule for "phi3", spins up
+    /// the runtime, plants an annotated "phi3" process with
+    /// armed_pid set so GovernorArmed would otherwise fire, drives
+    /// observe_alerts twice across the sustain window, and asserts
+    /// no per-PID alerts surface.
+    #[test]
+    fn suppress_alerts_silences_per_pid_observes_for_matching_workload() {
+        use crate::config::WorkloadRule;
+        use ux_contract::AlertId;
+        let mut cfg = Config::default();
+        cfg.workloads.push(WorkloadRule {
+            name: "phi3".into(),
+            suppress_alerts: true,
+            suppress_recommendations: false,
+        });
+        let mut rt = Runtime::new(cfg).expect("Runtime::new must succeed");
+        let pid = 4242u32;
+        rt.set_armed_pid(Some(pid));
+        rt.state.annotated.push(AnnotatedProcess {
+            pid,
+            name: "phi3".into(),
+            category: crate::model::AICategory::Inference,
+            workload_category: crate::model::WorkloadCategory::Unknown,
+            evidence: String::new(),
+            model_name: None,
+            cpu_pct: 0.0,
+            rss_mb: 0,
+            vram_bytes: None,
+            first_observed_at: Instant::now(),
+        });
+
+        let t0 = Instant::now();
+        rt.observe_alerts(t0);
+        rt.observe_alerts(t0 + std::time::Duration::from_secs(5));
+
+        let visible: Vec<AlertId> = rt
+            .state
+            .alerts
+            .visible()
+            .iter()
+            .map(|e| e.alert_id)
+            .collect();
+        // GovernorArmed would have fired without the rule; with
+        // suppress_alerts the entire per-PID branch is skipped, so
+        // it doesn't appear.
+        assert!(
+            !visible.contains(&AlertId::GovernorArmed),
+            "GovernorArmed for a suppress_alerts workload must not surface; \
+             visible: {visible:?}",
+        );
+        assert!(
+            !visible.contains(&AlertId::VramPressure),
+            "VramPressure for a suppress_alerts workload must not surface; \
+             visible: {visible:?}",
+        );
+        assert!(
+            !visible.contains(&AlertId::KvPressure),
+            "KvPressure for a suppress_alerts workload must not surface; \
+             visible: {visible:?}",
+        );
+    }
+
+    /// v1.3.2 / DISPATCH 57 C3 — the OOM carve-out. Even when a
+    /// workload's rule has `suppress_alerts = true`, an
+    /// OomDetected event MUST fire. OOM is the first brick in
+    /// the actuation safety wall — a kernel-OOM kill is never
+    /// silenced. This is structurally guaranteed (OOM goes
+    /// through `observe_exit_alert` which doesn't read the rule),
+    /// but the test pins the behaviour against a future refactor
+    /// that might thread suppression through the exit path.
+    #[test]
+    fn oom_fires_even_when_workload_suppress_alerts_is_true() {
+        use crate::config::WorkloadRule;
+        use crate::ui::alerts::WorkloadRef;
+        use ux_contract::AlertId;
+        let mut cfg = Config::default();
+        cfg.workloads.push(WorkloadRule {
+            name: "phi3".into(),
+            suppress_alerts: true,
+            suppress_recommendations: false,
+        });
+        let mut rt = Runtime::new(cfg).expect("Runtime::new must succeed");
+
+        // Simulate the lifecycle exit hook: OOM-detected event for
+        // a workload that has suppress_alerts. The runtime's exit
+        // path drains pending_exit_alerts via observe_exit_alert
+        // (no `suppress_alerts` consultation by design).
+        let pid = 5151u32;
+        let now = Instant::now();
+        rt.state.alerts.observe_exit(
+            now,
+            WorkloadRef::workload(pid, "phi3"),
+            AlertId::OomDetected,
+            None,
+        );
+
+        let visible: Vec<AlertId> = rt
+            .state
+            .alerts
+            .visible()
+            .iter()
+            .map(|e| e.alert_id)
+            .collect();
+        assert!(
+            visible.contains(&AlertId::OomDetected),
+            "OomDetected MUST fire for a suppress_alerts workload — the \
+             OOM carve-out is structural (exit-path bypasses the rule). \
+             visible: {visible:?}",
+        );
+    }
+
+    /// v1.3.2 / DISPATCH 57 C3 — system-scope alerts (RAM,
+    /// ThermalPressure) are NOT bound to any single workload's
+    /// suppression rule; they have no `name` to look up against.
+    /// Pinning this so a future refactor that, say, tags a
+    /// dominant workload onto the system-scope path doesn't
+    /// silently introduce a way to mute pressure signals.
+    #[test]
+    fn system_scope_alerts_not_silenceable_via_workload_rule() {
+        use crate::config::WorkloadRule;
+        use crate::platform::{GpuSnapshot, PlatformSnapshot, SystemMetrics};
+        use ux_contract::AlertId;
+        use ux_contract::host_vitals::{HostVitals, ThermalZone};
+        let mut cfg = Config::default();
+        // Even with a wide rule that suppresses many workloads,
+        // system-scope alerts must surface.
+        cfg.workloads.push(WorkloadRule {
+            name: "phi3".into(),
+            suppress_alerts: true,
+            suppress_recommendations: false,
+        });
+        let mut rt = Runtime::new(cfg).expect("Runtime::new must succeed");
+        rt.state.last_snapshot = Some(PlatformSnapshot {
+            timestamp: chrono::Utc::now(),
+            system: SystemMetrics {
+                timestamp: chrono::Utc::now(),
+                total_memory: 16 * 1024 * 1024 * 1024,
+                used_memory: 8 * 1024 * 1024 * 1024,
+                available_memory: 8 * 1024 * 1024 * 1024,
+                cpu_count: 8,
+                load_average: [0.0, 0.0, 0.0],
+            },
+            processes: vec![],
+            gpu: GpuSnapshot { devices: vec![] },
+            vitals: HostVitals {
+                thermal_zones: vec![ThermalZone {
+                    label: "x86_pkg_temp".into(),
+                    temp_celsius: 90.0, // above amber
+                }],
+                power_rails: Vec::new(),
+            },
+        });
+        let t0 = Instant::now();
+        rt.observe_alerts(t0);
+        rt.observe_alerts(t0 + std::time::Duration::from_secs(5));
+        let visible: Vec<AlertId> = rt
+            .state
+            .alerts
+            .visible()
+            .iter()
+            .map(|e| e.alert_id)
+            .collect();
+        assert!(
+            visible.contains(&AlertId::ThermalPressure),
+            "system-scope ThermalPressure must surface regardless of \
+             any [[workloads]] rule; visible: {visible:?}",
         );
     }
 

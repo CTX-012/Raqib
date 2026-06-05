@@ -57,6 +57,19 @@ pub async fn index() -> Response {
 /// `GET /assets/*path` — serve any other embedded file. Bytes get
 /// the right MIME type via `mime_guess` so JS/CSS/SVG/images all
 /// render correctly without us hand-mapping extensions.
+///
+/// v1.3.2 / DISPATCH 57 C1 — add `Cache-Control: no-cache` + `ETag`
+/// headers. The web-zero bug surfaced via Tester DISPATCH 56:
+/// browsers heuristically cache assets whose response carries
+/// nothing but a `Content-Type`, so after a rebuild the browser
+/// would happily serve a stale `index.js` from disk forever. The
+/// fix is the smallest one that closes the staleness window
+/// without forcing a Vite content-hash refactor: `no-cache` makes
+/// the browser revalidate every load, and the `ETag` (derived from
+/// the embedded file's compile-time SHA-256) is what the browser
+/// sends back as `If-None-Match`. We don't yet implement the
+/// conditional-GET 304 short-circuit — that's a future
+/// optimisation; correctness is the win here.
 pub async fn serve_asset(Path(path): Path<String>) -> Response {
     // axum's `*path` capture strips the leading `/assets/`; we look
     // up under the `assets/` prefix in the embed because the Svelte
@@ -70,8 +83,41 @@ pub async fn serve_asset(Path(path): Path<String>) -> Response {
             // the binary's mime crate has shipped a malformed
             // entry, which is unrecoverable at this point.
             .expect("mime_guess produces header-safe ASCII");
+        // ETag from the first 8 bytes of the file's SHA-256 — 64
+        // bits is plenty of entropy for a per-asset identifier
+        // across a small bundle (today: index.js + index.css). The
+        // wrapping quotes make this a "strong" ETag per RFC 9110
+        // §8.8.3 (byte-for-byte identity); the embedded bytes are
+        // immutable for a given binary, so strong semantics hold.
+        let digest = content.metadata.sha256_hash();
+        let etag_value = format!(
+            "\"{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}\"",
+            digest[0],
+            digest[1],
+            digest[2],
+            digest[3],
+            digest[4],
+            digest[5],
+            digest[6],
+            digest[7],
+        );
+        let etag_header = HeaderValue::from_str(&etag_value)
+            // ok: expect — etag_value is a quoted ASCII hex string
+            // by construction (16 hex digits + 2 quote chars). It
+            // cannot contain bytes outside the header-safe range.
+            .expect("etag is quoted ASCII by construction");
         return (
-            [(header::CONTENT_TYPE, header_value)],
+            [
+                (header::CONTENT_TYPE, header_value),
+                // `no-cache` per RFC 9111 §5.2.2.3: cache MAY store,
+                // but MUST revalidate before reuse. Combined with
+                // ETag this gives the operator a fresh asset on
+                // every page load post-rebuild without spamming
+                // bytes on unchanged files (once we add 304
+                // handling).
+                (header::CACHE_CONTROL, HeaderValue::from_static("no-cache")),
+                (header::ETAG, etag_header),
+            ],
             content.data,
         )
             .into_response();

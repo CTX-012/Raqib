@@ -50,6 +50,14 @@ pub struct Config {
     /// named, explicit, operator-visible gate to consult. See
     /// [`GovernorConfig`] for the v1.0.1 phantom-kill scar rationale.
     pub governor: GovernorConfig,
+    /// v1.3.2 / DISPATCH 57 — per-workload suppression rules. Empty
+    /// vec by default. Each rule names a process (exact `comm`
+    /// match) and may suppress its alerts and/or recommendations.
+    /// SCHEMA FIREWALL: every field on [`WorkloadRule`] is
+    /// observation-side — there is no action verb. The OOM-detected
+    /// alert is un-suppressable (see [`Self::resolve_workload_rules`]
+    /// and `runtime::observe_alerts`'s `OomDetected` carve-out).
+    pub workloads: Vec<WorkloadRule>,
 }
 
 /// v1.3.1 / DISPATCH 60 step 2 — names the opt-in actuation gate.
@@ -84,9 +92,71 @@ pub struct GovernorConfig {
     /// `policy.default_ai_action` AND have `send_sigterm` wired
     /// before any signal goes out; all three layers must be
     /// operator-flipped before automated kills can happen. See
-    /// [`super::Config::validate`] for the cross-layer comment
+    /// [`Config::validate`] for the cross-layer comment
     /// pointing forward to where those assertions will live.
     pub auto_actuate: bool,
+}
+
+/// v1.3.2 / DISPATCH 57 — per-workload suppression rule.
+///
+/// EXACTLY 3 fields. Adding a 4th — especially anything that names
+/// an action verb (`auto_kill`, `action_on_breach`, etc.) — is
+/// CI-rejected by two independent guards:
+///
+///   * `tests/config_schema_firewall.rs` (DISPATCH 60 C1) — scans
+///     `src/config.rs` for the forbidden token set. `name`,
+///     `suppress_alerts`, `suppress_recommendations` are all
+///     non-action nouns and clear it.
+///   * `tests/workload_rule_field_count_guard.rs` (this dispatch) —
+///     counts the fields on this struct. Adding a 4th field
+///     trips it, even if the new field is benign.
+///
+/// The combination is by design: schema-firewall keeps action
+/// verbs out, field-count guard keeps even non-verb additions
+/// from sliding in without a deliberate decision. This struct is
+/// the *only* place per-workload behaviour can be tuned; growing
+/// it requires both guards to be updated, both deliberately.
+///
+/// ## Match semantics
+///
+/// `name` is matched against the process `comm` (Linux 15-char
+/// truncated command, see `/proc/<pid>/comm`). Exact match,
+/// case-sensitive. Q5 LOCKED: rule names >15 chars warn at
+/// startup but ARE accepted — a process can self-set its own
+/// `comm` via `prctl(PR_SET_NAME)` to a longer string the kernel
+/// then truncates, so a longer rule name is sometimes
+/// intentional. The warning gives the operator one chance to
+/// notice the typo path.
+///
+/// ## OOM carve-out
+///
+/// `suppress_alerts = true` does NOT silence `AlertId::OomDetected`.
+/// OOM is the first brick in the actuation safety wall — a
+/// workload that was killed by the kernel's OOM-killer must
+/// always surface, even when the operator silenced its routine
+/// pressure alerts. See `runtime::observe_alerts` for the
+/// `OomDetected` carve-out.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WorkloadRule {
+    /// Process `comm` to match (exact, case-sensitive). Empty
+    /// strings are rejected at resolve time; duplicates across
+    /// rules are also rejected — a single workload should not be
+    /// configured twice. Rules naming a not-currently-running
+    /// workload are accepted silently (the rule lights up when /
+    /// if the workload appears).
+    pub name: String,
+    /// When true, the workload's alerts are NOT recorded via
+    /// `AlertState::observe`. The OOM-detected alert is the sole
+    /// carve-out and ALWAYS fires regardless of this flag.
+    pub suppress_alerts: bool,
+    /// When true, the workload's recommendations are NOT projected
+    /// from `AlertEntry` to `Recommendation`. Independent of
+    /// `suppress_alerts`: a workload can show alerts but be muted
+    /// from the suggested-action surface, or vice versa. Q6 lock:
+    /// setting both to true emits an `info!` at resolve time
+    /// noting the redundancy.
+    pub suppress_recommendations: bool,
 }
 
 /// v1.3.1 — per-field overrides for the contract's class-2
@@ -466,6 +536,101 @@ impl Config {
             rate_limit_window_secs: self.policy.rate_limit_window_secs,
         }
     }
+
+    /// v1.3.2 / DISPATCH 57 — resolve the `[[workloads]]` array into
+    /// a name-indexed lookup, the form runtime consumers use.
+    ///
+    /// Returns `Err(ConfigError::Invalid)` on:
+    ///   * empty `name` (a rule with no match key is meaningless)
+    ///   * duplicate `name` across rules (ambiguous which rule wins)
+    ///
+    /// Accepts (with a `tracing::warn!`):
+    ///   * `name` longer than 15 chars — Linux `/proc/<pid>/comm` is
+    ///     a 15-byte buffer; the kernel truncates longer process
+    ///     names. A rule naming `"my_long_workload_binary"` will
+    ///     match nothing for most processes. BUT a process can
+    ///     self-set its `comm` via `prctl(PR_SET_NAME, ...)` to an
+    ///     arbitrary string the kernel still truncates at the
+    ///     comm-read boundary, so a >15-char rule MIGHT be
+    ///     intentional. Warn-but-accept gives the operator one
+    ///     chance to see the typo path.
+    ///
+    /// Accepts silently:
+    ///   * `name` that matches no currently-running workload — the
+    ///     rule lights up when / if the workload appears later.
+    ///
+    /// Side-effects (Q6 Q7 LOCKED):
+    ///   * `tracing::info!` at resolve time listing how many rules
+    ///     loaded and which names are suppressing alerts. Covers
+    ///     the Point A "no audit trail" gap — an operator running
+    ///     headless sees the rule load in `journalctl`.
+    ///   * `tracing::info!` per rule when BOTH `suppress_alerts`
+    ///     AND `suppress_recommendations` are true — Q6: this is
+    ///     equivalent to a workload-level mute, and naming the
+    ///     redundancy helps operators spot the simpler
+    ///     `[[workloads]]` shape.
+    pub fn resolve_workload_rules(
+        &self,
+    ) -> Result<std::collections::HashMap<String, WorkloadRule>, ConfigError> {
+        let mut map: std::collections::HashMap<String, WorkloadRule> =
+            std::collections::HashMap::with_capacity(self.workloads.len());
+        let mut suppress_alerts_names: Vec<String> = Vec::new();
+        for rule in &self.workloads {
+            if rule.name.is_empty() {
+                return Err(ConfigError::Invalid(
+                    "[[workloads]] rule with empty `name` rejected: every \
+                     rule must name a process `comm` to match"
+                        .into(),
+                ));
+            }
+            if map.contains_key(&rule.name) {
+                return Err(ConfigError::Invalid(format!(
+                    "[[workloads]] duplicate name {:?} — each workload may \
+                     have at most one rule",
+                    rule.name,
+                )));
+            }
+            // Linux PROC_COMM_LEN is 16 (TASK_COMM_LEN = 16 incl.
+            // NUL); userspace observes 15 bytes. A longer rule
+            // name CAN still match a process that set its own
+            // `comm` to a string the kernel later truncated to the
+            // same prefix, but warning here keeps the typo path
+            // visible.
+            if rule.name.len() > 15 {
+                tracing::warn!(
+                    rule = %rule.name,
+                    "[[workloads]] rule name is >15 chars; Linux `/proc/<pid>/comm` is \
+                     truncated to 15 bytes, so this rule may never match unless the \
+                     process self-set its `comm` via `prctl(PR_SET_NAME, ...)`.",
+                );
+            }
+            if rule.suppress_alerts && rule.suppress_recommendations {
+                tracing::info!(
+                    rule = %rule.name,
+                    "[[workloads]] rule has BOTH `suppress_alerts` and \
+                     `suppress_recommendations` set — this is effectively a \
+                     workload-level mute; same effect as either flag alone for the \
+                     visible surface.",
+                );
+            }
+            if rule.suppress_alerts {
+                suppress_alerts_names.push(rule.name.clone());
+            }
+            map.insert(rule.name.clone(), rule.clone());
+        }
+        // Point A audit gap closure: log rule load at startup so an
+        // operator running headless sees in `journalctl` exactly
+        // which workloads have suppression active. The OOM
+        // carve-out is also called out so an operator who set
+        // `suppress_alerts = true` doesn't assume OOM events are
+        // hidden too.
+        tracing::info!(
+            count = map.len(),
+            suppressing_alerts = ?suppress_alerts_names,
+            "[[workloads]] rules loaded; OomDetected is un-suppressable regardless",
+        );
+        Ok(map)
+    }
 }
 
 #[cfg(test)]
@@ -670,6 +835,143 @@ mod tests {
         let off_toml = toml::to_string(&off).unwrap();
         let off_parsed: Config = toml::from_str(&off_toml).unwrap();
         assert!(!off_parsed.governor.auto_actuate);
+    }
+
+    /// v1.3.2 / DISPATCH 57 — `resolve_workload_rules` is the
+    /// runtime-facing form of the `[[workloads]]` TOML array. An
+    /// empty `[[workloads]]` resolves to an empty map and is the
+    /// default state for any config that doesn't declare rules.
+    #[test]
+    fn workload_rules_empty_resolves_to_empty_map() {
+        let cfg = Config::default();
+        let map = cfg.resolve_workload_rules().expect("empty must resolve");
+        assert!(map.is_empty());
+    }
+
+    /// Resolve a typical multi-rule config. Each rule appears in
+    /// the resolved map under its `name` key.
+    #[test]
+    fn workload_rules_resolve_to_name_indexed_map() {
+        let mut cfg = Config::default();
+        cfg.workloads.push(WorkloadRule {
+            name: "vllm".into(),
+            suppress_alerts: false,
+            suppress_recommendations: true,
+        });
+        cfg.workloads.push(WorkloadRule {
+            name: "ollama".into(),
+            suppress_alerts: true,
+            suppress_recommendations: false,
+        });
+        let map = cfg.resolve_workload_rules().expect("two rules must resolve");
+        assert_eq!(map.len(), 2);
+        let vllm = map.get("vllm").expect("vllm rule indexed by name");
+        assert!(!vllm.suppress_alerts);
+        assert!(vllm.suppress_recommendations);
+        let ollama = map.get("ollama").expect("ollama rule indexed by name");
+        assert!(ollama.suppress_alerts);
+        assert!(!ollama.suppress_recommendations);
+    }
+
+    /// Empty `name` is meaningless (matches every / no workload
+    /// depending on how you read it) — reject at resolve time so
+    /// the operator sees a startup error rather than confusing
+    /// runtime behaviour.
+    #[test]
+    fn workload_rules_empty_name_rejected() {
+        let mut cfg = Config::default();
+        cfg.workloads.push(WorkloadRule {
+            name: "".into(),
+            suppress_alerts: true,
+            suppress_recommendations: false,
+        });
+        let err = cfg
+            .resolve_workload_rules()
+            .expect_err("empty name must reject");
+        assert!(format!("{err}").contains("empty `name`"));
+    }
+
+    /// Two rules naming the same workload is ambiguous (which
+    /// flag set wins?). Reject so the operator picks one.
+    #[test]
+    fn workload_rules_duplicate_name_rejected() {
+        let mut cfg = Config::default();
+        cfg.workloads.push(WorkloadRule {
+            name: "vllm".into(),
+            suppress_alerts: true,
+            suppress_recommendations: false,
+        });
+        cfg.workloads.push(WorkloadRule {
+            name: "vllm".into(),
+            suppress_alerts: false,
+            suppress_recommendations: true,
+        });
+        let err = cfg
+            .resolve_workload_rules()
+            .expect_err("dup name must reject");
+        assert!(format!("{err}").contains("duplicate name"));
+    }
+
+    /// Q5 LOCKED: rule names longer than 15 chars are ACCEPTED
+    /// (warn-but-pass). Linux `/proc/<pid>/comm` truncates to 15
+    /// bytes, so an over-length rule may not match anything in
+    /// practice — but it MAY match a process that self-set its
+    /// `comm` via `prctl(PR_SET_NAME)`, so rejecting would be
+    /// over-eager.
+    #[test]
+    fn workload_rules_long_name_accepted_warn_only() {
+        let mut cfg = Config::default();
+        cfg.workloads.push(WorkloadRule {
+            name: "a_long_workload_binary_name".into(),
+            suppress_alerts: true,
+            suppress_recommendations: false,
+        });
+        let map = cfg
+            .resolve_workload_rules()
+            .expect("long name must accept");
+        assert!(map.contains_key("a_long_workload_binary_name"));
+    }
+
+    /// A rule naming a not-currently-running workload is accepted
+    /// silently. The rule lights up when the workload appears.
+    #[test]
+    fn workload_rules_unknown_workload_accepted_silently() {
+        let mut cfg = Config::default();
+        cfg.workloads.push(WorkloadRule {
+            name: "future_workload".into(),
+            suppress_alerts: true,
+            suppress_recommendations: false,
+        });
+        let map = cfg.resolve_workload_rules().expect("unknown name OK");
+        assert!(map.contains_key("future_workload"));
+    }
+
+    /// TOML round-trip of the [[workloads]] array preserves rule
+    /// order and flag values. Pins the section header + key
+    /// names so a future schema rename can't drift silently.
+    #[test]
+    fn workload_rules_round_trip_through_toml() {
+        let mut cfg = Config::default();
+        cfg.workloads.push(WorkloadRule {
+            name: "phi3".into(),
+            suppress_alerts: false,
+            suppress_recommendations: true,
+        });
+        let serialized = toml::to_string(&cfg).expect("serialize");
+        assert!(
+            serialized.contains("[[workloads]]"),
+            "serialized TOML must include `[[workloads]]` header; got:\n{serialized}",
+        );
+        assert!(
+            serialized.contains("suppress_recommendations"),
+            "serialized TOML must include the suppress_recommendations key; got:\n{serialized}",
+        );
+        let parsed: Config =
+            toml::from_str(&serialized).expect("round-trip deserialize");
+        assert_eq!(parsed.workloads.len(), 1);
+        assert_eq!(parsed.workloads[0].name, "phi3");
+        assert!(parsed.workloads[0].suppress_recommendations);
+        assert!(!parsed.workloads[0].suppress_alerts);
     }
 
     /// v1.3.1 / DISPATCH 60 step 2 — pinning the v1.0.1 phantom-kill

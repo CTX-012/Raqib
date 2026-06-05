@@ -155,6 +155,102 @@ rate_limit_max_kills = 3
 rate_limit_window_secs = 60
 ```
 
+## Per-workload suppression rules (v1.3.2 / DISPATCH 57)
+
+`[[workloads]]` rules let an operator silence routine pressure
+alerts and/or recommendations for specific noisy workloads. The
+rule shape is intentionally minimal — three fields, all
+observation-side:
+
+```toml
+[[workloads]]
+name = "ollama"
+suppress_alerts = false
+suppress_recommendations = true
+
+[[workloads]]
+name = "rviz2"
+suppress_alerts = true
+suppress_recommendations = true
+```
+
+### Match: `comm`, not the command-line
+
+`name` matches against `/proc/<pid>/comm` (the kernel's
+`task_struct->comm` field, exposed to userspace as a 15-byte
+truncated string). It is **exact, case-sensitive**, and matches
+**only the binary name**, not the full command-line from
+`/proc/<pid>/cmdline`. A process launched as `/usr/local/bin/ollama
+serve` has `comm = "ollama"`; use that. Confirm with:
+
+```sh
+cat /proc/<pid>/comm
+```
+
+### 15-character truncation caveat
+
+`TASK_COMM_LEN` is 16, so userspace sees up to 15 bytes. A rule
+with `name = "my_long_workload_binary_name"` will warn at startup
+because it exceeds 15 chars, but it is **accepted** — a process
+CAN call `prctl(PR_SET_NAME, ...)` to set its own `comm` to an
+arbitrary string the kernel later truncates, so the long rule
+might be intentional. The warning lets you notice the typo path.
+
+### OOM is un-suppressable
+
+`suppress_alerts = true` does **NOT** silence `OomDetected`.
+OOM is the first brick in the actuation safety wall — a workload
+the kernel's OOM-killer terminated must always surface, even
+when the operator silenced its routine pressure alerts. This is
+structural: OOM fires through the exit path (lifecycle
+tracker), which doesn't read the rule.
+
+The OOM **recommendation** CAN be muted via
+`suppress_recommendations = true`: the alarm fires, the
+suggested-action text can be silenced for operators who already
+know how to respond to the OOM signal.
+
+### Truth table
+
+| `suppress_alerts` | `suppress_recommendations` | routine pressure alert | routine rec | OOM alert | OOM rec |
+| --- | --- | --- | --- | --- | --- |
+| false | false | shown | shown | shown | shown |
+| true  | false | hidden | hidden¹ | shown | shown |
+| false | true  | shown | hidden | shown | hidden |
+| true  | true  | hidden | hidden | shown | hidden |
+
+¹ When `suppress_alerts = true`, the routine pressure alert is
+never observed, so no rec is projected from it. The "rec hidden"
+cell here is a consequence of the alert not existing rather than
+the rec being individually muted.
+
+### Setting both flags
+
+`suppress_alerts = true` AND `suppress_recommendations = true` is
+effectively a workload-level mute. The resolver emits a
+`tracing::info!` line at startup noting the redundancy, so an
+operator running `journalctl -u edge_monitor.service` sees a
+hint that either flag alone would have the same visible effect.
+
+### System-scope alerts are not affected
+
+`RAM pressure` and `ThermalPressure` are whole-host alerts with
+no per-workload identity. The `[[workloads]]` rules do not
+silence them. To tune the host-wide thresholds, use the
+`[thresholds]` section above.
+
+### Audit trail
+
+On startup, the resolver emits:
+
+```
+INFO ... [[workloads]] rules loaded; OomDetected is un-suppressable
+     regardless count=2 suppressing_alerts=["ollama", "rviz2"]
+```
+
+so an operator can confirm in `journalctl` that the intended
+rules took effect, without waiting for an alert to NOT appear.
+
 ## Changing policy without restarting
 
 Not supported in v1. Phase 2 includes config hot-reload on `SIGHUP`.

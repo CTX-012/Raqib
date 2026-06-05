@@ -31,7 +31,7 @@ Four-step incremental cadence (mirrors Phase 3's v1.1.11 → v1.2.0):
 |---|---|---|
 | **v1.3.0** | `EDGE_MONITOR_THERMAL_ROOT` env override | **shipped** |
 | **v1.3.1** | `[thresholds]` deployment overrides (corrigendum: NO `[samplers]`; see v1.3.1 sub-section) | **shipped** |
-| v1.3.2 | `[[workloads]]` per-workload rules + suppression flags | scoped |
+| **v1.3.2** | `[[workloads]]` per-workload rules + suppression flags | **shipped** |
 | v1.3.3 | INA3221 power rails (consumes `ux_contract` v0.3.16) | scoped |
 | Jetson pass | Empirical validation on Orin | scoped (post-v1.3.3) |
 
@@ -188,37 +188,98 @@ each tick).
 
 Estimated size: ~150-250 LoC. No contract change needed.
 
-### v1.3.2 — per-workload rules (scoped)
+### v1.3.2 — per-workload rules (shipped 2026-06-05 via DISPATCH 57)
 
 Per impl §5 + Q2 exact-name + Q3 both-suppress-flags + Q4 minimal
-fields:
+fields. **As-shipped** schema (note: trimmed from the pre-ship
+sketch — `WorkloadThresholds` per-workload threshold overrides
+were dropped from v1.3.2 scope per the C2 field-count discipline;
+they remain a v1.4.x candidate behind a separate operator
+decision):
 
 ```rust
 pub struct WorkloadRule {
-    pub name: String,                           // exact match
-    #[serde(default)]
-    pub thresholds: Option<WorkloadThresholds>, // per-workload override
-    #[serde(default)]
-    pub suppress_recommendations: bool,
-    #[serde(default)]
+    pub name: String,                  // exact /proc/<pid>/comm match
     pub suppress_alerts: bool,
-    // NO action_on_breach, NO auto_kill, NO priority — SCHEMA FIREWALL
-}
-
-pub struct WorkloadThresholds {
-    pub vram_attention_pct: Option<f64>,
-    pub ram_attention_pct: Option<f64>,
-    pub kv_attention_pct: Option<f64>,
-    // NOT thermal — thermal is host-scope, not per-workload
+    pub suppress_recommendations: bool,
+    // NO action_on_breach, NO auto_kill, NO priority — schema firewall
+    // NO thresholds — Q4 LOCKED, deferred to v1.4.x if needed
 }
 ```
 
-Consumption at `runtime::observe_alerts` (alert observation) and
-`src/recommend.rs::project_one` (rec projection): rule lookup by
-exact `comm` match; if found, use the override threshold (with
-contract fallback for None fields) and honor the suppress flags.
+Exactly 3 fields. Adding a 4th — even a benign one — trips the
+new field-count guard
+`tests/workload_rule_field_count_guard.rs::workload_rule_has_
+exactly_three_fields`. The forcing function is the count, not
+the name: the existing DISPATCH 60 C1 name-based firewall
+catches action-verb additions; the count guard catches even
+benign-shaped additions like `display_name` or
+`category_override`. Together they pin both the schema shape
+and the schema vocabulary.
 
-Estimated size: ~200-300 LoC. No contract change needed.
+**Consumption (as-shipped)**:
+
+  * `runtime::observe_alerts` (C3): per-PID metric-driven
+    `observe` calls (VRAM / KV / GovernorArmed) are skipped
+    when the matched rule's `suppress_alerts == true`. The
+    OOM and `WorkloadExited` exit-path alerts are
+    STRUCTURALLY un-gated — they fire through
+    `observe_exit_alert`, which doesn't consult the rules.
+    The OOM carve-out is therefore architectural rather than
+    a conditional inside the loop (the Inspector truth table
+    assumed option (i); we shipped option (ii) on the lean
+    that the structural carve-out is harder to silently break
+    in future refactors).
+
+  * `recommend::project_one` (C4): the projector returns
+    `None` for any alert whose `entry.workload_name` matches a
+    rule with `suppress_recommendations == true`. Q3 (ii)
+    LOCKED: this includes OOM recs — the alarm fires
+    (un-suppressable), but the "Consider restarting" text can
+    be muted.
+
+  * System-scope alerts (RAM, ThermalPressure) have an empty
+    `workload_name` by construction (`WorkloadRef::system()`),
+    and the resolver rejects rules with empty names, so the
+    lookup never matches. System-scope alerts and recs are
+    unaffected by any `[[workloads]]` rule.
+
+**Resolver-time validation** (`Config::resolve_workload_rules`):
+
+  * empty `name`         → reject (`RuntimeError::Config`)
+  * duplicate `name`     → reject (ambiguous flag-set winner)
+  * `name.len() > 15`    → warn-but-accept (Q5: kernel
+    `TASK_COMM_LEN` is 16, but `prctl(PR_SET_NAME)` self-set
+    is a known escape)
+  * name matches no current workload → accept silently (the
+    rule lights up when the workload appears)
+
+**Startup audit trail** (Point A closure): the resolver emits
+`tracing::info!` listing the loaded rule count and which names
+are suppressing alerts. A headless operator running with
+`--no-ui` sees in `journalctl -u edge_monitor.service`:
+
+```
+INFO ... [[workloads]] rules loaded; OomDetected is
+     un-suppressable regardless count=2
+     suppressing_alerts=["ollama", "rviz2"]
+```
+
+When BOTH flags are true on a rule, a per-rule `tracing::info!`
+notes the redundancy (Q6) — naming the simpler shape helps
+operators spot the typo path.
+
+**Companion fix (DISPATCH 57 C1)**: web `/assets/*` responses
+now carry `Cache-Control: no-cache` + `ETag` headers, closing
+the v1.3.x-line "web-zero" staleness bug (Tester DISPATCH 56).
+Conditional-GET 304 short-circuiting deferred; correctness
+(no stale bundle after rebuild) is the v1.3.2 win.
+
+Actual size: ~600 LoC source + tests (vs ~200-300 LoC pre-
+estimate). Drivers: the C2 firewall test + the C3/C4 cross-
+test coverage (suppress_alerts × OOM × system-scope and
+suppress_recommendations × OOM × system-scope) added more test
+LoC than expected; the source additions stayed close to estimate.
 
 ### v1.3.3 — INA3221 power rails (scoped, consumes `ux_contract` v0.3.16)
 

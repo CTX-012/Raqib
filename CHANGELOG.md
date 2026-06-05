@@ -6,6 +6,210 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project aims to adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 once `v1.0.0` is tagged. Until then, minor versions may include breaking changes.
 
+## [1.3.2] — 2026-06-05 — Phase 4 step 3: per-workload suppression rules + web cache headers
+
+DISPATCH 57. Adds `[[workloads]]` per-workload suppression rules
+(three observation-side fields, OOM un-suppressable by
+construction), closes the v1.3.x-line "web-zero" staleness bug,
+and lands two more authority-lock layers (field-count firewall +
+the field-count test's coverage of even benign schema growth).
+
+**AUTHORITY LOCK (the TENTH explicit reaffirmation):** v1.3.2
+subtracts output (silences observations and recs) but never adds
+action. The `[[workloads]]` schema has no `action_on_breach`,
+`auto_kill`, or `priority` field; DISPATCH 60's CI-enforced
+schema firewall (C1) would reject any such addition, and the
+new field-count guard (C2) catches even benign additions. The
+inert `governor.auto_actuate` gate from v1.3.1+D60 remains
+unread by any consumer; this dispatch adds no reader.
+
+Four firewall layers now hold the observe-only line:
+
+  1. TYPE (`ux_contract::SuggestedAction: Copy` —
+     discriminator-not-callable, pinned by
+     `suggested_action_is_copy`)
+  2. WIRING (`tests/recommendation_observe_only_guard.rs` —
+     `src/recommend.rs` has no actuation imports)
+  3. SCHEMA, NAME (`tests/config_schema_firewall.rs` — no
+     action-verb field names in `src/config.rs`)
+  4. SCHEMA, COUNT (`tests/workload_rule_field_count_guard.rs`
+     — `WorkloadRule` has exactly 3 fields)
+
+### Added
+
+- **`[[workloads]]` per-workload suppression rules**
+  (`src/config.rs::WorkloadRule`, C2). Exactly 3 fields:
+  - `name: String` — exact match against `/proc/<pid>/comm`;
+    empty / duplicate rejected at resolve time, >15 chars
+    warns-and-accepts (Q5 LOCKED — the kernel truncation is
+    real, but `prctl(PR_SET_NAME)` self-set is a known
+    escape).
+  - `suppress_alerts: bool` — gates the per-PID metric-driven
+    `observe_alerts` calls (VRAM/KV/GovernorArmed). The OOM
+    exit-driven path is structurally bypassed; OOM always
+    surfaces (C3 carve-out).
+  - `suppress_recommendations: bool` — gates the `project_one`
+    call site; the underlying alert is unaffected. Q3 (ii)
+    LOCKED: applies to OOM rec too — the alarm fires, the
+    suggested-action text can be muted.
+
+- **`Config::resolve_workload_rules`** →
+  `HashMap<String, WorkloadRule>` (C2). Called once at
+  `Runtime::new`. Rejects empty / duplicate `name`. Emits a
+  startup `tracing::info!` listing the rule count + which
+  names are suppressing alerts (Point A audit-trail gap
+  closure). Per-rule `info!` when both flags are set (Q6
+  redundancy hint).
+
+- **`RuntimeState.workload_rules` field** (C3). The resolved
+  lookup, stashed once at startup so the observe loop and the
+  rec projector can read it without re-resolving.
+
+- **Cache headers on `GET /assets/*`**
+  (`src/web/handlers.rs`, C1) — closes the v1.3.x-line
+  "web-zero" staleness bug surfaced by Tester DISPATCH 56:
+  - `Cache-Control: no-cache` — browsers MUST revalidate
+    every load (RFC 9111 §5.2.2.3).
+  - `ETag: "<16-hex>"` — strong validator from the first 8
+    bytes of the embedded file's compile-time SHA-256. Strong
+    semantics hold because the embed is compile-time-immutable
+    per asset (RFC 9110 §8.8.3).
+
+  Conditional-GET 304 short-circuiting deliberately deferred —
+  correctness (no stale bundle) is the win in this release;
+  bandwidth savings come later. Verified live:
+  ```
+  HTTP/1.1 200 OK
+  content-type: text/javascript
+  cache-control: no-cache
+  etag: "6024f9735986e014"
+  content-length: 57242
+  ```
+
+- **Field-count firewall**
+  (`tests/workload_rule_field_count_guard.rs`, C2). Reads
+  `src/config.rs`, locates `pub struct WorkloadRule { ... }`,
+  counts `pub <name>:` declaration lines, asserts == 3. Trips
+  on a 4th field even if the new field is benign-shaped
+  (`display_name`, `category_override` — Q4 DEFERRED to
+  v1.4.x). Complements the name-based firewall; together they
+  pin the schema shape AND the schema vocabulary. Two
+  self-tests pin the counter itself
+  (`counter_finds_known_fields`,
+  `counter_returns_none_when_struct_absent`).
+
+### Changed
+
+- **`/assets/*` 200 responses now carry 3 headers** (was 1):
+  `content-type`, `cache-control`, `etag`. No wire-protocol
+  change for any other endpoint. Browser cache behaviour
+  changes; backend remains read-only.
+
+- **`Runtime::new` is now load-bearing for `[[workloads]]`
+  validity**: invalid rules (empty name, duplicate) cause
+  `RuntimeError::Config` rather than silently dropping at
+  observe time. v1.0.1 phantom-kill lesson: silent override is
+  worse than a fail-to-start.
+
+### How the OOM carve-out works (architectural)
+
+OOM (and `WorkloadExited`) fire through `observe_exit_alert`
+(the v1.1.11 L8 exit-driven path). The new `suppress_alerts`
+gate lives ONLY in `observe_alerts` (the metric-driven path).
+The two paths are disjoint by construction:
+
+  observe_exit_alert   → state.alerts.observe_exit  (NO gate)
+  observe_alerts      → state.alerts.observe        (GATED)
+
+So OOM is structurally un-suppressable from the alert side
+— no explicit `AlertId::OomDetected => always` branch is needed
+inside the loop. The Inspector truth table assumed option (i)
+with an explicit exception; we picked option (ii) — the
+structural carve-out is harder to silently break in future
+refactors because it's load-bearing on the SHAPE of the alert
+dispatcher (lifecycle exit vs metric tick), not a flag on a
+field. Test `oom_fires_even_when_workload_suppress_alerts_is
+_true` pins this as observable behaviour.
+
+The OOM RECOMMENDATION goes through `project_one` like any
+other rec and is therefore gated by `suppress_recommendations`
+per Q3 (ii). The operator may mute the "Consider restarting"
+text without muting the underlying OOM alarm.
+
+### Tests
+
+- 989 → 995 (+6 across C3 + C4; C2 added test count covered by
+  the file delta; C1 added 1 integration test in
+  `tests/web_e2e.rs`).
+- New per-workload-rule tests:
+  `suppress_alerts_silences_per_pid_observes_for_matching
+   _workload`,
+  `oom_fires_even_when_workload_suppress_alerts_is_true`,
+  `system_scope_alerts_not_silenceable_via_workload_rule`,
+  `suppress_recommendations_mutes_per_workload_rec_for_matching
+   _alerts`,
+  `suppress_recommendations_also_mutes_oom_rec_alert_still
+   _fires`,
+  `suppress_recommendations_does_not_mute_system_scope_recs`.
+- Resolver tests (7):
+  `workload_rules_empty_resolves_to_empty_map`,
+  `workload_rules_resolve_to_name_indexed_map`,
+  `workload_rules_empty_name_rejected`,
+  `workload_rules_duplicate_name_rejected`,
+  `workload_rules_long_name_accepted_warn_only`,
+  `workload_rules_unknown_workload_accepted_silently`,
+  `workload_rules_round_trip_through_toml`.
+- Field-count firewall (3):
+  `workload_rule_has_exactly_three_fields`,
+  `counter_finds_known_fields`,
+  `counter_returns_none_when_struct_absent`.
+- Web cache (1): `assets_carry_cache_control_and_etag_headers`.
+- `tests/recommendation_observe_only_guard.rs` (DISPATCH 45 /
+  C5) and `tests/config_schema_firewall.rs` (DISPATCH 60 / C1)
+  still pass: the v1.3.2 additions are observation-side; no
+  forbidden token, no schema verb introduced.
+
+### Docs
+
+- `edge_monitor.toml.example`: new `[[workloads]]` section
+  (all examples commented out) with rationales for the three
+  non-default flag combinations (`ollama` recs-only, `rviz2`
+  both, `phi3` alerts-only).
+- `docs/configuration.md`: new "Per-workload suppression
+  rules" section with the `comm`-not-cmdline match recipe, the
+  15-char truncation caveat, the OOM un-suppressable carve-out,
+  the truth table, and the audit-trail `journalctl` example.
+- `docs/PHASE4_DESIGN.md`: v1.3.2 sub-section promoted with all
+  Q1–Q9 decisions in-context.
+
+### `ux_contract`
+
+**NOT bumped**: v1.3.2 introduces no wire-protocol or contract
+change. The contract stays at v0.3.16 (`HostVitals.power_rails`).
+Per-workload rules are internal config; the wire surface is
+unchanged.
+
+### Gates
+
+- `cargo build --release --workspace` clean (1.3.2)
+- `cargo clippy --workspace --all-targets -- -D warnings` clean
+- `cargo test --workspace --all-targets`: **995 / 0**
+- `RUSTDOCFLAGS=-D warnings cargo doc --workspace --no-deps`
+  clean
+- `./target/release/edge_monitor --version` →
+  `edge_monitor 1.3.2`
+- Cache headers verified live via `curl -I /assets/index.js`
+  against the release build.
+
+### Phase 4 next steps
+
+Per `docs/PHASE4_DESIGN.md`:
+
+  - v1.3.3 — INA3221 power rails (consumes `ux_contract`
+    v0.3.16; sysfs reads from
+    `/sys/bus/i2c/drivers/ina3221/…`)
+  - Jetson pass — empirical validation on Orin (post-v1.3.3)
+
 ## [1.3.1] — 2026-06-03 — Phase 4 step 2: hybrid threshold config
 
 Phase 4's deployment-threshold-override layer. The contract's class-2

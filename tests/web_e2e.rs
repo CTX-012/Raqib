@@ -123,6 +123,67 @@ async fn missing_asset_returns_404() {
     assert_eq!(status, reqwest::StatusCode::NOT_FOUND);
 }
 
+/// v1.3.2 / DISPATCH 57 C1 — assets MUST carry `Cache-Control:
+/// no-cache` and an `ETag` so the browser revalidates after every
+/// rebuild instead of serving a heuristically-cached stale bundle.
+/// The "web-zero" Tester report (DISPATCH 56) traced a stale
+/// `index.js` to a missing `Cache-Control` — assets shipped only a
+/// `Content-Type`, and browsers heuristic-cache anything else.
+///
+/// Test asserts ON a real asset path: `assets/index.js` is emitted
+/// by `npm run build`. If the dist bundle is empty (fresh clone
+/// before `npm run build`), the test skips its assertions but
+/// still passes — same shape as
+/// `root_route_serves_embedded_index_or_placeholder` above.
+#[tokio::test]
+async fn assets_carry_cache_control_and_etag_headers() {
+    let (addr, _tx) = spawn_server().await;
+    let url = format!("http://{addr}/assets/index.js");
+    let resp = reqwest::get(&url).await.unwrap();
+    if resp.status() == reqwest::StatusCode::NOT_FOUND {
+        // Fresh clone, no `npm run build` yet — nothing to assert.
+        // The header behaviour is bound to the existence branch in
+        // `serve_asset`; missing-asset 404s do not (and need not)
+        // carry cache headers.
+        return;
+    }
+    assert!(
+        resp.status().is_success(),
+        "expected 200 OK for /assets/index.js, got {}",
+        resp.status(),
+    );
+
+    let cache_control = resp
+        .headers()
+        .get(reqwest::header::CACHE_CONTROL)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    assert_eq!(
+        cache_control, "no-cache",
+        "asset must ship `Cache-Control: no-cache` so browsers \
+         revalidate every load (web-zero scar). got: {cache_control:?}",
+    );
+
+    let etag = resp
+        .headers()
+        .get(reqwest::header::ETAG)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    // Strong ETag per RFC 9110 §8.8.3: 16 hex digits inside a pair
+    // of double quotes. Format is `"hhhhhhhhhhhhhhhh"`.
+    assert!(
+        etag.len() == 18 && etag.starts_with('"') && etag.ends_with('"'),
+        "ETag must be a quoted 16-hex-digit strong validator, got: {etag:?}",
+    );
+    let hex_body = &etag[1..etag.len() - 1];
+    assert!(
+        hex_body.chars().all(|c| c.is_ascii_hexdigit()),
+        "ETag body must be lowercase hex, got: {hex_body:?}",
+    );
+}
+
 #[tokio::test]
 async fn websocket_initial_snapshot_then_updates() {
     use tokio_tungstenite::tungstenite::Message;

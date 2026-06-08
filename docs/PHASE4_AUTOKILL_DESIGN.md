@@ -33,12 +33,17 @@ Tear down any one and the other two still prevent a phantom kill. **Tearing down
 | 2 | Wiring (forbidden-token scan of `recommend.rs`) | `tests/recommendation_observe_only_guard.rs:56-105` | **Intact** — actuation never touches `recommend.rs` |
 | 3 | Config schema (documentary only — weakest) | `thresholds.rs:46-51` + v1.3.2 `WorkloadRule` | **Replaced by an automated test BEFORE any actuation** |
 
+## Prerequisite invariant (DISPATCH 62-E)
+
+Before actuation wiring (step 5) can be safe, `GovernorExecutor::evaluate()` must short-circuit PIDs already on the kill queue. Today it re-emits `SignalTermSent` every tick for the same PID; once the tick-loop actuation site reads decisions, a single stubborn process drains the entire 3-kills/60s budget over three ticks and starves other AI processes. Fix: add `KillAction::AlreadyPending`, returned for `pending_kills.contains(pid)` before the per-process evaluate branch — mirrors the existing `AlreadyExited` shortcut. This lands as **step 0 (prerequisite)** below, before or with step 3.
+
 ## Build sequence (9 steps, gated, bisectable)
 
 Steps **1–2 are observe-only-safe and fire now** (DISPATCH 60). Steps **3+ are gated behind v1.3.2 ratification.** **Actuation goes live only at step 5, behind `auto_actuate == true` (default false)** — shipped-but-dark until opt-in.
 
 | Step | Work | Touches | Actuation live? |
 |---|---|---|---|
+| **0 (PREREQ)** | **`KillAction::AlreadyPending`** — `evaluate()` returns it for `pending_kills.contains(pid)` *before* the evaluate branch, symmetric with the existing `AlreadyExited` shortcut. Without it a stubborn post-SIGTERM PID re-emits every tick and drains the 3/60s rate-limit budget alone, starving other kills. (DISPATCH 62-E, latent today, bites at step 5.) | `governor/executor.rs` | no |
 | 1 | `tests/config_schema_firewall.rs` — token-list guard mirroring the recommendation guard; replaces the documentary Firewall 3 | tests | no |
 | 2 | `governor.auto_actuate: bool` config field, **default false**; no actuation code | config | no |
 | 3 | Widen `evaluate()` to accept a **threshold-breach projection** (M4 option b), **VRAM%-only** | `governor/`, runtime projection | no |

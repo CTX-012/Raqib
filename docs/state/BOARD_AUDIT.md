@@ -158,6 +158,12 @@ Items previously tagged **[VERIFY]** were inferred from screenshots/chat; **DISP
 **Safety (the auto-kill frontier — own pre-pass):**
 - Opt-in/off-by-default, SIGTERM execution site, tiebreaker, sustain gate, web auth, firewall teardown, governor thermal-wiring of the existing NVML signal (2.1 / 2.6)
 
+**DISPATCH 62 findings (routed 2026-06-08):**
+- **62-E (MED, latent)** → `KillAction::AlreadyPending` rate-limit-drain fix → **PREREQUISITE in PHASE4_AUTOKILL_DESIGN (step 0)**, lands before/with actuation step 3
+- **62-A (MED)** → residual "running actively" lie: `primary_metric()` returns `RUNNING_ACTIVELY` for ROS2/Embeddings/Unknown even when `ActivityState=Idle`; narrow tier hides the contradiction → **standalone fix dispatch now** (`workloads.rs:380-382`)
+- **62-C (MED)** → sha256 runner-digest leak root-caused to `ollama_api.rs:356` → already in Phase 5 TUI cluster
+- **v1.3.x LOW cleanup batch:** 62-B (CHANGELOG "twelve"→11), 62-D (dead const `KILL_ARM_WINDOW_SECS`), 62-G (`config_schema_firewall.rs` SCHEMA_PATHS fragility if schema splits files), 62-F (v1.3.2 tag — resolves when operator tags post-smoke-test)
+
 **Closed by DISPATCH 58 (no longer backlog):**
 - BUG-P5-2 sub-Hz ROS2 — shipped v1.1.5 (2.2)
 - Top Processes sort — shipped, 3-state cycle (2.3)

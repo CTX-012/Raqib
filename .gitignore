@@ -40,3 +40,4 @@ audit.log
 /bus.jpg
 /q.py
 /yolo_loop.py
+install_docs*.sh

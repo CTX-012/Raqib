@@ -377,9 +377,45 @@ fn primary_metric(row: &Row) -> String {
         // historical fallback for v1.0.1; Phase 2 sampler work
         // will give each its own honest signal.
         WorkloadCategory::Agent => AGENT_ALIVE.to_string(),
+        // v1.3.1 / DISPATCH 63 — gate the historical "running
+        // actively" fallback on the row's ActivityState. Phase 2
+        // (v1.1.x) added per-category samplers that emit
+        // ActivityState, but `primary_metric` never read it — so a
+        // ROS2/Embeddings/Unknown row whose sampler reports Idle or
+        // NotDetected still claimed "running actively" in the
+        // primary-metric column while the activity column read
+        // "idle" / "—" right next to it. The contradiction is the
+        // last surviving piece of the v1.0.0 founding lie Phase 1
+        // acknowledged but Phase 2 never finished. Closes 62-A.
+        //
+        // The "honest neutral token" for an Idle / NotDetected row
+        // is the em-dash already used by `activity_label` for
+        // NotDetected. Same character, same semantic, sourced from
+        // the SEPARATOR_ALLOWLIST in `tests/copy_strings_via_
+        // contract.rs` so the guard stays green without inventing a
+        // new contract string. (A future contract amendment could
+        // add `ux_contract::status::IDLE_NEUTRAL` to lift the
+        // string, but the em-dash convention is established and
+        // the literal is already allowed.)
+        //
+        // The `None` arm — no Phase-2 sampler ran for this row at
+        // all (no `activity` reported this tick) — keeps the
+        // legacy `RUNNING_ACTIVELY` fallback because there's no
+        // visible activity column to contradict it (the column
+        // auto-hides per `show_activity` when every visible row's
+        // activity is None).
         WorkloadCategory::ROS2
         | WorkloadCategory::Embeddings
-        | WorkloadCategory::Unknown => RUNNING_ACTIVELY.to_string(),
+        | WorkloadCategory::Unknown => {
+            use ux_contract::activity::ActivityState;
+            match row.activity {
+                Some(ActivityState::Idle | ActivityState::NotDetected) => {
+                    "—".to_string()
+                }
+                // Active, Loading, or None (no sampler).
+                _ => RUNNING_ACTIVELY.to_string(),
+            }
+        }
     }
 }
 
@@ -859,6 +895,147 @@ mod tests {
         // And Vision parallel — fps absent → fall back.
         let v = make_row(WorkloadCategory::Vision, WorkloadStatus::Healthy);
         assert_eq!(primary_metric(&v), RUNNING_ACTIVELY);
+    }
+
+    // ── DISPATCH 63 / 62-A — the residual "running actively" lie ────
+    //
+    // Phase 1 acknowledged that ROS2 / Embeddings / Unknown rows had
+    // no honest signal of their own; Phase 2 added the ActivityState
+    // sampler, but `primary_metric` never consulted it. With the
+    // gate in place, an Idle or NotDetected row no longer claims
+    // "running actively" in the primary-metric column while the
+    // activity column right next to it reads "idle" / "—".
+
+    /// Helper that builds a Row in one of the three "fallback"
+    /// categories so the per-category tests below stay tight.
+    fn fallback_row(
+        category: WorkloadCategory,
+        activity: Option<ux_contract::activity::ActivityState>,
+    ) -> Row {
+        let mut row = make_row(category, WorkloadStatus::Healthy);
+        row.activity = activity;
+        row
+    }
+
+    /// `ROS2` row with `Idle` activity MUST NOT claim "running
+    /// actively". This is the wide-tier visible contradiction Phase
+    /// 2 left in place.
+    #[test]
+    fn ros2_idle_does_not_claim_running_actively() {
+        use ux_contract::activity::ActivityState;
+        let row = fallback_row(WorkloadCategory::ROS2, Some(ActivityState::Idle));
+        let s = primary_metric(&row);
+        assert_ne!(
+            s, RUNNING_ACTIVELY,
+            "ROS2 + Idle MUST NOT show {RUNNING_ACTIVELY:?}; got {s:?}",
+        );
+    }
+
+    /// `Embeddings` row with `Idle` activity MUST NOT claim
+    /// "running actively". Same shape as the ROS2 case.
+    #[test]
+    fn embeddings_idle_does_not_claim_running_actively() {
+        use ux_contract::activity::ActivityState;
+        let row = fallback_row(WorkloadCategory::Embeddings, Some(ActivityState::Idle));
+        let s = primary_metric(&row);
+        assert_ne!(
+            s, RUNNING_ACTIVELY,
+            "Embeddings + Idle MUST NOT show {RUNNING_ACTIVELY:?}; got {s:?}",
+        );
+    }
+
+    /// `Unknown` row with `Idle` activity MUST NOT claim "running
+    /// actively". Closes the third surviving variant of the lie.
+    #[test]
+    fn unknown_idle_does_not_claim_running_actively() {
+        use ux_contract::activity::ActivityState;
+        let row = fallback_row(WorkloadCategory::Unknown, Some(ActivityState::Idle));
+        let s = primary_metric(&row);
+        assert_ne!(
+            s, RUNNING_ACTIVELY,
+            "Unknown + Idle MUST NOT show {RUNNING_ACTIVELY:?}; got {s:?}",
+        );
+    }
+
+    /// `NotDetected` is the other failure mode: the sampler ran but
+    /// couldn't determine state. Same display rule — no honest
+    /// claim, neutral marker only.
+    #[test]
+    fn ros2_not_detected_does_not_claim_running_actively() {
+        use ux_contract::activity::ActivityState;
+        let row = fallback_row(
+            WorkloadCategory::ROS2,
+            Some(ActivityState::NotDetected),
+        );
+        let s = primary_metric(&row);
+        assert_ne!(
+            s, RUNNING_ACTIVELY,
+            "ROS2 + NotDetected MUST NOT show {RUNNING_ACTIVELY:?}; got {s:?}",
+        );
+    }
+
+    /// No regression of the honest case: `Active` MUST still
+    /// surface as `running actively` for every fallback category.
+    /// The gate exists to mute lies on Idle / NotDetected, not to
+    /// erase the legitimate fallback when the sampler reports work.
+    #[test]
+    fn active_state_still_renders_running_actively_for_fallback_categories() {
+        use ux_contract::activity::ActivityState;
+        for cat in [
+            WorkloadCategory::ROS2,
+            WorkloadCategory::Embeddings,
+            WorkloadCategory::Unknown,
+        ] {
+            let row = fallback_row(cat, Some(ActivityState::Active));
+            assert_eq!(
+                primary_metric(&row),
+                RUNNING_ACTIVELY,
+                "{cat:?} + Active should still show {RUNNING_ACTIVELY:?}",
+            );
+        }
+    }
+
+    /// `Loading` activity is honest about ongoing warm-up — keep
+    /// the legacy `RUNNING_ACTIVELY` fallback (the workload IS
+    /// doing observable startup work).
+    #[test]
+    fn loading_activity_keeps_running_actively_fallback() {
+        use ux_contract::activity::ActivityState;
+        let row = fallback_row(WorkloadCategory::ROS2, Some(ActivityState::Loading));
+        assert_eq!(primary_metric(&row), RUNNING_ACTIVELY);
+    }
+
+    /// `None` activity — no Phase-2 sampler reported for this row
+    /// at all — keeps the legacy fallback. The activity column
+    /// auto-hides when every visible row's activity is None (per
+    /// `show_activity`), so there's no contradiction to close.
+    #[test]
+    fn none_activity_keeps_running_actively_fallback() {
+        let row = fallback_row(WorkloadCategory::Unknown, None);
+        assert_eq!(primary_metric(&row), RUNNING_ACTIVELY);
+    }
+
+    /// Narrow-tier corollary. The narrow `format!` at lines ~515
+    /// drops the primary-metric column entirely (the format string
+    /// has no `{:<14}` slot for it), so the lie was never visible
+    /// to a narrow-tier operator in the current code. The gate
+    /// still hardens against a future layout change that reintroduces
+    /// primary_metric in narrow rendering: even if it did, the
+    /// returned string would no longer be the lie for an Idle row.
+    #[test]
+    fn narrow_tier_invariant_returned_metric_is_not_the_lie_for_idle() {
+        use ux_contract::activity::ActivityState;
+        // Mirror the exact row a narrow operator's screen would
+        // describe — a ROS2 node going Idle between publishes.
+        let row = fallback_row(WorkloadCategory::ROS2, Some(ActivityState::Idle));
+        let s = primary_metric(&row);
+        assert_ne!(
+            s, RUNNING_ACTIVELY,
+            "narrow-tier display invariant: even if a future layout \
+             change re-introduces primary_metric on narrow rows, the \
+             returned string MUST NOT be the lie for an Idle row. \
+             got {s:?}",
+        );
     }
 
     // ── F2 — start-time formatter (Sprint-3 per-row spawn column) ──

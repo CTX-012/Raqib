@@ -1,0 +1,9 @@
+HTTP/1.1 200 OK
+content-type: text/javascript
+cache-control: no-cache
+etag: "6024f9735986e014"
+vary: origin, access-control-request-method, access-control-request-headers
+access-control-allow-origin: *
+content-length: 57242
+date: Fri, 05 Jun 2026 10:57:08 GMT
+

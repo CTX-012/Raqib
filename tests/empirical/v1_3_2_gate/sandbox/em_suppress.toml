@@ -1,0 +1,19 @@
+[runtime]
+audit_log_path = "/home/faiz/edge_monitor-l14/tests/empirical/v1_3_2_gate/sandbox/audit.jsonl"
+[storage]
+run_store_path = "/home/faiz/edge_monitor-l14/tests/empirical/v1_3_2_gate/sandbox/run_store"
+fingerprint_cache = "/home/faiz/edge_monitor-l14/tests/empirical/v1_3_2_gate/sandbox/fp.json"
+
+# Low RAM threshold so RamPressure (system-scope) fires
+[thresholds]
+ram_attention_pct = 10.0
+ram_critical_pct = 20.0
+vram_attention_pct = 0.5
+vram_critical_pct = 1.0
+alert_sustain_secs = 2
+
+# Per-workload suppression rule targeting the ollama runner
+[[workloads]]
+name = "ollama"
+suppress_alerts = true
+suppress_recommendations = false

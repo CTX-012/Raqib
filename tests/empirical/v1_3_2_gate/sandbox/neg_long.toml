@@ -1,0 +1,3 @@
+[[workloads]]
+name = "this_is_a_very_long_workload_name_over_15_chars"
+suppress_alerts = true

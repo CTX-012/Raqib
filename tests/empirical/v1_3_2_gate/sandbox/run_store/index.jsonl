@@ -1,0 +1,5 @@
+{"run_id":"fdf72da9-8154-422b-b0b0-711d86b2d427","model_key":"bash","exit_time":"2026-06-05T10:56:11.417912487Z","relative_path":"runs/2026-06-05/run-fdf72da9-8154-422b-b0b0-711d86b2d427.json"}
+{"run_id":"a90ba193-250a-4f3b-b6f0-07daea10f5c2","model_key":"smollm:135m","exit_time":"2026-06-05T10:58:56.823605173Z","relative_path":"runs/2026-06-05/run-a90ba193-250a-4f3b-b6f0-07daea10f5c2.json"}
+{"run_id":"eed40fa0-c695-446d-a596-17a372bdc612","model_key":"smollm:135m","exit_time":"2026-06-05T10:59:32.831035706Z","relative_path":"runs/2026-06-05/run-eed40fa0-c695-446d-a596-17a372bdc612.json"}
+{"run_id":"c104bdb2-da42-4e3b-997a-219290be28a2","model_key":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","exit_time":"2026-06-05T11:03:42.984946491Z","relative_path":"runs/2026-06-05/run-c104bdb2-da42-4e3b-997a-219290be28a2.json"}
+{"run_id":"f6d2cc06-de77-4757-9021-b644ddc97a0b","model_key":"bash","exit_time":"2026-06-05T11:05:18.001507554Z","relative_path":"runs/2026-06-05/run-f6d2cc06-de77-4757-9021-b644ddc97a0b.json"}

@@ -1,0 +1,18 @@
+[runtime]
+audit_log_path = "/home/faiz/edge_monitor-l14/tests/empirical/v1_3_2_gate/sandbox/audit.jsonl"
+[storage]
+run_store_path = "/home/faiz/edge_monitor-l14/tests/empirical/v1_3_2_gate/sandbox/run_store"
+fingerprint_cache = "/home/faiz/edge_monitor-l14/tests/empirical/v1_3_2_gate/sandbox/fp.json"
+
+[thresholds]
+ram_attention_pct = 10.0
+ram_critical_pct = 20.0
+alert_sustain_secs = 2
+
+# Suppress per-workload alerts AND recommendations for bash workloads
+# This is the safety-floor test: even with BOTH suppression flags,
+# WorkloadExited (and OomDetected) must STILL fire via observe_exit_alert.
+[[workloads]]
+name = "bash"
+suppress_alerts = true
+suppress_recommendations = true

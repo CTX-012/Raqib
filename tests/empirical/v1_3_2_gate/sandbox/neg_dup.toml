@@ -1,0 +1,6 @@
+[[workloads]]
+name = "ollama"
+suppress_alerts = true
+[[workloads]]
+name = "ollama"
+suppress_recommendations = true

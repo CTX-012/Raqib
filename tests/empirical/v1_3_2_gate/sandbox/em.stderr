@@ -1,0 +1,880 @@
+{"timestamp":"2026-06-05T10:56:06.349326Z","level":"INFO","message":"loading config","path":"tests/empirical/v1_3_2_gate/sandbox/edge_monitor.toml"}
+{"timestamp":"2026-06-05T10:56:06.349675Z","level":"INFO","message":"[[workloads]] rules loaded; OomDetected is un-suppressable regardless","count":0,"suppressing_alerts":"[]"}
+{"timestamp":"2026-06-05T10:56:06.351334Z","level":"INFO","message":"web: starting","addr":"127.0.0.1:7070","frontend":"embedded"}
+{"timestamp":"2026-06-05T10:56:06.351458Z","level":"WARN","message":"web: server exited with error","error":"Address already in use (os error 98)"}
+{"timestamp":"2026-06-05T10:56:06.393940Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:56:06.447743Z","level":"INFO","message":"RAPL energy_uj unreadable; CPU watts unavailable","path":"/sys/class/powercap/intel-rapl:0/energy_uj","error":"Permission denied (os error 13)"}
+{"timestamp":"2026-06-05T10:56:06.447897Z","level":"INFO","message":"tick","tick":1,"ai_processes":6,"exits":0}
+{"timestamp":"2026-06-05T10:56:06.447901Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":0.0,"rss_mb":67}
+{"timestamp":"2026-06-05T10:56:06.447908Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":0.0,"rss_mb":279}
+{"timestamp":"2026-06-05T10:56:06.447910Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":0.0,"rss_mb":305}
+{"timestamp":"2026-06-05T10:56:06.447911Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":0.0,"rss_mb":261}
+{"timestamp":"2026-06-05T10:56:06.447913Z","level":"INFO","message":"ai-process","pid":111310,"name":"bash","category":"Inference","cpu_pct":0.0,"rss_mb":3}
+{"timestamp":"2026-06-05T10:56:06.447914Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:56:07.393157Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:56:07.418669Z","level":"INFO","message":"tick","tick":2,"ai_processes":6,"exits":0}
+{"timestamp":"2026-06-05T10:56:07.418688Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":0.0,"rss_mb":67}
+{"timestamp":"2026-06-05T10:56:07.418693Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":2.001572847366333,"rss_mb":279}
+{"timestamp":"2026-06-05T10:56:07.418695Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":1.0007864236831665,"rss_mb":305}
+{"timestamp":"2026-06-05T10:56:07.418696Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":3.002359390258789,"rss_mb":261}
+{"timestamp":"2026-06-05T10:56:07.418698Z","level":"INFO","message":"ai-process","pid":111310,"name":"bash","category":"Inference","cpu_pct":0.0,"rss_mb":3}
+{"timestamp":"2026-06-05T10:56:07.418699Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:56:08.391866Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:56:08.417489Z","level":"INFO","message":"tick","tick":3,"ai_processes":6,"exits":0}
+{"timestamp":"2026-06-05T10:56:08.417507Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":0.0,"rss_mb":67}
+{"timestamp":"2026-06-05T10:56:08.417518Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":1.0012677907943726,"rss_mb":279}
+{"timestamp":"2026-06-05T10:56:08.417521Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":1.0012677907943726,"rss_mb":305}
+{"timestamp":"2026-06-05T10:56:08.417522Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":2.002535581588745,"rss_mb":261}
+{"timestamp":"2026-06-05T10:56:08.417524Z","level":"INFO","message":"ai-process","pid":111310,"name":"bash","category":"Inference","cpu_pct":0.0,"rss_mb":3}
+{"timestamp":"2026-06-05T10:56:08.417525Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:56:09.381839Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:56:09.409152Z","level":"INFO","message":"tick","tick":4,"ai_processes":6,"exits":0}
+{"timestamp":"2026-06-05T10:56:09.409188Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":0.0,"rss_mb":67}
+{"timestamp":"2026-06-05T10:56:09.409194Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":2.0203185081481934,"rss_mb":279}
+{"timestamp":"2026-06-05T10:56:09.409196Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":2.0203185081481934,"rss_mb":305}
+{"timestamp":"2026-06-05T10:56:09.409198Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":3.030477523803711,"rss_mb":261}
+{"timestamp":"2026-06-05T10:56:09.409199Z","level":"INFO","message":"ai-process","pid":111310,"name":"bash","category":"Inference","cpu_pct":0.0,"rss_mb":3}
+{"timestamp":"2026-06-05T10:56:09.409201Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:56:10.384933Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:56:10.421576Z","level":"INFO","message":"tick","tick":5,"ai_processes":6,"exits":1}
+{"timestamp":"2026-06-05T10:56:10.421594Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":0.0,"rss_mb":67}
+{"timestamp":"2026-06-05T10:56:10.421602Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":0.0,"rss_mb":279}
+{"timestamp":"2026-06-05T10:56:10.421604Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":0.0,"rss_mb":305}
+{"timestamp":"2026-06-05T10:56:10.421606Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":1.9934370517730713,"rss_mb":261}
+{"timestamp":"2026-06-05T10:56:10.421609Z","level":"INFO","message":"ai-process","pid":111310,"name":"bash","category":"Inference","cpu_pct":0.0,"rss_mb":3}
+{"timestamp":"2026-06-05T10:56:10.421611Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:56:11.392225Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:56:11.419218Z","level":"INFO","message":"tick","tick":6,"ai_processes":5,"exits":2}
+{"timestamp":"2026-06-05T10:56:11.419250Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":0.0,"rss_mb":67}
+{"timestamp":"2026-06-05T10:56:11.419256Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":0.9928019642829895,"rss_mb":279}
+{"timestamp":"2026-06-05T10:56:11.419259Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":0.9928019642829895,"rss_mb":305}
+{"timestamp":"2026-06-05T10:56:11.419261Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":17.87043571472168,"rss_mb":269}
+{"timestamp":"2026-06-05T10:56:11.419264Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:56:11.419270Z","level":"INFO","message":"exit","pid":111310,"name":"bash","category":"Inference","uptime_s":9,"avg_cpu_pct":0.0,"peak_cpu_pct":0.0,"peak_rss_mb":3,"samples":4}
+{"timestamp":"2026-06-05T10:56:11.419274Z","level":"INFO","message":"alert visible (headless)","alert.fire":"WorkloadExited","scope":"Workload(111310)","pid":111310,"workload":"bash"}
+{"timestamp":"2026-06-05T10:56:12.381916Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:56:12.407371Z","level":"INFO","message":"tick","tick":7,"ai_processes":5,"exits":0}
+{"timestamp":"2026-06-05T10:56:12.407392Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":0.0,"rss_mb":67}
+{"timestamp":"2026-06-05T10:56:12.407405Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":1.0105488300323486,"rss_mb":279}
+{"timestamp":"2026-06-05T10:56:12.407407Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":0.0,"rss_mb":305}
+{"timestamp":"2026-06-05T10:56:12.407408Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":3.031646728515625,"rss_mb":268}
+{"timestamp":"2026-06-05T10:56:12.407410Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:56:12.407412Z","level":"INFO","message":"alert visible (headless)","alert.fire":"WorkloadExited","scope":"Workload(111310)","pid":111310,"workload":"bash"}
+{"timestamp":"2026-06-05T10:56:13.400263Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:56:13.426766Z","level":"INFO","message":"tick","tick":8,"ai_processes":5,"exits":0}
+{"timestamp":"2026-06-05T10:56:13.426787Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":0.9820038676261902,"rss_mb":67}
+{"timestamp":"2026-06-05T10:56:13.426791Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":1.9640077352523804,"rss_mb":279}
+{"timestamp":"2026-06-05T10:56:13.426793Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":0.9820038676261902,"rss_mb":305}
+{"timestamp":"2026-06-05T10:56:13.426795Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":0.9820038676261902,"rss_mb":268}
+{"timestamp":"2026-06-05T10:56:13.426803Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:56:13.426806Z","level":"INFO","message":"alert visible (headless)","alert.fire":"WorkloadExited","scope":"Workload(111310)","pid":111310,"workload":"bash"}
+{"timestamp":"2026-06-05T10:56:14.406110Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:56:14.434700Z","level":"INFO","message":"tick","tick":9,"ai_processes":5,"exits":0}
+{"timestamp":"2026-06-05T10:56:14.434723Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":0.0,"rss_mb":67}
+{"timestamp":"2026-06-05T10:56:14.434728Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":0.9941316246986389,"rss_mb":279}
+{"timestamp":"2026-06-05T10:56:14.434730Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":1.9882632493972778,"rss_mb":305}
+{"timestamp":"2026-06-05T10:56:14.434731Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":2.9823946952819824,"rss_mb":269}
+{"timestamp":"2026-06-05T10:56:14.434733Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:56:14.434736Z","level":"INFO","message":"alert visible (headless)","alert.fire":"WorkloadExited","scope":"Workload(111310)","pid":111310,"workload":"bash"}
+{"timestamp":"2026-06-05T10:56:15.398438Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:56:15.424473Z","level":"INFO","message":"tick","tick":10,"ai_processes":5,"exits":0}
+{"timestamp":"2026-06-05T10:56:15.424493Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":0.0,"rss_mb":67}
+{"timestamp":"2026-06-05T10:56:15.424503Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":0.0,"rss_mb":279}
+{"timestamp":"2026-06-05T10:56:15.424504Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":1.0077621936798096,"rss_mb":305}
+{"timestamp":"2026-06-05T10:56:15.424506Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":7.054335594177246,"rss_mb":269}
+{"timestamp":"2026-06-05T10:56:15.424508Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:56:15.424510Z","level":"INFO","message":"alert visible (headless)","alert.fire":"WorkloadExited","scope":"Workload(111310)","pid":111310,"workload":"bash"}
+{"timestamp":"2026-06-05T10:56:16.399890Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:56:16.424872Z","level":"INFO","message":"tick","tick":11,"ai_processes":5,"exits":0}
+{"timestamp":"2026-06-05T10:56:16.424923Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":0.0,"rss_mb":67}
+{"timestamp":"2026-06-05T10:56:16.424927Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":1.9971715211868286,"rss_mb":279}
+{"timestamp":"2026-06-05T10:56:16.424936Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":0.9985857605934143,"rss_mb":305}
+{"timestamp":"2026-06-05T10:56:16.424938Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":9.985857963562012,"rss_mb":270}
+{"timestamp":"2026-06-05T10:56:16.424940Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:56:16.424942Z","level":"INFO","message":"alert visible (headless)","alert.fire":"WorkloadExited","scope":"Workload(111310)","pid":111310,"workload":"bash"}
+{"timestamp":"2026-06-05T10:56:17.407382Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:56:17.457837Z","level":"INFO","message":"tick","tick":12,"ai_processes":5,"exits":0}
+{"timestamp":"2026-06-05T10:56:17.457863Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":0.0,"rss_mb":67}
+{"timestamp":"2026-06-05T10:56:17.457868Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":0.9922141432762146,"rss_mb":279}
+{"timestamp":"2026-06-05T10:56:17.457871Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":0.0,"rss_mb":305}
+{"timestamp":"2026-06-05T10:56:17.457873Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":2.976642370223999,"rss_mb":270}
+{"timestamp":"2026-06-05T10:56:17.457875Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:56:17.457878Z","level":"INFO","message":"alert visible (headless)","alert.fire":"WorkloadExited","scope":"Workload(111310)","pid":111310,"workload":"bash"}
+{"timestamp":"2026-06-05T10:56:18.380739Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:56:18.405447Z","level":"INFO","message":"tick","tick":13,"ai_processes":5,"exits":0}
+{"timestamp":"2026-06-05T10:56:18.405484Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":0.0,"rss_mb":67}
+{"timestamp":"2026-06-05T10:56:18.405491Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":0.0,"rss_mb":279}
+{"timestamp":"2026-06-05T10:56:18.405495Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":2.0554800033569336,"rss_mb":305}
+{"timestamp":"2026-06-05T10:56:18.405503Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":2.0554800033569336,"rss_mb":270}
+{"timestamp":"2026-06-05T10:56:18.405506Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:56:18.405510Z","level":"INFO","message":"alert visible (headless)","alert.fire":"WorkloadExited","scope":"Workload(111310)","pid":111310,"workload":"bash"}
+{"timestamp":"2026-06-05T10:56:19.396236Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:56:19.421767Z","level":"INFO","message":"tick","tick":14,"ai_processes":5,"exits":0}
+{"timestamp":"2026-06-05T10:56:19.421800Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":0.0,"rss_mb":67}
+{"timestamp":"2026-06-05T10:56:19.421808Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":1.9693918228149414,"rss_mb":279}
+{"timestamp":"2026-06-05T10:56:19.421810Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":0.0,"rss_mb":305}
+{"timestamp":"2026-06-05T10:56:19.421813Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":1.9693918228149414,"rss_mb":270}
+{"timestamp":"2026-06-05T10:56:19.421815Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:56:19.421819Z","level":"INFO","message":"alert visible (headless)","alert.fire":"WorkloadExited","scope":"Workload(111310)","pid":111310,"workload":"bash"}
+{"timestamp":"2026-06-05T10:56:20.382061Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:56:20.408196Z","level":"INFO","message":"tick","tick":15,"ai_processes":5,"exits":0}
+{"timestamp":"2026-06-05T10:56:20.408221Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":0.0,"rss_mb":67}
+{"timestamp":"2026-06-05T10:56:20.408227Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":1.0143805742263794,"rss_mb":279}
+{"timestamp":"2026-06-05T10:56:20.408230Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":2.028761148452759,"rss_mb":305}
+{"timestamp":"2026-06-05T10:56:20.408232Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":2.028761148452759,"rss_mb":270}
+{"timestamp":"2026-06-05T10:56:20.408234Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:56:20.408237Z","level":"INFO","message":"alert visible (headless)","alert.fire":"WorkloadExited","scope":"Workload(111310)","pid":111310,"workload":"bash"}
+{"timestamp":"2026-06-05T10:56:21.400338Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:56:21.426505Z","level":"INFO","message":"tick","tick":16,"ai_processes":5,"exits":0}
+{"timestamp":"2026-06-05T10:56:21.426525Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":0.0,"rss_mb":67}
+{"timestamp":"2026-06-05T10:56:21.426529Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":0.0,"rss_mb":279}
+{"timestamp":"2026-06-05T10:56:21.426531Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":0.9820660352706909,"rss_mb":305}
+{"timestamp":"2026-06-05T10:56:21.426533Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":5.892396450042725,"rss_mb":271}
+{"timestamp":"2026-06-05T10:56:21.426544Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:56:21.426546Z","level":"INFO","message":"alert visible (headless)","alert.fire":"WorkloadExited","scope":"Workload(111310)","pid":111310,"workload":"bash"}
+{"timestamp":"2026-06-05T10:56:22.397719Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:56:22.423206Z","level":"INFO","message":"tick","tick":17,"ai_processes":5,"exits":0}
+{"timestamp":"2026-06-05T10:56:22.423229Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":0.0,"rss_mb":67}
+{"timestamp":"2026-06-05T10:56:22.423233Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":1.0026166439056396,"rss_mb":279}
+{"timestamp":"2026-06-05T10:56:22.423235Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":1.0026166439056396,"rss_mb":305}
+{"timestamp":"2026-06-05T10:56:22.423236Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":9.023550033569336,"rss_mb":271}
+{"timestamp":"2026-06-05T10:56:22.423238Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:56:22.423240Z","level":"INFO","message":"alert visible (headless)","alert.fire":"WorkloadExited","scope":"Workload(111310)","pid":111310,"workload":"bash"}
+{"timestamp":"2026-06-05T10:56:23.384046Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:56:23.412259Z","level":"INFO","message":"tick","tick":18,"ai_processes":5,"exits":0}
+{"timestamp":"2026-06-05T10:56:23.412283Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":0.0,"rss_mb":67}
+{"timestamp":"2026-06-05T10:56:23.412289Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":2.0273280143737793,"rss_mb":279}
+{"timestamp":"2026-06-05T10:56:23.412293Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":1.0136640071868896,"rss_mb":305}
+{"timestamp":"2026-06-05T10:56:23.412295Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":5.068320274353027,"rss_mb":272}
+{"timestamp":"2026-06-05T10:56:23.412297Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:56:23.412300Z","level":"INFO","message":"alert visible (headless)","alert.fire":"WorkloadExited","scope":"Workload(111310)","pid":111310,"workload":"bash"}
+{"timestamp":"2026-06-05T10:56:24.386944Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:56:24.413383Z","level":"INFO","message":"tick","tick":19,"ai_processes":5,"exits":0}
+{"timestamp":"2026-06-05T10:56:24.413406Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":0.0,"rss_mb":67}
+{"timestamp":"2026-06-05T10:56:24.413411Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":0.9973385334014893,"rss_mb":279}
+{"timestamp":"2026-06-05T10:56:24.413416Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":1.9946770668029785,"rss_mb":305}
+{"timestamp":"2026-06-05T10:56:24.413418Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":22.93878746032715,"rss_mb":266}
+{"timestamp":"2026-06-05T10:56:24.413427Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:56:24.413429Z","level":"INFO","message":"alert visible (headless)","alert.fire":"WorkloadExited","scope":"Workload(111310)","pid":111310,"workload":"bash"}
+{"timestamp":"2026-06-05T10:56:25.401313Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:56:25.431275Z","level":"INFO","message":"tick","tick":20,"ai_processes":5,"exits":0}
+{"timestamp":"2026-06-05T10:56:25.431294Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":0.0,"rss_mb":67}
+{"timestamp":"2026-06-05T10:56:25.431299Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":0.9857863187789917,"rss_mb":279}
+{"timestamp":"2026-06-05T10:56:25.431301Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":0.0,"rss_mb":305}
+{"timestamp":"2026-06-05T10:56:25.431304Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":6.900504112243652,"rss_mb":257}
+{"timestamp":"2026-06-05T10:56:25.431305Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:56:25.431308Z","level":"INFO","message":"alert visible (headless)","alert.fire":"WorkloadExited","scope":"Workload(111310)","pid":111310,"workload":"bash"}
+{"timestamp":"2026-06-05T10:56:26.388216Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:56:26.413687Z","level":"INFO","message":"tick","tick":21,"ai_processes":5,"exits":0}
+{"timestamp":"2026-06-05T10:56:26.413720Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":1.0133224725723267,"rss_mb":67}
+{"timestamp":"2026-06-05T10:56:26.413724Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":0.0,"rss_mb":279}
+{"timestamp":"2026-06-05T10:56:26.413726Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":1.0133224725723267,"rss_mb":305}
+{"timestamp":"2026-06-05T10:56:26.413727Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":3.0399675369262695,"rss_mb":258}
+{"timestamp":"2026-06-05T10:56:26.413729Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:56:26.413731Z","level":"INFO","message":"alert visible (headless)","alert.fire":"WorkloadExited","scope":"Workload(111310)","pid":111310,"workload":"bash"}
+{"timestamp":"2026-06-05T10:56:27.382735Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:56:27.408535Z","level":"INFO","message":"tick","tick":22,"ai_processes":5,"exits":0}
+{"timestamp":"2026-06-05T10:56:27.408561Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":0.0,"rss_mb":67}
+{"timestamp":"2026-06-05T10:56:27.408565Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":1.0055060386657715,"rss_mb":279}
+{"timestamp":"2026-06-05T10:56:27.408573Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":0.0,"rss_mb":305}
+{"timestamp":"2026-06-05T10:56:27.408575Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":21.11562728881836,"rss_mb":278}
+{"timestamp":"2026-06-05T10:56:27.408576Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:56:27.408579Z","level":"INFO","message":"alert visible (headless)","alert.fire":"WorkloadExited","scope":"Workload(111310)","pid":111310,"workload":"bash"}
+{"timestamp":"2026-06-05T10:56:28.398653Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:56:28.424780Z","level":"INFO","message":"tick","tick":23,"ai_processes":5,"exits":0}
+{"timestamp":"2026-06-05T10:56:28.424836Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":0.0,"rss_mb":67}
+{"timestamp":"2026-06-05T10:56:28.424843Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":0.9843286871910095,"rss_mb":279}
+{"timestamp":"2026-06-05T10:56:28.424846Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":0.9843286871910095,"rss_mb":305}
+{"timestamp":"2026-06-05T10:56:28.424848Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":1.968657374382019,"rss_mb":262}
+{"timestamp":"2026-06-05T10:56:28.424851Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:56:28.424854Z","level":"INFO","message":"alert visible (headless)","alert.fire":"WorkloadExited","scope":"Workload(111310)","pid":111310,"workload":"bash"}
+{"timestamp":"2026-06-05T10:56:29.400078Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:56:29.426221Z","level":"INFO","message":"tick","tick":24,"ai_processes":5,"exits":0}
+{"timestamp":"2026-06-05T10:56:29.426245Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":0.0,"rss_mb":67}
+{"timestamp":"2026-06-05T10:56:29.426251Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":0.0,"rss_mb":279}
+{"timestamp":"2026-06-05T10:56:29.426255Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":2.9956300258636475,"rss_mb":305}
+{"timestamp":"2026-06-05T10:56:29.426259Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":5.991260051727295,"rss_mb":262}
+{"timestamp":"2026-06-05T10:56:29.426261Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:56:29.426264Z","level":"INFO","message":"alert visible (headless)","alert.fire":"WorkloadExited","scope":"Workload(111310)","pid":111310,"workload":"bash"}
+{"timestamp":"2026-06-05T10:56:30.382134Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:56:30.410068Z","level":"INFO","message":"tick","tick":25,"ai_processes":5,"exits":0}
+{"timestamp":"2026-06-05T10:56:30.410101Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":0.0,"rss_mb":67}
+{"timestamp":"2026-06-05T10:56:30.410107Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":2.0366179943084717,"rss_mb":279}
+{"timestamp":"2026-06-05T10:56:30.410110Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":1.0183089971542358,"rss_mb":305}
+{"timestamp":"2026-06-05T10:56:30.410112Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":0.0,"rss_mb":262}
+{"timestamp":"2026-06-05T10:56:30.410114Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:56:30.410116Z","level":"INFO","message":"alert visible (headless)","alert.fire":"WorkloadExited","scope":"Workload(111310)","pid":111310,"workload":"bash"}
+{"timestamp":"2026-06-05T10:56:31.402832Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:56:31.429071Z","level":"INFO","message":"tick","tick":26,"ai_processes":5,"exits":1}
+{"timestamp":"2026-06-05T10:56:31.429094Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":0.0,"rss_mb":67}
+{"timestamp":"2026-06-05T10:56:31.429101Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":0.9797019958496094,"rss_mb":279}
+{"timestamp":"2026-06-05T10:56:31.429103Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":0.9797019958496094,"rss_mb":305}
+{"timestamp":"2026-06-05T10:56:31.429105Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":1.9594039916992188,"rss_mb":262}
+{"timestamp":"2026-06-05T10:56:31.429106Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:56:31.429109Z","level":"INFO","message":"alert visible (headless)","alert.fire":"WorkloadExited","scope":"Workload(111310)","pid":111310,"workload":"bash"}
+{"timestamp":"2026-06-05T10:56:32.382291Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:56:32.409342Z","level":"INFO","message":"tick","tick":27,"ai_processes":5,"exits":0}
+{"timestamp":"2026-06-05T10:56:32.409373Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":0.0,"rss_mb":67}
+{"timestamp":"2026-06-05T10:56:32.409379Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":0.0,"rss_mb":279}
+{"timestamp":"2026-06-05T10:56:32.409382Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":2.0419864654541016,"rss_mb":305}
+{"timestamp":"2026-06-05T10:56:32.409385Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":4.083972930908203,"rss_mb":262}
+{"timestamp":"2026-06-05T10:56:32.409387Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:56:32.409391Z","level":"INFO","message":"alert visible (headless)","alert.fire":"WorkloadExited","scope":"Workload(111310)","pid":111310,"workload":"bash"}
+{"timestamp":"2026-06-05T10:56:33.402430Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:56:33.429279Z","level":"INFO","message":"tick","tick":28,"ai_processes":5,"exits":1}
+{"timestamp":"2026-06-05T10:56:33.429299Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":0.0,"rss_mb":67}
+{"timestamp":"2026-06-05T10:56:33.429304Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":1.960445761680603,"rss_mb":279}
+{"timestamp":"2026-06-05T10:56:33.429306Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":0.9802228808403015,"rss_mb":305}
+{"timestamp":"2026-06-05T10:56:33.429308Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":3.920891523361206,"rss_mb":262}
+{"timestamp":"2026-06-05T10:56:33.429309Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:56:33.429311Z","level":"INFO","message":"alert visible (headless)","alert.fire":"WorkloadExited","scope":"Workload(111310)","pid":111310,"workload":"bash"}
+{"timestamp":"2026-06-05T10:56:34.398106Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:56:34.425217Z","level":"INFO","message":"tick","tick":29,"ai_processes":5,"exits":0}
+{"timestamp":"2026-06-05T10:56:34.425236Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":0.0,"rss_mb":67}
+{"timestamp":"2026-06-05T10:56:34.425242Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":1.0043466091156006,"rss_mb":279}
+{"timestamp":"2026-06-05T10:56:34.425246Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":0.0,"rss_mb":305}
+{"timestamp":"2026-06-05T10:56:34.425249Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":4.017386436462402,"rss_mb":262}
+{"timestamp":"2026-06-05T10:56:34.425250Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:56:34.425253Z","level":"INFO","message":"alert visible (headless)","alert.fire":"WorkloadExited","scope":"Workload(111310)","pid":111310,"workload":"bash"}
+{"timestamp":"2026-06-05T10:56:35.392594Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:56:35.417905Z","level":"INFO","message":"tick","tick":30,"ai_processes":5,"exits":1}
+{"timestamp":"2026-06-05T10:56:35.417930Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":1.0055253505706787,"rss_mb":67}
+{"timestamp":"2026-06-05T10:56:35.417951Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":0.0,"rss_mb":279}
+{"timestamp":"2026-06-05T10:56:35.417954Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":2.0110507011413574,"rss_mb":305}
+{"timestamp":"2026-06-05T10:56:35.417957Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":4.022101402282715,"rss_mb":262}
+{"timestamp":"2026-06-05T10:56:35.417971Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:56:35.417974Z","level":"INFO","message":"alert visible (headless)","alert.fire":"WorkloadExited","scope":"Workload(111310)","pid":111310,"workload":"bash"}
+{"timestamp":"2026-06-05T10:56:36.383118Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:56:36.412175Z","level":"INFO","message":"tick","tick":31,"ai_processes":5,"exits":0}
+{"timestamp":"2026-06-05T10:56:36.412197Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":0.0,"rss_mb":67}
+{"timestamp":"2026-06-05T10:56:36.412201Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":1.0095956325531006,"rss_mb":279}
+{"timestamp":"2026-06-05T10:56:36.412203Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":0.0,"rss_mb":305}
+{"timestamp":"2026-06-05T10:56:36.412205Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":1.0095956325531006,"rss_mb":262}
+{"timestamp":"2026-06-05T10:56:36.412207Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:56:36.412209Z","level":"INFO","message":"alert visible (headless)","alert.fire":"WorkloadExited","scope":"Workload(111310)","pid":111310,"workload":"bash"}
+{"timestamp":"2026-06-05T10:56:37.403457Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:56:37.429560Z","level":"INFO","message":"tick","tick":32,"ai_processes":5,"exits":1}
+{"timestamp":"2026-06-05T10:56:37.429592Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":0.0,"rss_mb":67}
+{"timestamp":"2026-06-05T10:56:37.429597Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":1.9599324464797974,"rss_mb":279}
+{"timestamp":"2026-06-05T10:56:37.429599Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":1.9599324464797974,"rss_mb":305}
+{"timestamp":"2026-06-05T10:56:37.429601Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":6.8597636222839355,"rss_mb":262}
+{"timestamp":"2026-06-05T10:56:37.429602Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:56:37.429605Z","level":"INFO","message":"alert visible (headless)","alert.fire":"WorkloadExited","scope":"Workload(111310)","pid":111310,"workload":"bash"}
+{"timestamp":"2026-06-05T10:56:38.390137Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:56:38.415929Z","level":"INFO","message":"tick","tick":33,"ai_processes":5,"exits":0}
+{"timestamp":"2026-06-05T10:56:38.415948Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":0.0,"rss_mb":67}
+{"timestamp":"2026-06-05T10:56:38.415952Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":1.0136200189590454,"rss_mb":279}
+{"timestamp":"2026-06-05T10:56:38.415960Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":1.0136200189590454,"rss_mb":305}
+{"timestamp":"2026-06-05T10:56:38.415962Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":2.027240037918091,"rss_mb":262}
+{"timestamp":"2026-06-05T10:56:38.415963Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:56:38.415966Z","level":"INFO","message":"alert visible (headless)","alert.fire":"WorkloadExited","scope":"Workload(111310)","pid":111310,"workload":"bash"}
+{"timestamp":"2026-06-05T10:56:39.397160Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:56:39.426399Z","level":"INFO","message":"tick","tick":34,"ai_processes":5,"exits":2}
+{"timestamp":"2026-06-05T10:56:39.426427Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":0.0,"rss_mb":67}
+{"timestamp":"2026-06-05T10:56:39.426432Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":1.986077070236206,"rss_mb":279}
+{"timestamp":"2026-06-05T10:56:39.426434Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":0.993038535118103,"rss_mb":305}
+{"timestamp":"2026-06-05T10:56:39.426435Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":8.937347412109375,"rss_mb":280}
+{"timestamp":"2026-06-05T10:56:39.426437Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:56:39.426440Z","level":"INFO","message":"alert visible (headless)","alert.fire":"WorkloadExited","scope":"Workload(111310)","pid":111310,"workload":"bash"}
+{"timestamp":"2026-06-05T10:56:40.400246Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:56:40.425637Z","level":"INFO","message":"tick","tick":35,"ai_processes":5,"exits":0}
+{"timestamp":"2026-06-05T10:56:40.425655Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":0.0,"rss_mb":67}
+{"timestamp":"2026-06-05T10:56:40.425659Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":0.9969231486320496,"rss_mb":279}
+{"timestamp":"2026-06-05T10:56:40.425662Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":1.9938462972640991,"rss_mb":305}
+{"timestamp":"2026-06-05T10:56:40.425663Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":2.990769386291504,"rss_mb":270}
+{"timestamp":"2026-06-05T10:56:40.425665Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:56:40.425668Z","level":"INFO","message":"alert visible (headless)","alert.fire":"WorkloadExited","scope":"Workload(111310)","pid":111310,"workload":"bash"}
+{"timestamp":"2026-06-05T10:56:41.394784Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:56:41.420153Z","level":"INFO","message":"tick","tick":36,"ai_processes":5,"exits":0}
+{"timestamp":"2026-06-05T10:56:41.420176Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":0.0,"rss_mb":67}
+{"timestamp":"2026-06-05T10:56:41.420180Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":1.0054656267166138,"rss_mb":279}
+{"timestamp":"2026-06-05T10:56:41.420183Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":2.0109312534332275,"rss_mb":305}
+{"timestamp":"2026-06-05T10:56:41.420184Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":1.0054656267166138,"rss_mb":269}
+{"timestamp":"2026-06-05T10:56:41.420186Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:56:41.420188Z","level":"INFO","message":"alert visible (headless)","alert.fire":"WorkloadExited","scope":"Workload(111310)","pid":111310,"workload":"bash"}
+{"timestamp":"2026-06-05T10:56:42.403415Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:56:42.430734Z","level":"INFO","message":"tick","tick":37,"ai_processes":5,"exits":0}
+{"timestamp":"2026-06-05T10:56:42.430756Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":0.0,"rss_mb":67}
+{"timestamp":"2026-06-05T10:56:42.430759Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":0.991313636302948,"rss_mb":279}
+{"timestamp":"2026-06-05T10:56:42.430761Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":0.0,"rss_mb":305}
+{"timestamp":"2026-06-05T10:56:42.430763Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":5.947881698608398,"rss_mb":270}
+{"timestamp":"2026-06-05T10:56:42.430765Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:56:42.430768Z","level":"INFO","message":"alert visible (headless)","alert.fire":"WorkloadExited","scope":"Workload(111310)","pid":111310,"workload":"bash"}
+{"timestamp":"2026-06-05T10:56:43.390194Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:56:43.416084Z","level":"INFO","message":"tick","tick":38,"ai_processes":5,"exits":0}
+{"timestamp":"2026-06-05T10:56:43.416104Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":0.0,"rss_mb":67}
+{"timestamp":"2026-06-05T10:56:43.416111Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":0.0,"rss_mb":279}
+{"timestamp":"2026-06-05T10:56:43.416113Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":1.013520359992981,"rss_mb":305}
+{"timestamp":"2026-06-05T10:56:43.416115Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":9.121683120727539,"rss_mb":270}
+{"timestamp":"2026-06-05T10:56:43.416117Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:56:43.416119Z","level":"INFO","message":"alert visible (headless)","alert.fire":"WorkloadExited","scope":"Workload(111310)","pid":111310,"workload":"bash"}
+{"timestamp":"2026-06-05T10:56:44.385124Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:56:44.412916Z","level":"INFO","message":"tick","tick":39,"ai_processes":5,"exits":0}
+{"timestamp":"2026-06-05T10:56:44.412938Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":0.0,"rss_mb":67}
+{"timestamp":"2026-06-05T10:56:44.412943Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":2.0102224349975586,"rss_mb":279}
+{"timestamp":"2026-06-05T10:56:44.412945Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":1.0051112174987793,"rss_mb":305}
+{"timestamp":"2026-06-05T10:56:44.412947Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":17.086891174316406,"rss_mb":257}
+{"timestamp":"2026-06-05T10:56:44.412949Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:56:44.412951Z","level":"INFO","message":"alert visible (headless)","alert.fire":"WorkloadExited","scope":"Workload(111310)","pid":111310,"workload":"bash"}
+{"timestamp":"2026-06-05T10:56:45.401993Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:56:45.429885Z","level":"INFO","message":"tick","tick":40,"ai_processes":5,"exits":0}
+{"timestamp":"2026-06-05T10:56:45.429906Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":0.9834237098693848,"rss_mb":67}
+{"timestamp":"2026-06-05T10:56:45.429911Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":0.9834237098693848,"rss_mb":279}
+{"timestamp":"2026-06-05T10:56:45.429913Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":1.9668474197387695,"rss_mb":305}
+{"timestamp":"2026-06-05T10:56:45.429915Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":0.0,"rss_mb":257}
+{"timestamp":"2026-06-05T10:56:45.429916Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:56:45.429919Z","level":"INFO","message":"alert visible (headless)","alert.fire":"WorkloadExited","scope":"Workload(111310)","pid":111310,"workload":"bash"}
+{"timestamp":"2026-06-05T10:56:46.400766Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:56:46.426438Z","level":"INFO","message":"tick","tick":41,"ai_processes":5,"exits":0}
+{"timestamp":"2026-06-05T10:56:46.426461Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":0.0,"rss_mb":67}
+{"timestamp":"2026-06-05T10:56:46.426466Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":1.0012184381484985,"rss_mb":279}
+{"timestamp":"2026-06-05T10:56:46.426468Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":1.0012184381484985,"rss_mb":305}
+{"timestamp":"2026-06-05T10:56:46.426469Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":3.003655433654785,"rss_mb":258}
+{"timestamp":"2026-06-05T10:56:46.426478Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:56:46.426481Z","level":"INFO","message":"alert visible (headless)","alert.fire":"WorkloadExited","scope":"Workload(111310)","pid":111310,"workload":"bash"}
+{"timestamp":"2026-06-05T10:56:47.407236Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:56:47.433139Z","level":"INFO","message":"tick","tick":42,"ai_processes":5,"exits":0}
+{"timestamp":"2026-06-05T10:56:47.433163Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":0.0,"rss_mb":67}
+{"timestamp":"2026-06-05T10:56:47.433168Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":0.9935869574546814,"rss_mb":279}
+{"timestamp":"2026-06-05T10:56:47.433170Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":0.0,"rss_mb":305}
+{"timestamp":"2026-06-05T10:56:47.433181Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":6.955109596252441,"rss_mb":258}
+{"timestamp":"2026-06-05T10:56:47.433183Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:56:47.433186Z","level":"INFO","message":"alert visible (headless)","alert.fire":"WorkloadExited","scope":"Workload(111310)","pid":111310,"workload":"bash"}
+{"timestamp":"2026-06-05T10:56:48.404073Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:56:48.433176Z","level":"INFO","message":"tick","tick":43,"ai_processes":5,"exits":0}
+{"timestamp":"2026-06-05T10:56:48.433224Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":0.0,"rss_mb":67}
+{"timestamp":"2026-06-05T10:56:48.433229Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":1.0031834840774536,"rss_mb":279}
+{"timestamp":"2026-06-05T10:56:48.433231Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":1.0031834840774536,"rss_mb":305}
+{"timestamp":"2026-06-05T10:56:48.433233Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":5.0159173011779785,"rss_mb":258}
+{"timestamp":"2026-06-05T10:56:48.433235Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:56:48.433237Z","level":"INFO","message":"alert visible (headless)","alert.fire":"WorkloadExited","scope":"Workload(111310)","pid":111310,"workload":"bash"}
+{"timestamp":"2026-06-05T10:56:49.404417Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:56:49.430103Z","level":"INFO","message":"tick","tick":44,"ai_processes":5,"exits":0}
+{"timestamp":"2026-06-05T10:56:49.430126Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":0.0,"rss_mb":67}
+{"timestamp":"2026-06-05T10:56:49.430134Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":0.0,"rss_mb":279}
+{"timestamp":"2026-06-05T10:56:49.430145Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":0.999613881111145,"rss_mb":305}
+{"timestamp":"2026-06-05T10:56:49.430148Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":3.99845552444458,"rss_mb":258}
+{"timestamp":"2026-06-05T10:56:49.430152Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:56:49.430169Z","level":"INFO","message":"alert visible (headless)","alert.fire":"WorkloadExited","scope":"Workload(111310)","pid":111310,"workload":"bash"}
+{"timestamp":"2026-06-05T10:56:50.397445Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:56:50.424749Z","level":"INFO","message":"tick","tick":45,"ai_processes":5,"exits":0}
+{"timestamp":"2026-06-05T10:56:50.424779Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":0.0,"rss_mb":67}
+{"timestamp":"2026-06-05T10:56:50.424785Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":1.006966233253479,"rss_mb":279}
+{"timestamp":"2026-06-05T10:56:50.424787Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":1.006966233253479,"rss_mb":305}
+{"timestamp":"2026-06-05T10:56:50.424789Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":3.0208988189697266,"rss_mb":258}
+{"timestamp":"2026-06-05T10:56:50.424790Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:56:50.424793Z","level":"INFO","message":"alert visible (headless)","alert.fire":"WorkloadExited","scope":"Workload(111310)","pid":111310,"workload":"bash"}
+{"timestamp":"2026-06-05T10:56:51.400311Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:56:51.443893Z","level":"INFO","message":"tick","tick":46,"ai_processes":5,"exits":0}
+{"timestamp":"2026-06-05T10:56:51.443920Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":0.0,"rss_mb":67}
+{"timestamp":"2026-06-05T10:56:51.443925Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":0.9869561791419983,"rss_mb":279}
+{"timestamp":"2026-06-05T10:56:51.443927Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":0.0,"rss_mb":305}
+{"timestamp":"2026-06-05T10:56:51.443928Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":1.9739123582839966,"rss_mb":259}
+{"timestamp":"2026-06-05T10:56:51.443930Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:56:51.443932Z","level":"INFO","message":"alert visible (headless)","alert.fire":"WorkloadExited","scope":"Workload(111310)","pid":111310,"workload":"bash"}
+{"timestamp":"2026-06-05T10:56:52.387098Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:56:52.412581Z","level":"INFO","message":"tick","tick":47,"ai_processes":5,"exits":0}
+{"timestamp":"2026-06-05T10:56:52.412604Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":0.0,"rss_mb":67}
+{"timestamp":"2026-06-05T10:56:52.412609Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":1.0241856575012207,"rss_mb":279}
+{"timestamp":"2026-06-05T10:56:52.412611Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":1.0241856575012207,"rss_mb":305}
+{"timestamp":"2026-06-05T10:56:52.412626Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":4.096742630004883,"rss_mb":259}
+{"timestamp":"2026-06-05T10:56:52.412646Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:56:52.412649Z","level":"INFO","message":"alert visible (headless)","alert.fire":"WorkloadExited","scope":"Workload(111310)","pid":111310,"workload":"bash"}
+{"timestamp":"2026-06-05T10:56:53.393561Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:56:53.420371Z","level":"INFO","message":"tick","tick":48,"ai_processes":5,"exits":0}
+{"timestamp":"2026-06-05T10:56:53.420387Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":0.9934438467025757,"rss_mb":67}
+{"timestamp":"2026-06-05T10:56:53.420410Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":1.9868876934051514,"rss_mb":279}
+{"timestamp":"2026-06-05T10:56:53.420412Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":1.9868876934051514,"rss_mb":305}
+{"timestamp":"2026-06-05T10:56:53.420414Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":2.9803314208984375,"rss_mb":260}
+{"timestamp":"2026-06-05T10:56:53.420416Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:56:53.420419Z","level":"INFO","message":"alert visible (headless)","alert.fire":"WorkloadExited","scope":"Workload(111310)","pid":111310,"workload":"bash"}
+{"timestamp":"2026-06-05T10:56:54.395605Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:56:54.424913Z","level":"INFO","message":"tick","tick":49,"ai_processes":5,"exits":0}
+{"timestamp":"2026-06-05T10:56:54.424939Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":0.0,"rss_mb":67}
+{"timestamp":"2026-06-05T10:56:54.424947Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":0.99811190366745,"rss_mb":279}
+{"timestamp":"2026-06-05T10:56:54.424951Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":0.99811190366745,"rss_mb":305}
+{"timestamp":"2026-06-05T10:56:54.424954Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":7.9848952293396,"rss_mb":260}
+{"timestamp":"2026-06-05T10:56:54.424957Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:56:54.424961Z","level":"INFO","message":"alert visible (headless)","alert.fire":"WorkloadExited","scope":"Workload(111310)","pid":111310,"workload":"bash"}
+{"timestamp":"2026-06-05T10:56:55.386337Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:56:55.413231Z","level":"INFO","message":"tick","tick":50,"ai_processes":5,"exits":0}
+{"timestamp":"2026-06-05T10:56:55.413254Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":0.0,"rss_mb":67}
+{"timestamp":"2026-06-05T10:56:55.413262Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":0.0,"rss_mb":279}
+{"timestamp":"2026-06-05T10:56:55.413264Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":2.01867938041687,"rss_mb":305}
+{"timestamp":"2026-06-05T10:56:55.413267Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":4.03735876083374,"rss_mb":261}
+{"timestamp":"2026-06-05T10:56:55.413269Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:56:55.413272Z","level":"INFO","message":"alert visible (headless)","alert.fire":"WorkloadExited","scope":"Workload(111310)","pid":111310,"workload":"bash"}
+{"timestamp":"2026-06-05T10:56:56.397556Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:56:56.423807Z","level":"INFO","message":"tick","tick":51,"ai_processes":5,"exits":0}
+{"timestamp":"2026-06-05T10:56:56.423824Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":0.0,"rss_mb":67}
+{"timestamp":"2026-06-05T10:56:56.423830Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":0.9888902306556702,"rss_mb":279}
+{"timestamp":"2026-06-05T10:56:56.423832Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":0.0,"rss_mb":305}
+{"timestamp":"2026-06-05T10:56:56.423835Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":1.9777804613113403,"rss_mb":261}
+{"timestamp":"2026-06-05T10:56:56.423837Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:56:56.423840Z","level":"INFO","message":"alert visible (headless)","alert.fire":"WorkloadExited","scope":"Workload(111310)","pid":111310,"workload":"bash"}
+{"timestamp":"2026-06-05T10:56:57.406093Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:56:57.431387Z","level":"INFO","message":"tick","tick":52,"ai_processes":5,"exits":0}
+{"timestamp":"2026-06-05T10:56:57.431403Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":0.0,"rss_mb":67}
+{"timestamp":"2026-06-05T10:56:57.431407Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":0.991593599319458,"rss_mb":279}
+{"timestamp":"2026-06-05T10:56:57.431409Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":0.991593599319458,"rss_mb":305}
+{"timestamp":"2026-06-05T10:56:57.431410Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":4.957967758178711,"rss_mb":262}
+{"timestamp":"2026-06-05T10:56:57.431448Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:56:57.431451Z","level":"INFO","message":"alert visible (headless)","alert.fire":"WorkloadExited","scope":"Workload(111310)","pid":111310,"workload":"bash"}
+{"timestamp":"2026-06-05T10:56:58.414301Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:56:58.440359Z","level":"INFO","message":"tick","tick":53,"ai_processes":5,"exits":0}
+{"timestamp":"2026-06-05T10:56:58.440390Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":0.0,"rss_mb":67}
+{"timestamp":"2026-06-05T10:56:58.440395Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":1.983673095703125,"rss_mb":279}
+{"timestamp":"2026-06-05T10:56:58.440397Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":0.9918365478515625,"rss_mb":305}
+{"timestamp":"2026-06-05T10:56:58.440399Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":12.893875122070312,"rss_mb":263}
+{"timestamp":"2026-06-05T10:56:58.440401Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:56:58.440404Z","level":"INFO","message":"alert visible (headless)","alert.fire":"WorkloadExited","scope":"Workload(111310)","pid":111310,"workload":"bash"}
+{"timestamp":"2026-06-05T10:56:59.401031Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:56:59.426105Z","level":"INFO","message":"tick","tick":54,"ai_processes":5,"exits":0}
+{"timestamp":"2026-06-05T10:56:59.426129Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":0.0,"rss_mb":67}
+{"timestamp":"2026-06-05T10:56:59.426133Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":0.0,"rss_mb":279}
+{"timestamp":"2026-06-05T10:56:59.426135Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":0.0,"rss_mb":305}
+{"timestamp":"2026-06-05T10:56:59.426146Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":8.10764217376709,"rss_mb":263}
+{"timestamp":"2026-06-05T10:56:59.426149Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:56:59.426152Z","level":"INFO","message":"alert visible (headless)","alert.fire":"WorkloadExited","scope":"Workload(111310)","pid":111310,"workload":"bash"}
+{"timestamp":"2026-06-05T10:57:00.386929Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:57:00.413127Z","level":"INFO","message":"tick","tick":55,"ai_processes":5,"exits":0}
+{"timestamp":"2026-06-05T10:57:00.413150Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":0.0,"rss_mb":67}
+{"timestamp":"2026-06-05T10:57:00.413156Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":0.0,"rss_mb":279}
+{"timestamp":"2026-06-05T10:57:00.413176Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":2.0285775661468506,"rss_mb":305}
+{"timestamp":"2026-06-05T10:57:00.413178Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":4.057155132293701,"rss_mb":263}
+{"timestamp":"2026-06-05T10:57:00.413179Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:57:00.413182Z","level":"INFO","message":"alert visible (headless)","alert.fire":"WorkloadExited","scope":"Workload(111310)","pid":111310,"workload":"bash"}
+{"timestamp":"2026-06-05T10:57:01.406605Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:57:01.432208Z","level":"INFO","message":"tick","tick":56,"ai_processes":5,"exits":0}
+{"timestamp":"2026-06-05T10:57:01.432232Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":0.0,"rss_mb":67}
+{"timestamp":"2026-06-05T10:57:01.432236Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":0.9805817008018494,"rss_mb":279}
+{"timestamp":"2026-06-05T10:57:01.432238Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":0.0,"rss_mb":305}
+{"timestamp":"2026-06-05T10:57:01.432240Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":4.902908802032471,"rss_mb":264}
+{"timestamp":"2026-06-05T10:57:01.432241Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:57:01.432245Z","level":"INFO","message":"alert visible (headless)","alert.fire":"WorkloadExited","scope":"Workload(111310)","pid":111310,"workload":"bash"}
+{"timestamp":"2026-06-05T10:57:02.403315Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:57:02.431736Z","level":"INFO","message":"tick","tick":57,"ai_processes":5,"exits":0}
+{"timestamp":"2026-06-05T10:57:02.431755Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":0.0,"rss_mb":67}
+{"timestamp":"2026-06-05T10:57:02.431759Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":1.0034154653549194,"rss_mb":279}
+{"timestamp":"2026-06-05T10:57:02.431761Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":1.0034154653549194,"rss_mb":305}
+{"timestamp":"2026-06-05T10:57:02.431763Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":6.0204925537109375,"rss_mb":264}
+{"timestamp":"2026-06-05T10:57:02.431764Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:57:02.431767Z","level":"INFO","message":"alert visible (headless)","alert.fire":"WorkloadExited","scope":"Workload(111310)","pid":111310,"workload":"bash"}
+{"timestamp":"2026-06-05T10:57:03.408274Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:57:03.435887Z","level":"INFO","message":"tick","tick":58,"ai_processes":5,"exits":0}
+{"timestamp":"2026-06-05T10:57:03.435911Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":0.0,"rss_mb":67}
+{"timestamp":"2026-06-05T10:57:03.435917Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":0.9950706958770752,"rss_mb":279}
+{"timestamp":"2026-06-05T10:57:03.435921Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":1.9901413917541504,"rss_mb":305}
+{"timestamp":"2026-06-05T10:57:03.435923Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":5.970424175262451,"rss_mb":265}
+{"timestamp":"2026-06-05T10:57:03.435925Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:57:03.435928Z","level":"INFO","message":"alert visible (headless)","alert.fire":"WorkloadExited","scope":"Workload(111310)","pid":111310,"workload":"bash"}
+{"timestamp":"2026-06-05T10:57:04.400222Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:57:04.434298Z","level":"INFO","message":"tick","tick":59,"ai_processes":5,"exits":0}
+{"timestamp":"2026-06-05T10:57:04.434322Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":0.0,"rss_mb":67}
+{"timestamp":"2026-06-05T10:57:04.434330Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":0.0,"rss_mb":279}
+{"timestamp":"2026-06-05T10:57:04.434333Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":1.0079798698425293,"rss_mb":305}
+{"timestamp":"2026-06-05T10:57:04.434337Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":3.023939609527588,"rss_mb":265}
+{"timestamp":"2026-06-05T10:57:04.434340Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:57:04.434345Z","level":"INFO","message":"alert visible (headless)","alert.fire":"WorkloadExited","scope":"Workload(111310)","pid":111310,"workload":"bash"}
+{"timestamp":"2026-06-05T10:57:05.388928Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:57:05.416078Z","level":"INFO","message":"tick","tick":60,"ai_processes":5,"exits":0}
+{"timestamp":"2026-06-05T10:57:05.416097Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":0.0,"rss_mb":67}
+{"timestamp":"2026-06-05T10:57:05.416119Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":2.0231354236602783,"rss_mb":279}
+{"timestamp":"2026-06-05T10:57:05.416122Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":1.0115677118301392,"rss_mb":305}
+{"timestamp":"2026-06-05T10:57:05.416125Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":16.185083389282227,"rss_mb":284}
+{"timestamp":"2026-06-05T10:57:05.416128Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:57:05.416132Z","level":"INFO","message":"alert visible (headless)","alert.fire":"WorkloadExited","scope":"Workload(111310)","pid":111310,"workload":"bash"}
+{"timestamp":"2026-06-05T10:57:06.406320Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:57:06.432275Z","level":"INFO","message":"tick","tick":61,"ai_processes":5,"exits":0}
+{"timestamp":"2026-06-05T10:57:06.432297Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":0.9829087853431702,"rss_mb":67}
+{"timestamp":"2026-06-05T10:57:06.432302Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":0.0,"rss_mb":279}
+{"timestamp":"2026-06-05T10:57:06.432304Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":0.0,"rss_mb":305}
+{"timestamp":"2026-06-05T10:57:06.432305Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":1.9658175706863403,"rss_mb":272}
+{"timestamp":"2026-06-05T10:57:06.432307Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:57:06.432309Z","level":"INFO","message":"alert visible (headless)","alert.fire":"WorkloadExited","scope":"Workload(111310)","pid":111310,"workload":"bash"}
+{"timestamp":"2026-06-05T10:57:07.394789Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:57:07.424464Z","level":"INFO","message":"tick","tick":62,"ai_processes":5,"exits":0}
+{"timestamp":"2026-06-05T10:57:07.424481Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":0.0,"rss_mb":67}
+{"timestamp":"2026-06-05T10:57:07.424488Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":1.0116503238677979,"rss_mb":279}
+{"timestamp":"2026-06-05T10:57:07.424493Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":0.0,"rss_mb":305}
+{"timestamp":"2026-06-05T10:57:07.424495Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":1.0116503238677979,"rss_mb":269}
+{"timestamp":"2026-06-05T10:57:07.424504Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:57:07.424508Z","level":"INFO","message":"alert visible (headless)","alert.fire":"WorkloadExited","scope":"Workload(111310)","pid":111310,"workload":"bash"}
+{"timestamp":"2026-06-05T10:57:08.391583Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:57:08.421346Z","level":"INFO","message":"tick","tick":63,"ai_processes":5,"exits":0}
+{"timestamp":"2026-06-05T10:57:08.421368Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":0.0,"rss_mb":67}
+{"timestamp":"2026-06-05T10:57:08.421373Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":0.0,"rss_mb":279}
+{"timestamp":"2026-06-05T10:57:08.421375Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":1.003173828125,"rss_mb":305}
+{"timestamp":"2026-06-05T10:57:08.421376Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":4.0126953125,"rss_mb":269}
+{"timestamp":"2026-06-05T10:57:08.421385Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:57:08.421388Z","level":"INFO","message":"alert visible (headless)","alert.fire":"WorkloadExited","scope":"Workload(111310)","pid":111310,"workload":"bash"}
+{"timestamp":"2026-06-05T10:57:09.394078Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:57:09.426897Z","level":"INFO","message":"tick","tick":64,"ai_processes":5,"exits":2}
+{"timestamp":"2026-06-05T10:57:09.426919Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":0.0,"rss_mb":67}
+{"timestamp":"2026-06-05T10:57:09.426923Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":0.9974612593650818,"rss_mb":279}
+{"timestamp":"2026-06-05T10:57:09.426925Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":1.9949225187301636,"rss_mb":305}
+{"timestamp":"2026-06-05T10:57:09.426927Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":9.974614143371582,"rss_mb":277}
+{"timestamp":"2026-06-05T10:57:09.426929Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:57:09.426931Z","level":"INFO","message":"alert visible (headless)","alert.fire":"WorkloadExited","scope":"Workload(111310)","pid":111310,"workload":"bash"}
+{"timestamp":"2026-06-05T10:57:10.408401Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:57:10.435482Z","level":"INFO","message":"tick","tick":65,"ai_processes":5,"exits":0}
+{"timestamp":"2026-06-05T10:57:10.435504Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":0.9859830141067505,"rss_mb":67}
+{"timestamp":"2026-06-05T10:57:10.435511Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":0.9859830141067505,"rss_mb":279}
+{"timestamp":"2026-06-05T10:57:10.435514Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":0.9859830141067505,"rss_mb":305}
+{"timestamp":"2026-06-05T10:57:10.435516Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":0.9859830141067505,"rss_mb":276}
+{"timestamp":"2026-06-05T10:57:10.435518Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:57:10.435521Z","level":"INFO","message":"alert visible (headless)","alert.fire":"WorkloadExited","scope":"Workload(111310)","pid":111310,"workload":"bash"}
+{"timestamp":"2026-06-05T10:57:11.406392Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:57:11.431273Z","level":"INFO","message":"tick","tick":66,"ai_processes":5,"exits":0}
+{"timestamp":"2026-06-05T10:57:11.431294Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":0.0,"rss_mb":67}
+{"timestamp":"2026-06-05T10:57:11.431300Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":2.00400447845459,"rss_mb":279}
+{"timestamp":"2026-06-05T10:57:11.431311Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":1.002002239227295,"rss_mb":305}
+{"timestamp":"2026-06-05T10:57:11.431313Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":5.010011196136475,"rss_mb":276}
+{"timestamp":"2026-06-05T10:57:11.431314Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:57:11.431317Z","level":"INFO","message":"alert visible (headless)","alert.fire":"WorkloadExited","scope":"Workload(111310)","pid":111310,"workload":"bash"}
+{"timestamp":"2026-06-05T10:57:12.408943Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:57:12.435156Z","level":"INFO","message":"tick","tick":67,"ai_processes":5,"exits":1}
+{"timestamp":"2026-06-05T10:57:12.435173Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":0.0,"rss_mb":67}
+{"timestamp":"2026-06-05T10:57:12.435177Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":0.9974688291549683,"rss_mb":279}
+{"timestamp":"2026-06-05T10:57:12.435179Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":0.9974688291549683,"rss_mb":305}
+{"timestamp":"2026-06-05T10:57:12.435181Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":5.9848127365112305,"rss_mb":276}
+{"timestamp":"2026-06-05T10:57:12.435183Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:57:12.435185Z","level":"INFO","message":"alert visible (headless)","alert.fire":"WorkloadExited","scope":"Workload(111310)","pid":111310,"workload":"bash"}
+{"timestamp":"2026-06-05T10:57:13.414837Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:57:13.443929Z","level":"INFO","message":"tick","tick":68,"ai_processes":5,"exits":0}
+{"timestamp":"2026-06-05T10:57:13.443944Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":0.0,"rss_mb":67}
+{"timestamp":"2026-06-05T10:57:13.443948Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":0.9941387176513672,"rss_mb":279}
+{"timestamp":"2026-06-05T10:57:13.443950Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":1.9882774353027344,"rss_mb":305}
+{"timestamp":"2026-06-05T10:57:13.443951Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":0.9941387176513672,"rss_mb":276}
+{"timestamp":"2026-06-05T10:57:13.443953Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:57:13.443955Z","level":"INFO","message":"alert visible (headless)","alert.fire":"WorkloadExited","scope":"Workload(111310)","pid":111310,"workload":"bash"}
+{"timestamp":"2026-06-05T10:57:14.403274Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:57:14.429259Z","level":"INFO","message":"tick","tick":69,"ai_processes":5,"exits":0}
+{"timestamp":"2026-06-05T10:57:14.429284Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":0.0,"rss_mb":67}
+{"timestamp":"2026-06-05T10:57:14.429289Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":0.0,"rss_mb":279}
+{"timestamp":"2026-06-05T10:57:14.429292Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":1.0117119550704956,"rss_mb":305}
+{"timestamp":"2026-06-05T10:57:14.429294Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":3.0351362228393555,"rss_mb":277}
+{"timestamp":"2026-06-05T10:57:14.429296Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:57:14.429299Z","level":"INFO","message":"alert visible (headless)","alert.fire":"WorkloadExited","scope":"Workload(111310)","pid":111310,"workload":"bash"}
+{"timestamp":"2026-06-05T10:57:15.401585Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:57:15.428991Z","level":"INFO","message":"tick","tick":70,"ai_processes":5,"exits":0}
+{"timestamp":"2026-06-05T10:57:15.429012Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":0.0,"rss_mb":67}
+{"timestamp":"2026-06-05T10:57:15.429016Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":1.0016647577285767,"rss_mb":279}
+{"timestamp":"2026-06-05T10:57:15.429018Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":0.0,"rss_mb":305}
+{"timestamp":"2026-06-05T10:57:15.429020Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":8.013318061828613,"rss_mb":277}
+{"timestamp":"2026-06-05T10:57:15.429022Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:57:15.429024Z","level":"INFO","message":"alert visible (headless)","alert.fire":"WorkloadExited","scope":"Workload(111310)","pid":111310,"workload":"bash"}
+{"timestamp":"2026-06-05T10:57:16.392386Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:57:16.419439Z","level":"INFO","message":"tick","tick":71,"ai_processes":5,"exits":0}
+{"timestamp":"2026-06-05T10:57:16.419468Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":0.0,"rss_mb":67}
+{"timestamp":"2026-06-05T10:57:16.419473Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":1.0092658996582031,"rss_mb":279}
+{"timestamp":"2026-06-05T10:57:16.419476Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":1.0092658996582031,"rss_mb":305}
+{"timestamp":"2026-06-05T10:57:16.419478Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":2.0185317993164062,"rss_mb":277}
+{"timestamp":"2026-06-05T10:57:16.419480Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:57:16.419483Z","level":"INFO","message":"alert visible (headless)","alert.fire":"WorkloadExited","scope":"Workload(111310)","pid":111310,"workload":"bash"}
+{"timestamp":"2026-06-05T10:57:17.411193Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:57:17.438318Z","level":"INFO","message":"tick","tick":72,"ai_processes":5,"exits":0}
+{"timestamp":"2026-06-05T10:57:17.438340Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":0.0,"rss_mb":67}
+{"timestamp":"2026-06-05T10:57:17.438345Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":0.9815731048583984,"rss_mb":279}
+{"timestamp":"2026-06-05T10:57:17.438347Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":1.9631462097167969,"rss_mb":305}
+{"timestamp":"2026-06-05T10:57:17.438349Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":2.9447193145751953,"rss_mb":277}
+{"timestamp":"2026-06-05T10:57:17.438351Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:57:17.438353Z","level":"INFO","message":"alert visible (headless)","alert.fire":"WorkloadExited","scope":"Workload(111310)","pid":111310,"workload":"bash"}
+{"timestamp":"2026-06-05T10:57:18.399736Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:57:18.427221Z","level":"INFO","message":"tick","tick":73,"ai_processes":5,"exits":0}
+{"timestamp":"2026-06-05T10:57:18.427241Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":0.0,"rss_mb":67}
+{"timestamp":"2026-06-05T10:57:18.427247Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":1.011598825454712,"rss_mb":279}
+{"timestamp":"2026-06-05T10:57:18.427249Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":1.011598825454712,"rss_mb":305}
+{"timestamp":"2026-06-05T10:57:18.427251Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":4.046395301818848,"rss_mb":277}
+{"timestamp":"2026-06-05T10:57:18.427253Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:57:18.427255Z","level":"INFO","message":"alert visible (headless)","alert.fire":"WorkloadExited","scope":"Workload(111310)","pid":111310,"workload":"bash"}
+{"timestamp":"2026-06-05T10:57:19.414355Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:57:19.448917Z","level":"INFO","message":"tick","tick":74,"ai_processes":5,"exits":0}
+{"timestamp":"2026-06-05T10:57:19.448934Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":0.0,"rss_mb":67}
+{"timestamp":"2026-06-05T10:57:19.448939Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":0.9855712652206421,"rss_mb":279}
+{"timestamp":"2026-06-05T10:57:19.448941Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":0.0,"rss_mb":305}
+{"timestamp":"2026-06-05T10:57:19.448943Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":0.0,"rss_mb":277}
+{"timestamp":"2026-06-05T10:57:19.448950Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:57:19.448953Z","level":"INFO","message":"alert visible (headless)","alert.fire":"WorkloadExited","scope":"Workload(111310)","pid":111310,"workload":"bash"}
+{"timestamp":"2026-06-05T10:57:20.405270Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:57:20.432568Z","level":"INFO","message":"tick","tick":75,"ai_processes":5,"exits":0}
+{"timestamp":"2026-06-05T10:57:20.432584Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":0.0,"rss_mb":67}
+{"timestamp":"2026-06-05T10:57:20.432588Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":1.0091532468795776,"rss_mb":279}
+{"timestamp":"2026-06-05T10:57:20.432589Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":2.0183064937591553,"rss_mb":305}
+{"timestamp":"2026-06-05T10:57:20.432591Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":7.064072132110596,"rss_mb":279}
+{"timestamp":"2026-06-05T10:57:20.432592Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:57:20.432595Z","level":"INFO","message":"alert visible (headless)","alert.fire":"WorkloadExited","scope":"Workload(111310)","pid":111310,"workload":"bash"}
+{"timestamp":"2026-06-05T10:57:21.409420Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:57:21.437425Z","level":"INFO","message":"tick","tick":76,"ai_processes":5,"exits":0}
+{"timestamp":"2026-06-05T10:57:21.437441Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":0.0,"rss_mb":67}
+{"timestamp":"2026-06-05T10:57:21.437445Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":0.9957473874092102,"rss_mb":279}
+{"timestamp":"2026-06-05T10:57:21.437447Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":0.0,"rss_mb":305}
+{"timestamp":"2026-06-05T10:57:21.437449Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":7.965979099273682,"rss_mb":279}
+{"timestamp":"2026-06-05T10:57:21.437450Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:57:21.437452Z","level":"INFO","message":"alert visible (headless)","alert.fire":"WorkloadExited","scope":"Workload(111310)","pid":111310,"workload":"bash"}
+{"timestamp":"2026-06-05T10:57:22.410337Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:57:22.435052Z","level":"INFO","message":"tick","tick":77,"ai_processes":5,"exits":0}
+{"timestamp":"2026-06-05T10:57:22.435073Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":0.0,"rss_mb":67}
+{"timestamp":"2026-06-05T10:57:22.435079Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":0.0,"rss_mb":279}
+{"timestamp":"2026-06-05T10:57:22.435088Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":0.9992293119430542,"rss_mb":305}
+{"timestamp":"2026-06-05T10:57:22.435090Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":3.996917247772217,"rss_mb":279}
+{"timestamp":"2026-06-05T10:57:22.435092Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:57:22.435095Z","level":"INFO","message":"alert visible (headless)","alert.fire":"WorkloadExited","scope":"Workload(111310)","pid":111310,"workload":"bash"}
+{"timestamp":"2026-06-05T10:57:23.410259Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:57:23.436269Z","level":"INFO","message":"tick","tick":78,"ai_processes":5,"exits":0}
+{"timestamp":"2026-06-05T10:57:23.436290Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":0.0,"rss_mb":67}
+{"timestamp":"2026-06-05T10:57:23.436294Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":0.0,"rss_mb":279}
+{"timestamp":"2026-06-05T10:57:23.436296Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":0.0,"rss_mb":305}
+{"timestamp":"2026-06-05T10:57:23.436298Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":9.000565528869629,"rss_mb":280}
+{"timestamp":"2026-06-05T10:57:23.436315Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:57:23.436318Z","level":"INFO","message":"alert visible (headless)","alert.fire":"WorkloadExited","scope":"Workload(111310)","pid":111310,"workload":"bash"}
+{"timestamp":"2026-06-05T10:57:24.393579Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:57:24.420567Z","level":"INFO","message":"tick","tick":79,"ai_processes":5,"exits":0}
+{"timestamp":"2026-06-05T10:57:24.420592Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":0.0,"rss_mb":67}
+{"timestamp":"2026-06-05T10:57:24.420599Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":1.0169812440872192,"rss_mb":279}
+{"timestamp":"2026-06-05T10:57:24.420601Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":1.0169812440872192,"rss_mb":305}
+{"timestamp":"2026-06-05T10:57:24.420603Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":2.0339624881744385,"rss_mb":281}
+{"timestamp":"2026-06-05T10:57:24.420604Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:57:24.420607Z","level":"INFO","message":"alert visible (headless)","alert.fire":"WorkloadExited","scope":"Workload(111310)","pid":111310,"workload":"bash"}
+{"timestamp":"2026-06-05T10:57:25.412512Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:57:25.439216Z","level":"INFO","message":"tick","tick":80,"ai_processes":5,"exits":0}
+{"timestamp":"2026-06-05T10:57:25.439282Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":0.0,"rss_mb":67}
+{"timestamp":"2026-06-05T10:57:25.439295Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":0.9813905954360962,"rss_mb":279}
+{"timestamp":"2026-06-05T10:57:25.439298Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":0.9813905954360962,"rss_mb":305}
+{"timestamp":"2026-06-05T10:57:25.439299Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":4.90695333480835,"rss_mb":281}
+{"timestamp":"2026-06-05T10:57:25.439301Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:57:25.439312Z","level":"INFO","message":"alert visible (headless)","alert.fire":"WorkloadExited","scope":"Workload(111310)","pid":111310,"workload":"bash"}
+{"timestamp":"2026-06-05T10:57:26.409763Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:57:26.439057Z","level":"INFO","message":"tick","tick":81,"ai_processes":5,"exits":0}
+{"timestamp":"2026-06-05T10:57:26.439072Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":0.0,"rss_mb":67}
+{"timestamp":"2026-06-05T10:57:26.439078Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":2.0055925846099854,"rss_mb":279}
+{"timestamp":"2026-06-05T10:57:26.439081Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":2.0055925846099854,"rss_mb":305}
+{"timestamp":"2026-06-05T10:57:26.439083Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":4.011185169219971,"rss_mb":282}
+{"timestamp":"2026-06-05T10:57:26.439085Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:57:26.439089Z","level":"INFO","message":"alert visible (headless)","alert.fire":"WorkloadExited","scope":"Workload(111310)","pid":111310,"workload":"bash"}
+{"timestamp":"2026-06-05T10:57:27.408795Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:57:27.436300Z","level":"INFO","message":"tick","tick":82,"ai_processes":5,"exits":0}
+{"timestamp":"2026-06-05T10:57:27.436338Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":0.0,"rss_mb":67}
+{"timestamp":"2026-06-05T10:57:27.436344Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":0.0,"rss_mb":279}
+{"timestamp":"2026-06-05T10:57:27.436346Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":0.0,"rss_mb":305}
+{"timestamp":"2026-06-05T10:57:27.436348Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":15.013797760009766,"rss_mb":288}
+{"timestamp":"2026-06-05T10:57:27.436350Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:57:27.436353Z","level":"INFO","message":"alert visible (headless)","alert.fire":"WorkloadExited","scope":"Workload(111310)","pid":111310,"workload":"bash"}
+{"timestamp":"2026-06-05T10:57:28.407521Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:57:28.433894Z","level":"INFO","message":"tick","tick":83,"ai_processes":5,"exits":0}
+{"timestamp":"2026-06-05T10:57:28.433915Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":0.0,"rss_mb":67}
+{"timestamp":"2026-06-05T10:57:28.433919Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":0.0,"rss_mb":279}
+{"timestamp":"2026-06-05T10:57:28.433921Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":1.0013270378112793,"rss_mb":305}
+{"timestamp":"2026-06-05T10:57:28.433923Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":17.022558212280273,"rss_mb":274}
+{"timestamp":"2026-06-05T10:57:28.433925Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:57:28.433927Z","level":"INFO","message":"alert visible (headless)","alert.fire":"WorkloadExited","scope":"Workload(111310)","pid":111310,"workload":"bash"}
+{"timestamp":"2026-06-05T10:57:29.411197Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:57:29.437356Z","level":"INFO","message":"tick","tick":84,"ai_processes":5,"exits":0}
+{"timestamp":"2026-06-05T10:57:29.437371Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":0.9963186383247375,"rss_mb":67}
+{"timestamp":"2026-06-05T10:57:29.437378Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":0.9963186383247375,"rss_mb":279}
+{"timestamp":"2026-06-05T10:57:29.437381Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":1.992637276649475,"rss_mb":305}
+{"timestamp":"2026-06-05T10:57:29.437384Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":1.992637276649475,"rss_mb":263}
+{"timestamp":"2026-06-05T10:57:29.437386Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:57:29.437389Z","level":"INFO","message":"alert visible (headless)","alert.fire":"WorkloadExited","scope":"Workload(111310)","pid":111310,"workload":"bash"}
+{"timestamp":"2026-06-05T10:57:30.409285Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:57:30.434705Z","level":"INFO","message":"tick","tick":85,"ai_processes":5,"exits":0}
+{"timestamp":"2026-06-05T10:57:30.434726Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":1.0019220113754272,"rss_mb":67}
+{"timestamp":"2026-06-05T10:57:30.434730Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":2.0038440227508545,"rss_mb":279}
+{"timestamp":"2026-06-05T10:57:30.434732Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":1.0019220113754272,"rss_mb":305}
+{"timestamp":"2026-06-05T10:57:30.434734Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":1.0019220113754272,"rss_mb":263}
+{"timestamp":"2026-06-05T10:57:30.434743Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:57:30.434746Z","level":"INFO","message":"alert visible (headless)","alert.fire":"WorkloadExited","scope":"Workload(111310)","pid":111310,"workload":"bash"}
+{"timestamp":"2026-06-05T10:57:31.399907Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:57:31.425631Z","level":"INFO","message":"tick","tick":86,"ai_processes":5,"exits":0}
+{"timestamp":"2026-06-05T10:57:31.425659Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":0.0,"rss_mb":67}
+{"timestamp":"2026-06-05T10:57:31.425664Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":1.009490728378296,"rss_mb":279}
+{"timestamp":"2026-06-05T10:57:31.425666Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":1.009490728378296,"rss_mb":305}
+{"timestamp":"2026-06-05T10:57:31.425668Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":8.075925827026367,"rss_mb":265}
+{"timestamp":"2026-06-05T10:57:31.425669Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:57:31.425672Z","level":"INFO","message":"alert visible (headless)","alert.fire":"WorkloadExited","scope":"Workload(111310)","pid":111310,"workload":"bash"}
+{"timestamp":"2026-06-05T10:57:32.393107Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:57:32.422372Z","level":"INFO","message":"tick","tick":87,"ai_processes":5,"exits":0}
+{"timestamp":"2026-06-05T10:57:32.422387Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":0.0,"rss_mb":67}
+{"timestamp":"2026-06-05T10:57:32.422390Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":0.0,"rss_mb":279}
+{"timestamp":"2026-06-05T10:57:32.422392Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":1.0068291425704956,"rss_mb":305}
+{"timestamp":"2026-06-05T10:57:32.422394Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":6.040975093841553,"rss_mb":265}
+{"timestamp":"2026-06-05T10:57:32.422396Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:57:32.422400Z","level":"INFO","message":"alert visible (headless)","alert.fire":"WorkloadExited","scope":"Workload(111310)","pid":111310,"workload":"bash"}
+{"timestamp":"2026-06-05T10:57:33.410556Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:57:33.437273Z","level":"INFO","message":"tick","tick":88,"ai_processes":5,"exits":0}
+{"timestamp":"2026-06-05T10:57:33.437293Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":0.0,"rss_mb":67}
+{"timestamp":"2026-06-05T10:57:33.437299Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":0.0,"rss_mb":279}
+{"timestamp":"2026-06-05T10:57:33.437308Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":0.0,"rss_mb":305}
+{"timestamp":"2026-06-05T10:57:33.437310Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":5.8971757888793945,"rss_mb":266}
+{"timestamp":"2026-06-05T10:57:33.437312Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:57:33.437314Z","level":"INFO","message":"alert visible (headless)","alert.fire":"WorkloadExited","scope":"Workload(111310)","pid":111310,"workload":"bash"}
+{"timestamp":"2026-06-05T10:57:34.407369Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:57:34.432557Z","level":"INFO","message":"tick","tick":89,"ai_processes":5,"exits":0}
+{"timestamp":"2026-06-05T10:57:34.432589Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":0.0,"rss_mb":67}
+{"timestamp":"2026-06-05T10:57:34.432594Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":1.003182291984558,"rss_mb":279}
+{"timestamp":"2026-06-05T10:57:34.432596Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":1.003182291984558,"rss_mb":305}
+{"timestamp":"2026-06-05T10:57:34.432598Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":2.006364583969116,"rss_mb":266}
+{"timestamp":"2026-06-05T10:57:34.432599Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:57:34.432602Z","level":"INFO","message":"alert visible (headless)","alert.fire":"WorkloadExited","scope":"Workload(111310)","pid":111310,"workload":"bash"}
+{"timestamp":"2026-06-05T10:57:35.407338Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:57:35.433030Z","level":"INFO","message":"tick","tick":90,"ai_processes":5,"exits":0}
+{"timestamp":"2026-06-05T10:57:35.433050Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":0.0,"rss_mb":67}
+{"timestamp":"2026-06-05T10:57:35.433054Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":1.0000392198562622,"rss_mb":279}
+{"timestamp":"2026-06-05T10:57:35.433069Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":1.0000392198562622,"rss_mb":305}
+{"timestamp":"2026-06-05T10:57:35.433088Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":0.0,"rss_mb":266}
+{"timestamp":"2026-06-05T10:57:35.433090Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:57:35.433092Z","level":"INFO","message":"alert visible (headless)","alert.fire":"WorkloadExited","scope":"Workload(111310)","pid":111310,"workload":"bash"}
+{"timestamp":"2026-06-05T10:57:36.412728Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:57:36.438769Z","level":"INFO","message":"tick","tick":91,"ai_processes":5,"exits":0}
+{"timestamp":"2026-06-05T10:57:36.438796Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":0.0,"rss_mb":67}
+{"timestamp":"2026-06-05T10:57:36.438800Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":1.9892113208770752,"rss_mb":279}
+{"timestamp":"2026-06-05T10:57:36.438802Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":1.9892113208770752,"rss_mb":305}
+{"timestamp":"2026-06-05T10:57:36.438803Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":9.946057319641113,"rss_mb":267}
+{"timestamp":"2026-06-05T10:57:36.438805Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:57:36.438807Z","level":"INFO","message":"alert visible (headless)","alert.fire":"WorkloadExited","scope":"Workload(111310)","pid":111310,"workload":"bash"}
+{"timestamp":"2026-06-05T10:57:37.397728Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:57:37.422760Z","level":"INFO","message":"tick","tick":92,"ai_processes":5,"exits":0}
+{"timestamp":"2026-06-05T10:57:37.422777Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":0.0,"rss_mb":67}
+{"timestamp":"2026-06-05T10:57:37.422781Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":1.0152413845062256,"rss_mb":279}
+{"timestamp":"2026-06-05T10:57:37.422783Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":1.0152413845062256,"rss_mb":305}
+{"timestamp":"2026-06-05T10:57:37.422785Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":11.167655944824219,"rss_mb":268}
+{"timestamp":"2026-06-05T10:57:37.422786Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:57:37.422789Z","level":"INFO","message":"alert visible (headless)","alert.fire":"WorkloadExited","scope":"Workload(111310)","pid":111310,"workload":"bash"}
+{"timestamp":"2026-06-05T10:57:38.412458Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:57:38.439295Z","level":"INFO","message":"tick","tick":93,"ai_processes":5,"exits":0}
+{"timestamp":"2026-06-05T10:57:38.439314Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":0.0,"rss_mb":67}
+{"timestamp":"2026-06-05T10:57:38.439319Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":0.9854090213775635,"rss_mb":279}
+{"timestamp":"2026-06-05T10:57:38.439322Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":0.0,"rss_mb":305}
+{"timestamp":"2026-06-05T10:57:38.439324Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":5.912454128265381,"rss_mb":269}
+{"timestamp":"2026-06-05T10:57:38.439326Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:57:38.439329Z","level":"INFO","message":"alert visible (headless)","alert.fire":"WorkloadExited","scope":"Workload(111310)","pid":111310,"workload":"bash"}
+{"timestamp":"2026-06-05T10:57:39.408070Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:57:39.434151Z","level":"INFO","message":"tick","tick":94,"ai_processes":5,"exits":0}
+{"timestamp":"2026-06-05T10:57:39.434171Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":0.0,"rss_mb":67}
+{"timestamp":"2026-06-05T10:57:39.434175Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":1.0045157670974731,"rss_mb":279}
+{"timestamp":"2026-06-05T10:57:39.434177Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":1.0045157670974731,"rss_mb":305}
+{"timestamp":"2026-06-05T10:57:39.434179Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":5.022579193115234,"rss_mb":269}
+{"timestamp":"2026-06-05T10:57:39.434180Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:57:39.434183Z","level":"INFO","message":"alert visible (headless)","alert.fire":"WorkloadExited","scope":"Workload(111310)","pid":111310,"workload":"bash"}
+{"timestamp":"2026-06-05T10:57:40.396044Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:57:40.425923Z","level":"INFO","message":"tick","tick":95,"ai_processes":5,"exits":0}
+{"timestamp":"2026-06-05T10:57:40.425962Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":0.0,"rss_mb":67}
+{"timestamp":"2026-06-05T10:57:40.425973Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":1.012136697769165,"rss_mb":279}
+{"timestamp":"2026-06-05T10:57:40.425976Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":0.0,"rss_mb":305}
+{"timestamp":"2026-06-05T10:57:40.425978Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":9.109230041503906,"rss_mb":281}
+{"timestamp":"2026-06-05T10:57:40.425981Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:57:40.425985Z","level":"INFO","message":"alert visible (headless)","alert.fire":"WorkloadExited","scope":"Workload(111310)","pid":111310,"workload":"bash"}
+{"timestamp":"2026-06-05T10:57:41.414622Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:57:41.446180Z","level":"INFO","message":"tick","tick":96,"ai_processes":5,"exits":0}
+{"timestamp":"2026-06-05T10:57:41.446195Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":0.0,"rss_mb":67}
+{"timestamp":"2026-06-05T10:57:41.446201Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":1.9633034467697144,"rss_mb":279}
+{"timestamp":"2026-06-05T10:57:41.446204Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":1.9633034467697144,"rss_mb":305}
+{"timestamp":"2026-06-05T10:57:41.446206Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":19.63303565979004,"rss_mb":274}
+{"timestamp":"2026-06-05T10:57:41.446219Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:57:41.446225Z","level":"INFO","message":"alert visible (headless)","alert.fire":"WorkloadExited","scope":"Workload(111310)","pid":111310,"workload":"bash"}
+{"timestamp":"2026-06-05T10:57:42.419353Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:57:42.452949Z","level":"INFO","message":"tick","tick":97,"ai_processes":5,"exits":1}
+{"timestamp":"2026-06-05T10:57:42.452963Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":0.0,"rss_mb":67}
+{"timestamp":"2026-06-05T10:57:42.452968Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":0.0,"rss_mb":279}
+{"timestamp":"2026-06-05T10:57:42.452969Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":0.9951639771461487,"rss_mb":305}
+{"timestamp":"2026-06-05T10:57:42.452971Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":13.932296752929688,"rss_mb":274}
+{"timestamp":"2026-06-05T10:57:42.452973Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:57:42.452976Z","level":"INFO","message":"alert visible (headless)","alert.fire":"WorkloadExited","scope":"Workload(111310)","pid":111310,"workload":"bash"}
+{"timestamp":"2026-06-05T10:57:43.411176Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:57:43.437158Z","level":"INFO","message":"tick","tick":98,"ai_processes":5,"exits":0}
+{"timestamp":"2026-06-05T10:57:43.437177Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":0.0,"rss_mb":67}
+{"timestamp":"2026-06-05T10:57:43.437182Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":1.0085289478302002,"rss_mb":279}
+{"timestamp":"2026-06-05T10:57:43.437184Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":1.0085289478302002,"rss_mb":305}
+{"timestamp":"2026-06-05T10:57:43.437186Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":1.0085289478302002,"rss_mb":274}
+{"timestamp":"2026-06-05T10:57:43.437187Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:57:43.437191Z","level":"INFO","message":"alert visible (headless)","alert.fire":"WorkloadExited","scope":"Workload(111310)","pid":111310,"workload":"bash"}
+{"timestamp":"2026-06-05T10:57:44.412053Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:57:44.438432Z","level":"INFO","message":"tick","tick":99,"ai_processes":5,"exits":0}
+{"timestamp":"2026-06-05T10:57:44.438451Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":0.0,"rss_mb":67}
+{"timestamp":"2026-06-05T10:57:44.438457Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":0.0,"rss_mb":279}
+{"timestamp":"2026-06-05T10:57:44.438476Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":0.0,"rss_mb":305}
+{"timestamp":"2026-06-05T10:57:44.438478Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":0.9990841150283813,"rss_mb":274}
+{"timestamp":"2026-06-05T10:57:44.438481Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:57:44.438484Z","level":"INFO","message":"alert visible (headless)","alert.fire":"WorkloadExited","scope":"Workload(111310)","pid":111310,"workload":"bash"}
+{"timestamp":"2026-06-05T10:57:45.410998Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:57:45.435913Z","level":"INFO","message":"tick","tick":100,"ai_processes":5,"exits":0}
+{"timestamp":"2026-06-05T10:57:45.435933Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":0.0,"rss_mb":67}
+{"timestamp":"2026-06-05T10:57:45.435938Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":2.002117872238159,"rss_mb":279}
+{"timestamp":"2026-06-05T10:57:45.435940Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":2.002117872238159,"rss_mb":305}
+{"timestamp":"2026-06-05T10:57:45.435942Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":6.006354331970215,"rss_mb":275}
+{"timestamp":"2026-06-05T10:57:45.435944Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:57:45.435962Z","level":"INFO","message":"alert visible (headless)","alert.fire":"WorkloadExited","scope":"Workload(111310)","pid":111310,"workload":"bash"}
+{"timestamp":"2026-06-05T10:57:46.398537Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:57:46.425043Z","level":"INFO","message":"tick","tick":101,"ai_processes":5,"exits":0}
+{"timestamp":"2026-06-05T10:57:46.425072Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":1.0126094818115234,"rss_mb":67}
+{"timestamp":"2026-06-05T10:57:46.425077Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":1.0126094818115234,"rss_mb":279}
+{"timestamp":"2026-06-05T10:57:46.425079Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":0.0,"rss_mb":305}
+{"timestamp":"2026-06-05T10:57:46.425080Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":7.088266849517822,"rss_mb":275}
+{"timestamp":"2026-06-05T10:57:46.425082Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:57:46.425085Z","level":"INFO","message":"alert visible (headless)","alert.fire":"WorkloadExited","scope":"Workload(111310)","pid":111310,"workload":"bash"}
+{"timestamp":"2026-06-05T10:57:47.401654Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:57:47.429054Z","level":"INFO","message":"tick","tick":102,"ai_processes":5,"exits":5}
+{"timestamp":"2026-06-05T10:57:47.429081Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":0.0,"rss_mb":67}
+{"timestamp":"2026-06-05T10:57:47.429086Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":0.0,"rss_mb":279}
+{"timestamp":"2026-06-05T10:57:47.429088Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":0.9969283938407898,"rss_mb":305}
+{"timestamp":"2026-06-05T10:57:47.429090Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":4.984642028808594,"rss_mb":276}
+{"timestamp":"2026-06-05T10:57:47.429091Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:57:47.429094Z","level":"INFO","message":"alert visible (headless)","alert.fire":"WorkloadExited","scope":"Workload(111310)","pid":111310,"workload":"bash"}
+{"timestamp":"2026-06-05T10:57:48.400324Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:57:48.431374Z","level":"INFO","message":"tick","tick":103,"ai_processes":5,"exits":0}
+{"timestamp":"2026-06-05T10:57:48.431409Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":0.0,"rss_mb":67}
+{"timestamp":"2026-06-05T10:57:48.431413Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":0.0,"rss_mb":279}
+{"timestamp":"2026-06-05T10:57:48.431415Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":0.0,"rss_mb":305}
+{"timestamp":"2026-06-05T10:57:48.431417Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":6.007692813873291,"rss_mb":276}
+{"timestamp":"2026-06-05T10:57:48.431418Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:57:48.431422Z","level":"INFO","message":"alert visible (headless)","alert.fire":"WorkloadExited","scope":"Workload(111310)","pid":111310,"workload":"bash"}
+{"timestamp":"2026-06-05T10:57:49.398927Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:57:49.425443Z","level":"INFO","message":"tick","tick":104,"ai_processes":5,"exits":0}
+{"timestamp":"2026-06-05T10:57:49.425463Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":0.0,"rss_mb":67}
+{"timestamp":"2026-06-05T10:57:49.425469Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":1.0014439821243286,"rss_mb":279}
+{"timestamp":"2026-06-05T10:57:49.425471Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":1.0014439821243286,"rss_mb":305}
+{"timestamp":"2026-06-05T10:57:49.425473Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":9.012996673583984,"rss_mb":277}
+{"timestamp":"2026-06-05T10:57:49.425484Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:57:49.425487Z","level":"INFO","message":"alert visible (headless)","alert.fire":"WorkloadExited","scope":"Workload(111310)","pid":111310,"workload":"bash"}
+{"timestamp":"2026-06-05T10:57:50.414164Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:57:50.438906Z","level":"INFO","message":"tick","tick":105,"ai_processes":5,"exits":0}
+{"timestamp":"2026-06-05T10:57:50.438928Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":0.0,"rss_mb":67}
+{"timestamp":"2026-06-05T10:57:50.438935Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":0.9849687814712524,"rss_mb":279}
+{"timestamp":"2026-06-05T10:57:50.438938Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":0.9849687814712524,"rss_mb":305}
+{"timestamp":"2026-06-05T10:57:50.438940Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":10.834656715393066,"rss_mb":278}
+{"timestamp":"2026-06-05T10:57:50.438942Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:57:50.438945Z","level":"INFO","message":"alert visible (headless)","alert.fire":"WorkloadExited","scope":"Workload(111310)","pid":111310,"workload":"bash"}
+{"timestamp":"2026-06-05T10:57:51.410026Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:57:51.434717Z","level":"INFO","message":"tick","tick":106,"ai_processes":5,"exits":0}
+{"timestamp":"2026-06-05T10:57:51.434736Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":0.0,"rss_mb":67}
+{"timestamp":"2026-06-05T10:57:51.434740Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":2.0083799362182617,"rss_mb":279}
+{"timestamp":"2026-06-05T10:57:51.434743Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":1.0041899681091309,"rss_mb":305}
+{"timestamp":"2026-06-05T10:57:51.434746Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":11.046090126037598,"rss_mb":278}
+{"timestamp":"2026-06-05T10:57:51.434749Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:57:51.434753Z","level":"INFO","message":"alert visible (headless)","alert.fire":"WorkloadExited","scope":"Workload(111310)","pid":111310,"workload":"bash"}
+{"timestamp":"2026-06-05T10:57:52.401693Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:57:52.426220Z","level":"INFO","message":"tick","tick":107,"ai_processes":5,"exits":0}
+{"timestamp":"2026-06-05T10:57:52.426238Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":0.0,"rss_mb":67}
+{"timestamp":"2026-06-05T10:57:52.426243Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":0.0,"rss_mb":279}
+{"timestamp":"2026-06-05T10:57:52.426245Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":1.008400559425354,"rss_mb":305}
+{"timestamp":"2026-06-05T10:57:52.426247Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":6.050403594970703,"rss_mb":278}
+{"timestamp":"2026-06-05T10:57:52.426255Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:57:52.426258Z","level":"INFO","message":"alert visible (headless)","alert.fire":"WorkloadExited","scope":"Workload(111310)","pid":111310,"workload":"bash"}
+{"timestamp":"2026-06-05T10:57:53.397396Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:57:53.426949Z","level":"INFO","message":"tick","tick":108,"ai_processes":5,"exits":0}
+{"timestamp":"2026-06-05T10:57:53.426971Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":0.0,"rss_mb":67}
+{"timestamp":"2026-06-05T10:57:53.426975Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":2.008502721786499,"rss_mb":279}
+{"timestamp":"2026-06-05T10:57:53.426977Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":1.0042513608932495,"rss_mb":305}
+{"timestamp":"2026-06-05T10:57:53.426979Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":20.08502769470215,"rss_mb":300}
+{"timestamp":"2026-06-05T10:57:53.426980Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:57:53.427000Z","level":"INFO","message":"alert visible (headless)","alert.fire":"WorkloadExited","scope":"Workload(111310)","pid":111310,"workload":"bash"}
+{"timestamp":"2026-06-05T10:57:54.415050Z","level":"INFO","message":"No NVIDIA GPU detected. VRAM, GPU power, and per-device temperature metrics will be empty; CPU, RAM, lifecycle, governor, and regression detection still work.","nvml_detail":"NVIDIA driver is not loaded"}
+{"timestamp":"2026-06-05T10:57:54.443935Z","level":"INFO","message":"tick","tick":109,"ai_processes":5,"exits":0}
+{"timestamp":"2026-06-05T10:57:54.443965Z","level":"INFO","message":"ai-process","pid":1180,"name":"ollama","category":"Inference","cpu_pct":0.0,"rss_mb":67}
+{"timestamp":"2026-06-05T10:57:54.443969Z","level":"INFO","message":"ai-process","pid":5262,"name":"claude","category":"Inference","cpu_pct":0.9826831817626953,"rss_mb":279}
+{"timestamp":"2026-06-05T10:57:54.443972Z","level":"INFO","message":"ai-process","pid":28301,"name":"claude","category":"Inference","cpu_pct":0.9826831817626953,"rss_mb":305}
+{"timestamp":"2026-06-05T10:57:54.443974Z","level":"INFO","message":"ai-process","pid":101493,"name":"claude","category":"Inference","cpu_pct":4.913415908813477,"rss_mb":286}
+{"timestamp":"2026-06-05T10:57:54.443975Z","level":"INFO","message":"ai-process","pid":111314,"name":"ollama","category":"Inference","model":"sha256-eb2c714d40d4b35ba4b8ee98475a06d51d8080a17d2d2a75a23665985c739b94","cpu_pct":0.0,"rss_mb":188}
+{"timestamp":"2026-06-05T10:57:54.443979Z","level":"INFO","message":"alert visible (headless)","alert.fire":"WorkloadExited","scope":"Workload(111310)","pid":111310,"workload":"bash"}
+{"timestamp":"2026-06-05T10:57:55.166779Z","level":"INFO","message":"shutdown requested; finishing current tick"}
+{"timestamp":"2026-06-05T10:57:55.372339Z","level":"INFO","message":"shutdown signal received; exiting"}

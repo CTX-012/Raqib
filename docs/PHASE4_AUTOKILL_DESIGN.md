@@ -1,0 +1,66 @@
+# edge_monitor — Auto-Kill Actuation Design (Phase 4 frontier)
+
+**Status:** design locked 2026-06-05 · promotes to a `docs/PHASE4_DESIGN.md` sub-section at sign-off
+**Basis:** DISPATCH 59 Inspector pre-pass (read-only against v1.3.1 / HEAD `f3e7607`)
+**Authority change:** this is the **deliberate crossing of the observe-only line** (held as a lock 9×). It is gated, off-by-default, and lands incrementally.
+
+## The one thing that governs everything
+
+The v1.0.1 **phantom-kill scar** is held at **three independent layers**, all currently intact:
+
+1. **Policy default** — `safe_default().default_ai_action = Allow` (`policy.rs:59`)
+2. **Severed tick path** — no production code calls `send_sigterm` (grep: zero non-self/non-test call sites)
+3. **Audit silence** — `record_governor_audit` deliberately no-ops on kill verbs (`runtime.rs:1301-1321`)
+
+Tear down any one and the other two still prevent a phantom kill. **Tearing down all three is the gate this arc walks through openly** — never silently, never as a side effect. Every step below preserves at least one layer until the operator has explicitly opted in.
+
+## Locked decisions (Q1–Q6)
+
+| Q | Decision | Rationale |
+|---|---|---|
+| **Q1 — SIGTERM site** | **A: tick-loop.** A new function adjacent to `record_governor_audit` walks `state.decisions` for `SignalTermSent` and calls `executor.send_sigterm` (+ `execute_after_grace`). | Mandated by the standing **network-never-in-safety-path** lock. Keeps `libc::kill` off the unauthenticated bind, preserves single-owner-of-`&mut Runtime`, no cross-thread mutation channel. **Web stays a policy editor, never a kill driver.** |
+| **Q2 — Opt-in default** | **OFF.** `default_ai_action` stays `Allow`; actuation requires explicit `governor.auto_actuate = true`. No first-launch enable, no silent flip. | The scar. Operator must name the verb. |
+| **Q3 — Sustain gate** | New `kill_sustain_secs`, default **≥10s**, validated **≥ `alert_sustain_secs`**. Exact value empirical (design/test). | A kill must never undercut alert-smoothing; a briefly-flashing breach must not kill. |
+| **Q4 — Tiebreaker** | **Deterministic lowest-PID now** (explicit sort — `LifecycleSnapshot.processes` is a HashMap, order non-deterministic). Least-recent-activity is **v-next**, landing with `LiveTelemetry::last_active_at`. | Cheap, correct, auditable today; the better tiebreaker needs a timestamp field that doesn't exist yet. |
+| **Q5 — Firewall teardown** | Opt-in flag (+ auth if ever B) **first**; replace doc-only Firewall 3 with an automated test **before** actuation; **Firewall 1 untouched** (actuation reads a separate `KillIntent`-style type, not `SuggestedAction`); actuation lives in `runtime.rs`/`governor/`, **never `recommend.rs`** → **Firewall 2 stays intact**. | Gate the path before it exists; preserve every lock that has zero teardown cost. |
+| **Q6 — Trigger scope** | **VRAM%-first.** Thermal + RAM triggers are a **follow-up pass**. | VRAM% *is* an OOM signal → still delivers the OOM-prevention goal. Only GPU **thermal-protection** defers. Avoids landing two large changes in one ratification. |
+
+## The three firewalls (status + fate)
+
+| # | Firewall | Where | Fate in this arc |
+|---|---|---|---|
+| 1 | Type (`SuggestedAction` discriminator-not-callable) | `ux_contract/src/recommendation.rs:97-112` + pin test `:281-286` | **Untouched** — actuation reads a separate type |
+| 2 | Wiring (forbidden-token scan of `recommend.rs`) | `tests/recommendation_observe_only_guard.rs:56-105` | **Intact** — actuation never touches `recommend.rs` |
+| 3 | Config schema (documentary only — weakest) | `thresholds.rs:46-51` + v1.3.2 `WorkloadRule` | **Replaced by an automated test BEFORE any actuation** |
+
+## Build sequence (9 steps, gated, bisectable)
+
+Steps **1–2 are observe-only-safe and fire now** (DISPATCH 60). Steps **3+ are gated behind v1.3.2 ratification.** **Actuation goes live only at step 5, behind `auto_actuate == true` (default false)** — shipped-but-dark until opt-in.
+
+| Step | Work | Touches | Actuation live? |
+|---|---|---|---|
+| 1 | `tests/config_schema_firewall.rs` — token-list guard mirroring the recommendation guard; replaces the documentary Firewall 3 | tests | no |
+| 2 | `governor.auto_actuate: bool` config field, **default false**; no actuation code | config | no |
+| 3 | Widen `evaluate()` to accept a **threshold-breach projection** (M4 option b), **VRAM%-only** | `governor/`, runtime projection | no |
+| 4 | Deterministic **lowest-PID** sort in the candidate ordering | `governor/` | no |
+| 5 | **Tick-loop actuation site** — walk `decisions`, call `send_sigterm` **only if `auto_actuate`**, mirror `state.audit` with `KillSource::Automated` | `runtime.rs` | **yes (gated, default-off)** |
+| 6 | `execute_after_grace` SIGKILL escalation in the same loop, gated identically | `runtime.rs` | yes (gated) |
+| 7 | `kill_sustain_secs` field (Q3), validated ≥ `alert_sustain_secs` | config, `governor/` | yes (gated) |
+| 8 | (follow-up) thermal + RAM triggers (Q6) | projection, `governor/` | yes (gated) |
+| 9 | (v-next) `LiveTelemetry::last_active_at` + least-recent-activity tiebreaker (Q4) | runtime, `governor/` | yes (gated) |
+
+Tester validation before tagging the actuation release: real OOM-pressure scenario, opt-in toggle on/off, sustain gate, **phantom-kill regression guard** (default-off path fires no kill), and the web-render gate.
+
+## Web's role (explicitly bounded)
+
+Web becomes a **policy editor** — thresholds, sustain, the `auto_actuate` toggle (written to TOML, read by the tick loop). Web **never** drives a kill. The mutation endpoint + auth (Phase 4 settings work) carries *config*, not *actuation verbs*. Current web surface confirmed read-only/unauthenticated (routes enumerated `web/mod.rs:77-84`; "NO AUTH, trusted LAN only" `main.rs:278-284`).
+
+## Out of scope here
+- GPU thermal-protection trigger (Q6 follow-up)
+- RAM trigger (Q6 follow-up)
+- Activity-aware tiebreaker (Q4 v-next)
+- Web settings-UI build (separate Phase 4 settings dispatch)
+
+---
+
+*Promotes to `docs/PHASE4_DESIGN.md` at operator sign-off. Steps 1–2 = DISPATCH 60 (observe-only-safe). Steps 3+ gated behind v1.3.2 ratification.*

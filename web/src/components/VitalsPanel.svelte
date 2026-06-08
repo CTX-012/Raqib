@@ -93,7 +93,24 @@
             <div class="pt-2 border-t border-fg-muted/20">
                 <div class="text-xs text-fg-muted mb-1">Thermal</div>
                 <ul class="text-xs space-y-0.5">
-                    {#each thermalTop as zone (zone.label)}
+                    <!--
+                        v1.3.2 / DISPATCH 65 — key on `${label}-${idx}`,
+                        NOT label alone. Many Linux hosts expose multiple
+                        zones with the same label (e.g. two `acpitz` rows
+                        on this dev box; certain BIOS configs surface
+                        per-package `x86_pkg_temp` rows under one label
+                        too). Keying purely on `label` triggered the
+                        Svelte `each_key_duplicate` error, which threw
+                        inside the `<main>` slot and CASCADE-BLANKED the
+                        sibling WorkloadsPanel + ActivityFeed (only the
+                        out-of-`<main>` AlertsPanel survived — exactly
+                        the operator-confirmed symptom). The composite
+                        is positional so a re-key on list reorder is
+                        cheap; a wire-level stable zone id would be
+                        marginally better but requires a contract bump,
+                        deliberately out of scope here.
+                    -->
+                    {#each thermalTop as zone, idx (`${zone.label}-${idx}`)}
                         <li class="flex justify-between {thermalColor(zone.severity)}">
                             <span class="font-mono">{zone.label}</span>
                             <span>{zone.temp_celsius.toFixed(1)} °C</span>

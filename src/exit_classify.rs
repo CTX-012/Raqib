@@ -74,7 +74,24 @@ pub fn classify_exit(summary: &LifecycleSummary, ctx: &ExitContext) -> ExitReaso
     //    naming the PID. Match on PID, not name — two `python`
     //    processes are too common.
     //  * CUDA out-of-memory shows up in stderr (no kernel record).
-    let kernel_oom = summary.signal == Some(9) && dmesg_killed_pid(ctx, summary.pid);
+    //
+    // v1.3.2 / DISPATCH 73 (P1#2) — admit `signal=None` as well as
+    // `Some(9)`. Passive-monitored exits never get a wait() status
+    // (tracker.rs:56 honestly emits `mark_exit(None, None)` because
+    // we don't own the child), so the previous strict
+    // `signal == Some(9)` gate locked passive OOMs out — an
+    // ollama-shaped workload killed by the kernel OOM-killer
+    // recorded `exit_kind="unknown"` even when dmesg had a
+    // matching `Killed process N` line. We open the gate to
+    // `Some(9) | None` but keep it closed for other Some(_)
+    // values: a `SIGTERM` (15), `SIGSEGV` (11), or `SIGINT` (2)
+    // exit MUST NOT be misclassified as OOM even when an
+    // unrelated dmesg OOM line for a PID-reuse predecessor sits
+    // in the journal lookback. The `dmesg_killed_pid` AND-clause
+    // remains the primary specificity guard (OOM phrase AND
+    // matching PID).
+    let signal_admits_oom = matches!(summary.signal, Some(9) | None);
+    let kernel_oom = signal_admits_oom && dmesg_killed_pid(ctx, summary.pid);
     let cuda_oom = stderr_matches_cuda_oom(&ctx.stderr_lines);
     if kernel_oom || cuda_oom {
         return ExitReason::OutOfMemory {
@@ -328,5 +345,120 @@ mod tests {
     #[test]
     fn read_recent_kernel_log_never_panics() {
         let _ = read_recent_kernel_log(5);
+    }
+
+    // ── v1.3.2 / DISPATCH 73 (P1#2) — passive-OOM attribution ──────
+
+    /// The core P1#2 fix: a passive-monitored exit
+    /// (`summary.signal == None` — the tracker emits None when it
+    /// can't observe wait status, which is the steady state for
+    /// processes edge_monitor doesn't own) MUST classify as OOM
+    /// when dmesg has a matching `Killed process <pid>` line.
+    /// Pre-v1.3.2 this exit recorded `exit_kind="unknown"` because
+    /// `exit_classify.rs:77` strictly required `signal==Some(9)`.
+    #[test]
+    fn passive_oom_signal_none_with_dmesg_match_classifies_oom() {
+        let ctx = ExitContext {
+            dmesg_lines: vec![
+                "[12345.678] Out of memory: Killed process 1234 (ollama) total-vm:9000".into(),
+            ],
+            ..ExitContext::default()
+        };
+        // signal = None (passive monitoring), exit_code = None.
+        let r = classify_exit(&summary(None, None), &ctx);
+        assert_eq!(
+            r,
+            ExitReason::OutOfMemory {
+                ram: true,
+                vram: false,
+            },
+            "passive-monitored OOM (signal=None) with a matching \
+             dmesg line MUST classify as OOM, not Unknown — the \
+             P1#2 fix admits `Some(9) | None` to the OOM gate",
+        );
+    }
+
+    /// False-OOM guard #1: a `SIGTERM` exit (signal=Some(15)) MUST
+    /// NOT misclassify as OOM even when dmesg has a matching
+    /// `Killed process <pid>` line. The dmesg line would belong to
+    /// a PID-reuse predecessor — the kernel doesn't OOM-kill via
+    /// SIGTERM. This is the load-bearing case the relaxed gate
+    /// preserves (`signal_admits_oom = Some(9) | None`).
+    #[test]
+    fn sigterm_exit_with_dmesg_match_does_not_misattribute_to_oom() {
+        let ctx = ExitContext {
+            dmesg_lines: vec![
+                "[12345.678] Out of memory: Killed process 1234 (predecessor) total-vm:9000".into(),
+            ],
+            ..ExitContext::default()
+        };
+        let r = classify_exit(&summary(Some(15), None), &ctx);
+        assert_eq!(
+            r,
+            ExitReason::UserSignal { signal: 15 },
+            "SIGTERM + dmesg OOM line MUST NOT classify as OOM — \
+             the kernel doesn't OOM-kill via SIGTERM; this dmesg \
+             entry can only be a PID-reuse predecessor's record. \
+             Got: {r:?}",
+        );
+    }
+
+    /// False-OOM guard #2: a `SIGSEGV` exit (signal=Some(11)) is
+    /// `ExitReason::Segfault` per the existing precedence at
+    /// `classify_exit` line ~68 — it short-circuits BEFORE the OOM
+    /// gate. Even with a matching dmesg OOM line, the segfault
+    /// classification wins. Pinned so a future refactor that
+    /// reorders the checks doesn't silently regress.
+    #[test]
+    fn sigsegv_short_circuits_before_oom_classification() {
+        let ctx = ExitContext {
+            dmesg_lines: vec![
+                "[12345.678] Out of memory: Killed process 1234 (...) total-vm:9000".into(),
+            ],
+            ..ExitContext::default()
+        };
+        let r = classify_exit(&summary(Some(11), None), &ctx);
+        assert_eq!(
+            r,
+            ExitReason::Segfault,
+            "SIGSEGV (11) short-circuits to Segfault before the OOM \
+             gate; got: {r:?}",
+        );
+    }
+
+    /// signal=None WITHOUT a matching dmesg line falls through to
+    /// `ExitReason::Unknown` — no false positives without dmesg
+    /// evidence. The relaxed gate only opens the OOM CLASSIFIER
+    /// path; the dmesg match is still required.
+    #[test]
+    fn signal_none_with_no_dmesg_evidence_remains_unknown() {
+        let r = classify_exit(&summary(None, None), &ExitContext::default());
+        assert_eq!(
+            r,
+            ExitReason::Unknown,
+            "signal=None + no dmesg → Unknown; the relaxed gate \
+             must NOT fabricate an OOM without evidence. Got: {r:?}",
+        );
+    }
+
+    /// signal=None with a dmesg OOM line for a DIFFERENT PID does
+    /// NOT misattribute. The `dmesg_killed_pid` AND-clause is the
+    /// primary specificity guard and survives the gate relaxation.
+    #[test]
+    fn signal_none_with_unrelated_dmesg_pid_does_not_misattribute() {
+        let ctx = ExitContext {
+            dmesg_lines: vec![
+                "[12345.678] Out of memory: Killed process 999 (cron) total-vm:1000".into(),
+            ],
+            ..ExitContext::default()
+        };
+        // Our default PID is 1234; dmesg names 999.
+        let r = classify_exit(&summary(None, None), &ctx);
+        assert_eq!(
+            r,
+            ExitReason::Unknown,
+            "signal=None + dmesg-OOM for a different PID → Unknown; \
+             got: {r:?}",
+        );
     }
 }

@@ -961,6 +961,19 @@ impl Runtime {
             d.record_disk_io(&live_ai);
         }
 
+        // v1.3.2 / DISPATCH 73 (P1#2) — per-tick dmesg cache. The
+        // OOM-classification path (exit_classify.rs:77) shells out
+        // to `journalctl -k --since=-10s`; benchmarking on this
+        // host showed ~25 ms per call (cold and warm). A ROS2
+        // graph with 3-4 exits per tick would burn 75-100 ms of
+        // the 1 s tick budget if we re-shelled per exit. We cache
+        // the read once per tick and share the Vec across the
+        // exit loop. Lazy init: the read only fires if at least
+        // one exit's `signal` admits the OOM branch
+        // (`Some(9) | None` — see the gate at exit_classify.rs:77
+        // for the v1.3.2 relaxation that opens passive-monitored
+        // exits to the OOM classifier in the first place).
+        let mut dmesg_cache: Option<Vec<String>> = None;
         // Record run summaries as they fire. Bounded by config to keep memory flat.
         for summary in &lifecycle.recent_exits {
             self.state.completed.push_back(summary.clone());
@@ -1020,12 +1033,24 @@ impl Runtime {
                     record.model_fingerprint = Some(fp);
                 }
                 // Tier 3.5 — richer exit-reason classification. We
-                // only spend a journalctl invocation when the signal
-                // hint suggests something dmesg might explain (SIGKILL
-                // for OOM); for clean exits / SIGTERM we skip the
-                // subprocess entirely.
-                let dmesg_lines = if summary.signal == Some(9) {
-                    read_recent_kernel_log(10)
+                // only spend the (~25 ms) journalctl invocation when
+                // the signal hint admits the OOM branch: SIGKILL
+                // (Some(9)) OR no-wait-status (None — the passive-
+                // monitoring case). Known non-OOM signals
+                // (SIGTERM=15, SIGSEGV=11, SIGINT=2, …) skip the
+                // shellout entirely. v1.3.2 / DISPATCH 73 (P1#2) —
+                // pre-bump this branch was `Some(9)` ONLY, which
+                // locked passive OOMs out: tracker.rs:56 emits
+                // `mark_exit(None, None)` for passive exits, so
+                // workloads we don't own (ollama, the operator's
+                // ROS2 graph, etc.) had `summary.signal=None` and
+                // their OOM was misclassified as Unknown. Cached
+                // via `dmesg_cache` above — multiple exits in the
+                // same tick share one journalctl call.
+                let dmesg_lines = if matches!(summary.signal, Some(9) | None) {
+                    dmesg_cache
+                        .get_or_insert_with(|| read_recent_kernel_log(10))
+                        .clone()
                 } else {
                     Vec::new()
                 };

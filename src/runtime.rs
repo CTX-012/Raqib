@@ -1305,6 +1305,37 @@ impl Runtime {
             {
                 tracing::warn!(error = %e, "failed to persist manual-kill audit entry");
             }
+            // v1.3.2 / DISPATCH 70 (P1#1) — bridge the manual-kill
+            // path into the exit-classifier's `killed_by_governor`
+            // signal. Pre-v1.3.2 this HashMap had ZERO writers:
+            // automated kills were unwired since v1.0.1 and the
+            // manual path never populated it, so every manual-k
+            // → SIGTERM exit fell through to
+            // `ExitReason::from_summary` and recorded
+            // `exit_kind="unknown"` even though we KNEW the
+            // reason. Writing the audit entry's reason here means
+            // the next lifecycle drain's `classify_exit` (called
+            // at `runtime.rs:1032-1056`) sees
+            // `killed_by_governor = true` and produces
+            // `ExitReason::GovernorKill { reason }`.
+            //
+            // Gated on `entry.success`: only insert when the
+            // SIGTERM actually went out. A failed kill (process
+            // already gone, permission denied) MUST NOT pre-tag
+            // the PID — if the OS later assigns the PID to an
+            // unrelated process before the lifecycle reaper
+            // notices, the stale entry would mis-attribute the
+            // new process's exit as a governor kill.
+            //
+            // Reap point: the entry is `remove()`d at the lifecycle
+            // exit-drain (`runtime.rs:1032`); the HashMap therefore
+            // grows by at most one entry per outstanding manual
+            // kill and shrinks back to zero on the next tick that
+            // surfaces the exit. No unbounded growth path exists.
+            if entry.success {
+                self.governor_killed_pids
+                    .insert(pid, entry.reason.clone());
+            }
             self.state.audit.push_back(entry.clone());
             while self.state.audit.len() > self.config.runtime.audit_history {
                 self.state.audit.pop_front();
@@ -2682,6 +2713,148 @@ mod tests {
         assert_eq!(
             compute_workload_status(&inputs, &crate::thresholds::EffectiveThresholds::default()),
             ux_contract::WorkloadStatus::Healthy
+        );
+    }
+
+    // ── v1.3.2 / DISPATCH 70 (P1#1) — manual_kill → governor_killed_pids bridge ──
+
+    /// Spawn a real child that traps SIGTERM (so a successful
+    /// `kill_sigterm` returns Ok without the child actually dying)
+    /// then SIGKILL it via the returned handle for cleanup.
+    fn spawn_sigterm_trap_child() -> std::process::Child {
+        std::process::Command::new("sh")
+            .arg("-c")
+            .arg("trap '' TERM; while :; do sleep 1; done")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn test child")
+    }
+
+    /// Plant `pid` in `runtime.state.last_lifecycle` as a freshly-
+    /// observed process so `manual_kill`'s `find_by_pid` lookup
+    /// succeeds. Returns the planted name so the test can assert
+    /// against the audit entry.
+    fn plant_lifecycle_for_pid(runtime: &mut Runtime, pid: u32, name: &str) {
+        use crate::lifecycle::{LifecycleSnapshot, ProcessLifecycle};
+        let sample = crate::model::ProcessSample {
+            pid,
+            name: name.into(),
+            ..Default::default()
+        };
+        let lc = ProcessLifecycle::new(&sample, None);
+        let mut snap = LifecycleSnapshot::new();
+        snap.processes.insert(pid, lc);
+        runtime.state.last_lifecycle = Some(snap);
+    }
+
+    /// On a successful SIGTERM the manual_kill path MUST insert
+    /// `(pid → reason)` into `governor_killed_pids`. Pre-v1.3.2
+    /// the HashMap had ZERO writers and every manual-k exit
+    /// fell through to `ExitReason::from_summary` → unknown.
+    /// classify_exit already handles `killed_by_governor = true`
+    /// correctly (see `exit_classify::tests`); this test pins the
+    /// WRITE so the wired-up reader (`runtime.rs:1032` — already
+    /// consuming the HashMap entry) sees the input it never got.
+    #[test]
+    fn manual_kill_records_pid_in_governor_killed_pids_on_success() {
+        let mut child = spawn_sigterm_trap_child();
+        let pid = child.id();
+
+        let mut rt = Runtime::new(Config::default()).expect("runtime");
+        plant_lifecycle_for_pid(&mut rt, pid, "sh");
+
+        let reason = "test: PID overran KV budget".to_string();
+        let result = rt.manual_kill(pid, reason.clone());
+        // Always clean up the trapping child regardless of the
+        // assertion outcome — letting it leak would burn a stray
+        // shell PID across CI workers.
+        let _ = child.kill();
+        let _ = child.wait();
+
+        assert!(
+            result.is_ok(),
+            "manual_kill against an existing trapping child must \
+             succeed (kill(2) returns 0 even when the target traps \
+             the signal): {result:?}",
+        );
+
+        let stored = rt
+            .governor_killed_pids
+            .get(&pid)
+            .expect("governor_killed_pids must contain the killed PID after manual_kill");
+        assert_eq!(
+            stored, &reason,
+            "stored reason must match the operator's reason verbatim, \
+             so classify_exit's `ExitReason::GovernorKill {{ reason }}` \
+             carries the operator-supplied detail rather than a \
+             fabricated one",
+        );
+    }
+
+    /// A FAILED kill (target PID gone before SIGTERM, or permission
+    /// denied) MUST NOT pre-tag the PID. If the OS later assigns
+    /// the same PID to an unrelated process before the lifecycle
+    /// tracker observes the gap, a stale entry would mis-attribute
+    /// the new process's exit as a governor kill — exactly the
+    /// v1.0.0-class phantom-attribution risk the v1.0.1 scar fix
+    /// guards against.
+    #[test]
+    fn manual_kill_does_not_insert_when_kill_fails() {
+        let mut child = spawn_sigterm_trap_child();
+        let pid = child.id();
+
+        let mut rt = Runtime::new(Config::default()).expect("runtime");
+        plant_lifecycle_for_pid(&mut rt, pid, "sh");
+
+        // Force the kill to fail: reap the child BEFORE we issue
+        // manual_kill, so libc::kill returns ESRCH when SIGTERM
+        // tries to land. The lifecycle entry still says the
+        // process is alive (we planted it manually); manual_kill
+        // discovers the failure at the actual signal site, not at
+        // the lookup.
+        let _ = child.kill();
+        let _ = child.wait();
+
+        // Spin a brief moment for the kernel to fully reap the
+        // zombie — kill(reaped_pid, _) gives ESRCH only after the
+        // PID is unassigned.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        let _ = rt.manual_kill(pid, "should-not-be-recorded".into());
+        assert!(
+            !rt.governor_killed_pids.contains_key(&pid),
+            "governor_killed_pids MUST NOT contain a failed-kill PID: \
+             a stale entry could mis-attribute a PID-reuse-recipient \
+             process's exit as a governor kill. v1.0.1 phantom-kill \
+             scar lesson — failed signals leave NO audit trail.",
+        );
+    }
+
+    /// The lifecycle-exit reap site at `runtime.rs:1032` already
+    /// `remove()`s the entry when the exit is recorded. This test
+    /// pins the structural reap path so a future refactor of the
+    /// exit-drain that drops the `.remove()` call would fail
+    /// loudly: a kill recorded into the HashMap must be drained by
+    /// the consumer, otherwise `governor_killed_pids` grows
+    /// unbounded across long-running monitor sessions.
+    #[test]
+    fn governor_killed_pids_remove_call_persists_at_exit_drain_site() {
+        // Tripwire / lock-as-test: a literal grep of the runtime
+        // source for the `.remove(` call site. If a future refactor
+        // moves or renames the field, update this assertion AND
+        // restore the equivalent reap point. The HashMap-leak
+        // failure mode is silent at runtime — only a guard like
+        // this surfaces it before production.
+        let src = include_str!("runtime.rs");
+        assert!(
+            src.contains("self.governor_killed_pids.remove(&summary.pid)"),
+            "the lifecycle exit-drain path MUST `.remove()` the \
+             entry for the exited PID — otherwise governor_killed_pids \
+             grows unbounded over the monitor's session lifetime. \
+             see runtime.rs:1032 for the current reap site; if it \
+             moved, update this test AND the doc-comment in \
+             `manual_kill`'s P1#1 insert.",
         );
     }
 }

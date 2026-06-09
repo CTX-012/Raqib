@@ -79,6 +79,16 @@ pub fn router(state: WebState) -> Router {
         .route("/assets/*path", get(handlers::serve_asset))
         .route("/api/health", get(handlers::health))
         .route("/api/snapshot", get(handlers::snapshot))
+        // v1.3.2 / DISPATCH 68 — the first-party web dashboard now
+        // polls `/api/snapshot` on a 1 Hz interval (see
+        // `web/src/lib/rest.ts`) instead of subscribing here. The
+        // route is intentionally retained for backward-compat with
+        // any external script that may already speak it; a future
+        // dispatch can remove it after a deprecation window. The
+        // existing `tests/web_e2e.rs::websocket_initial_snapshot
+        // _then_updates` continues to exercise the route end-to-end
+        // so the regression surface stays visible if the handler
+        // bit-rots while still mounted.
         .route("/api/stream", any(stream::websocket))
         .layer(cors)
         .with_state(state)

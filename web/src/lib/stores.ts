@@ -1,11 +1,15 @@
 import { writable, type Writable } from 'svelte/store';
 import { EMPTY_SNAPSHOT, type WireSnapshot } from './types';
 
-// Sprint-6 — Svelte stores hold the latest dashboard state. The
-// WebSocket client (`ws.ts`) writes into `snapshot`; components
-// subscribe and re-render on each push. Theme + connection state
-// have their own stores so they're cheap to update independently of
-// the per-tick snapshot.
+// Sprint-6 — Svelte stores hold the latest dashboard state.
+//
+// v1.3.2 / DISPATCH 68: the REST polling client (`rest.ts`) writes
+// into `snapshot`. Pre-v1.3.2 the WebSocket client (`ws.ts`) wrote
+// here instead — the transport swap is invisible at this layer
+// because both writers `.set()` the same `WireSnapshot` shape.
+// Components subscribe and re-render whenever the store updates.
+// Theme + connection state have their own stores so they're cheap
+// to update independently of the per-tick snapshot.
 
 export const snapshot: Writable<WireSnapshot> = writable(EMPTY_SNAPSHOT);
 

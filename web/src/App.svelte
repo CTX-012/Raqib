@@ -1,7 +1,10 @@
 <script lang="ts">
     import { onMount, onDestroy } from 'svelte';
     import { snapshot, connectionStatus, theme, type ThemeName } from './lib/stores';
-    import { connect, disconnect } from './lib/ws';
+    // v1.3.2 / DISPATCH 68 — REST polling replaces the v1.0.x
+    // WebSocket push transport. Same `connect()`/`disconnect()`
+    // surface so the onMount/onDestroy plumbing is unchanged.
+    import { connect, disconnect } from './lib/rest';
     import MissionLine from './components/MissionLine.svelte';
     import VitalsPanel from './components/VitalsPanel.svelte';
     import WorkloadsPanel from './components/WorkloadsPanel.svelte';

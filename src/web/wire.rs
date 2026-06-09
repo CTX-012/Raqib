@@ -56,11 +56,22 @@ pub struct WireSnapshot {
     /// AI Workloads panel — one entry per AI-classified live PID,
     /// pre-grouped by workload category for the renderer's convenience.
     pub workloads: Vec<WireWorkload>,
-    /// Activity feed — recent run exits / governor decisions
-    /// (chronological, newest first). Capped at 50 to bound the
-    /// JSON payload; the operator opens the full history view for
-    /// older entries.
-    pub activity: Vec<WireRunRecord>,
+    /// Activity feed — merged time-descending event log of
+    /// `state.completed` workload exits, `state.audit` governor /
+    /// manual kills, and `state.regressions` Tier-1.3 alerts.
+    /// Mirrors the TUI's `src/ui/panels/activity.rs::build_events`
+    /// projection; same events, same ordering, identical per-row
+    /// wording. Capped at `limits::ACTIVITY_FEED_WIRE_MAX` (50) to
+    /// bound the JSON payload; consumers may apply their own
+    /// narrower display cap (the TUI shows 5, the web's
+    /// `ACTIVITY_FEED_WEB_MAX` defaults to 12).
+    ///
+    /// v1.3.2 / DISPATCH 71 — was `Vec<WireRunRecord>` (exits only)
+    /// pre-bump; now `Vec<WireActivityEntry>` per shape B (see
+    /// [`WireActivityEntry`]'s doc-comment for the shape-choice
+    /// rationale). The wire-format change ties to `ux_contract`
+    /// v0.3.17 (`ActivityKind`, `ActivitySeverity`).
+    pub activity: Vec<WireActivityEntry>,
     /// v1.1.13 / DISPATCH 42 — currently visible alerts. Mirrors
     /// the TUI's alert region: same alerts in the same priority
     /// order, same per-entry text rendered via the same
@@ -512,10 +523,102 @@ pub struct WireWorkload {
     pub activity: Option<String>,
 }
 
+/// v1.3.2 / DISPATCH 71 — uniform activity-feed entry.
+///
+/// One entry per row in the §1 region 6 "last N events" feed. The
+/// TUI's `src/ui/panels/activity.rs::build_events` merges THREE
+/// sources (`state.completed` exits, `state.audit` governor-kill
+/// entries, `state.regressions` Tier-1.3 alerts) into a single
+/// time-descending list capped at `ACTIVITY_FEED_TUI_MAX`. This
+/// type is the wire mirror of that merge — the web dashboard's
+/// activity feed reaches TUI parity for the first time since v1.0.0
+/// (the v1.0.x wire only carried `state.completed`).
+///
+/// ## Shape choice — B (thin uniform)
+///
+/// The dispatch presented two candidate shapes:
+/// * B (this) — `{ kind, timestamp, pid, name, summary, severity }`.
+///   One render path, server-classified severity, server-rendered
+///   summary string. Lossy: the native AuditLogEntry / RegressionEvent
+///   detail flattens into `summary`.
+/// * C — same fields PLUS an optional structured `detail` blob
+///   carrying the native event data for a future post-mortem view.
+///
+/// We ship B. House precedent: [`WireAlertEntry`] (v1.1.13) is
+/// shape B; the three native structs ([`LifecycleSummary`],
+/// [`crate::governor::manual::AuditLogEntry`],
+/// [`crate::analysis::RegressionEvent`]) have non-overlapping
+/// fields, so a uniform `detail` tagged union would be a 3-variant
+/// enum with 3 distinct internal struct shapes — exactly the
+/// awkwardness STOP #1 calls out; post-mortem is unscoped and
+/// would likely live behind its own `/api/postmortem/<pid>?ts=<ts>`
+/// endpoint rather than bloating the always-polled snapshot;
+/// shape B is ~50 % smaller on the wire per REST poll
+/// (`ACTIVITY_FEED_WIRE_MAX = 50` entries × 1 Hz polling, every byte
+/// compounds).
+///
+/// ## Wire-format strings
+///
+/// * `kind` ∈ {`"exit"`, `"kill"`, `"regression"`} — the canonical
+///   strings sourced from `ux_contract::activity::ActivityKind`
+///   v0.3.17.
+/// * `severity` ∈ {`"healthy"`, `"attention"`, `"critical"`} —
+///   sourced from `ux_contract::activity::ActivitySeverity` v0.3.17.
+/// * `timestamp` is RFC 3339 (the serde default for
+///   `DateTime<Utc>`).
+///
+/// ## Render-side uniqueness
+///
+/// The Svelte renderer's `{#each}` keys on
+/// `` `${kind}-${pid}-${timestamp}` `` — guaranteed unique across
+/// all three sources, including the legitimate
+/// "same PID exits AND has a kill audit" case. PID alone is
+/// insufficient (an exit + a kill on the same PID would collide);
+/// timestamp alone is insufficient at sub-second resolution.
+/// The composite is what dodges D65's `each_key_duplicate`
+/// failure mode.
+#[derive(Debug, Clone, Serialize)]
+pub struct WireActivityEntry {
+    /// Snake-case discriminator: `"exit"` / `"kill"` / `"regression"`.
+    /// Mapped from `ux_contract::activity::ActivityKind`.
+    pub kind: String,
+    /// Event timestamp (RFC 3339 via serde default for
+    /// `DateTime<Utc>`). Source-specific: exit uses
+    /// `LifecycleSummary::exit_time`; kill uses
+    /// `AuditLogEntry::timestamp`; regression uses
+    /// `RegressionEvent::timestamp`.
+    pub timestamp: DateTime<Utc>,
+    /// PID the event is scoped to. For regressions (which are
+    /// model-scoped, not PID-scoped), we use `0` as a sentinel and
+    /// surface the model name in `summary` / `name`.
+    pub pid: u32,
+    /// Workload display name. For exits / kills this is the
+    /// process `comm`; for regressions it's the model name (so the
+    /// renderer's `name` column stays human-friendly).
+    pub name: String,
+    /// Server-rendered one-line summary. The Svelte renderer prints
+    /// this verbatim — NO template substitution in TypeScript.
+    /// Format mirrors the TUI text (`activity::build_events`)
+    /// byte-for-byte so an operator side-by-siding the two surfaces
+    /// sees identical wording.
+    pub summary: String,
+    /// Pre-classified severity. Renderer maps the literal to a
+    /// tailwind class; same single-source-of-truth pattern as
+    /// `WireAlertEntry::severity`.
+    pub severity: String,
+}
+
 /// One completed-run record, suitable for both the history view and
 /// the activity feed. Built from `RunRecord` (which is itself built
 /// from `LifecycleSummary`) so every record represents an exited
 /// workload — see B13 invariant in `tests/history_refactor.rs`.
+///
+/// v1.3.2 / DISPATCH 71 — no longer used by the activity feed
+/// (replaced by [`WireActivityEntry`]). Kept on the wire surface as
+/// a future-history-view scaffold; downstream code that wants a
+/// richer per-exit projection (`exit_kind` / `exit_detail` from
+/// `exit_classify`) still uses this type. Currently unreferenced
+/// outside this file's own tests — sweep candidate.
 #[derive(Debug, Clone, Serialize)]
 pub struct WireRunRecord {
     pub pid: u32,
@@ -539,18 +642,20 @@ pub struct WireRunRecord {
 }
 
 impl WireSnapshot {
-    /// Compose a wire snapshot from the runtime's authoritative state
-    /// plus a slice of recent completed RunRecords. The recent slice
-    /// is the caller's choice — Sprint-6 main.rs hands in
-    /// `runtime.recent_completed(50)` to keep JSON bounded.
-    pub fn from_runtime_state(state: &RuntimeState, recent: &[RunRecord]) -> Self {
+    /// Compose a wire snapshot from the runtime's authoritative
+    /// state. The activity feed is built directly from state in
+    /// `build_activity` (v1.3.2 / DISPATCH 71); pre-bump this took
+    /// a `recent: &[RunRecord]` slice covering only `state.completed`,
+    /// but the merged 3-source feed reads `state.completed` +
+    /// `state.audit` + `state.regressions` directly.
+    pub fn from_runtime_state(state: &RuntimeState) -> Self {
         let mission = WireMission::from_runtime(state);
         let vitals = WireVitals::from_runtime(state);
         let workloads = state
             .ai_processes()
             .map(|p| WireWorkload::from_annotated(p, state))
             .collect::<Vec<_>>();
-        let activity = recent.iter().map(WireRunRecord::from_record).collect();
+        let activity = build_activity(state);
         // v1.1.13 / DISPATCH 42 — project the same Active alert set
         // the TUI banner reads. `AlertState::visible()` returns
         // alerts in §4 priority order (Critical before Attention);
@@ -829,6 +934,212 @@ impl WireRunRecord {
     }
 }
 
+// ── v1.3.2 / DISPATCH 71 — activity-feed projections ──────────────
+
+/// Canonical wire string for a `ux_contract::activity::ActivityKind`.
+/// The contract documents the strings as the reference mapping; this
+/// is the consumer-side authoritative implementation.
+fn activity_kind_to_str(kind: ux_contract::activity::ActivityKind) -> &'static str {
+    use ux_contract::activity::ActivityKind;
+    match kind {
+        ActivityKind::Exit => "exit",
+        ActivityKind::Kill => "kill",
+        ActivityKind::Regression => "regression",
+    }
+}
+
+/// Canonical wire string for a `ux_contract::activity::ActivitySeverity`.
+/// Same single-source-of-truth pattern as
+/// [`alert_tier_to_severity_str`].
+fn activity_severity_to_str(s: ux_contract::activity::ActivitySeverity) -> &'static str {
+    use ux_contract::activity::ActivitySeverity;
+    match s {
+        ActivitySeverity::Healthy => "healthy",
+        ActivitySeverity::Attention => "attention",
+        ActivitySeverity::Critical => "critical",
+    }
+}
+
+impl WireActivityEntry {
+    /// Project a `state.completed` entry (AI workload exit) to the
+    /// uniform wire shape.
+    ///
+    /// Mirrors `src/ui/panels/activity.rs::build_events`'s exit
+    /// branch: signal-terminated → Critical, clean → Healthy. The
+    /// summary string mirrors `format_run_summary` byte-for-byte
+    /// so an operator side-by-siding TUI vs web reads the same
+    /// wording.
+    ///
+    /// AI-only filter is the caller's responsibility (it lives in
+    /// `build_activity` below) to match the TUI's pre-filter at
+    /// `activity::build_events` line 94-97.
+    pub fn from_lifecycle_summary(s: &LifecycleSummary) -> Self {
+        use ux_contract::activity::{ActivityKind, ActivitySeverity};
+        let severity = if s.signal.is_some() {
+            ActivitySeverity::Critical
+        } else {
+            ActivitySeverity::Healthy
+        };
+        Self {
+            kind: activity_kind_to_str(ActivityKind::Exit).to_string(),
+            timestamp: s.exit_time,
+            pid: s.pid,
+            name: s.name.clone(),
+            summary: format_exit_summary(s),
+            severity: activity_severity_to_str(severity).to_string(),
+        }
+    }
+
+    /// Project a `state.audit` entry (governor or manual kill) to
+    /// the uniform wire shape.
+    ///
+    /// Mirrors `activity::build_events`'s audit branch:
+    /// failed kills → Critical; manual successes → Attention;
+    /// automated successes → Healthy.
+    pub fn from_audit_entry(e: &crate::governor::manual::AuditLogEntry) -> Self {
+        use crate::governor::manual::KillSource;
+        use ux_contract::activity::{ActivityKind, ActivitySeverity};
+        let severity = if !e.success {
+            ActivitySeverity::Critical
+        } else if e.source == KillSource::Manual {
+            ActivitySeverity::Attention
+        } else {
+            ActivitySeverity::Healthy
+        };
+        Self {
+            kind: activity_kind_to_str(ActivityKind::Kill).to_string(),
+            timestamp: e.timestamp,
+            pid: e.pid,
+            name: e.process_name.clone(),
+            summary: format_audit_summary(e),
+            severity: activity_severity_to_str(severity).to_string(),
+        }
+    }
+
+    /// Project a `state.regressions` entry (Tier-1.3 throughput
+    /// regression) to the uniform wire shape.
+    ///
+    /// Mirrors `activity::build_events`'s regression branch:
+    /// `Severity::Critical` → Critical; anything else → Attention.
+    /// PID is set to `0` (sentinel) because regressions are
+    /// model-scoped, not PID-scoped; the model name fills the
+    /// `name` column so the operator still has a per-row label.
+    pub fn from_regression_event(r: &crate::analysis::RegressionEvent) -> Self {
+        use crate::analysis::Severity;
+        use ux_contract::activity::{ActivityKind, ActivitySeverity};
+        let severity = if r.regression.severity >= Severity::Critical {
+            ActivitySeverity::Critical
+        } else {
+            ActivitySeverity::Attention
+        };
+        Self {
+            kind: activity_kind_to_str(ActivityKind::Regression).to_string(),
+            timestamp: r.timestamp,
+            // Regressions are model-scoped — no PID identity to pin
+            // them to. Wire `0` as the sentinel that the renderer
+            // can suppress in display (the renderer already keys on
+            // the composite kind+pid+timestamp so a zero PID across
+            // multiple regression events on different models is
+            // not a key-collision risk).
+            pid: 0,
+            name: r.model.clone(),
+            summary: format_regression_summary(r),
+            severity: activity_severity_to_str(severity).to_string(),
+        }
+    }
+}
+
+/// One-line summary for a workload exit. Mirrors
+/// `activity::format_run_summary` byte-for-byte so the TUI and the
+/// web feed render identical wording.
+fn format_exit_summary(s: &LifecycleSummary) -> String {
+    let cat = s.category.map(|c| format!("{c:?}")).unwrap_or_default();
+    let mut row = format!("exit pid={} {} {}", s.pid, s.name, cat);
+    if let Some(model) = s.model_name.as_deref().filter(|m| !m.is_empty()) {
+        row.push_str(&format!(" model={model}"));
+    }
+    row.push_str(&format!(
+        " cpu avg={:.0}% peak={:.0}% RAM {} MB",
+        s.avg_cpu_pct, s.peak_cpu_pct, s.peak_rss_mb,
+    ));
+    if s.peak_vram_mb > 0 {
+        row.push_str(&format!(", GPU memory {} MB", s.peak_vram_mb));
+    }
+    row.push_str(&format!(" up={}s", s.uptime_secs));
+    row
+}
+
+/// One-line summary for a governor-audit entry. Mirrors the TUI
+/// audit-branch format in `activity::build_events` lines 132-135.
+fn format_audit_summary(e: &crate::governor::manual::AuditLogEntry) -> String {
+    use crate::governor::manual::{KillSource, ManualKillAction};
+    let action = match e.action {
+        ManualKillAction::SendSigterm => "SIGTERM",
+        ManualKillAction::SendSigkill => "SIGKILL",
+        ManualKillAction::Cancelled => "CANCELLED",
+        ManualKillAction::PidReusedAborted => "ABORT-PID-REUSE",
+    };
+    let source = match e.source {
+        KillSource::Manual => "manual",
+        KillSource::Automated => "auto",
+    };
+    let status = if e.success { "OK" } else { "FAIL" };
+    format!(
+        "{} {} {} pid={} {} - {}",
+        action, status, source, e.pid, e.process_name, e.reason,
+    )
+}
+
+/// One-line summary for a Tier-1.3 regression event. Mirrors the
+/// TUI regression-branch format in `activity::build_events` lines
+/// 150-157.
+fn format_regression_summary(r: &crate::analysis::RegressionEvent) -> String {
+    format!(
+        "REGRESSION {:?} {} {} {:+.1}% (n={})",
+        r.regression.severity,
+        r.model,
+        r.regression.metric,
+        r.regression.delta_pct,
+        r.baseline_size,
+    )
+}
+
+/// Merge the three activity sources into one time-descending,
+/// per-spec-capped list. Mirrors
+/// `src/ui/panels/activity.rs::build_events` (the TUI side of the
+/// merge) so the TUI and web surfaces show the same events in the
+/// same order; the cap uses `limits::ACTIVITY_FEED_WIRE_MAX` (50)
+/// instead of `ACTIVITY_FEED_TUI_MAX` (5) so the web's richer
+/// `ACTIVITY_FEED_WEB_MAX` (12) cap can land downstream without
+/// the wire pre-truncating.
+fn build_activity(state: &RuntimeState) -> Vec<WireActivityEntry> {
+    let mut events: Vec<WireActivityEntry> = Vec::new();
+    // Exits — AI-only, matching the TUI filter
+    // (`activity::build_events` lines 94-97).
+    for s in &state.completed {
+        if s.category.is_none() {
+            continue;
+        }
+        events.push(WireActivityEntry::from_lifecycle_summary(s));
+    }
+    // Governor-audit kills + their CANCELLED / PID-reuse-abort
+    // companions.
+    for e in &state.audit {
+        events.push(WireActivityEntry::from_audit_entry(e));
+    }
+    // Tier-1.3 regressions.
+    for r in &state.regressions {
+        events.push(WireActivityEntry::from_regression_event(r));
+    }
+    // Newest first; cap to ACTIVITY_FEED_WIRE_MAX so the JSON stays
+    // bounded across very chatty sessions (busy ROS2 graphs can
+    // emit many ProcessExit + governor entries within a single
+    // tick). The TUI applies its own narrower cap at render time.
+    events.sort_by_key(|e| std::cmp::Reverse(e.timestamp));
+    events.truncate(ux_contract::limits::ACTIVITY_FEED_WIRE_MAX);
+    events
+}
+
 // ── helpers ────────────────────────────────────────────────────────
 
 fn build_status_inputs(
@@ -979,7 +1290,7 @@ mod tests {
             true,
         );
 
-        let snap = WireSnapshot::from_runtime_state(runtime.state(), &[]);
+        let snap = WireSnapshot::from_runtime_state(runtime.state());
         assert!(
             !snap.recommendations.is_empty(),
             "VRAM pressure alert MUST project to a wire recommendation",
@@ -1207,7 +1518,7 @@ mod tests {
             true,
         );
 
-        let snap = WireSnapshot::from_runtime_state(runtime.state(), &[]);
+        let snap = WireSnapshot::from_runtime_state(runtime.state());
         assert_eq!(
             snap.alerts.len(),
             2,
@@ -1315,7 +1626,7 @@ mod tests {
     #[test]
     fn snapshot_from_default_runtime_has_zero_workloads() {
         let runtime = Runtime::new(Config::default()).expect("Runtime::new must succeed with contract default config");
-        let snap = WireSnapshot::from_runtime_state(runtime.state(), &[]);
+        let snap = WireSnapshot::from_runtime_state(runtime.state());
         assert_eq!(snap.mission.workloads, 0);
         assert_eq!(snap.mission.degraded, 0);
         assert!(snap.workloads.is_empty());
@@ -1427,5 +1738,279 @@ mod tests {
         assert_eq!(segfault.exit_kind, "segfault");
         let crash = WireRunRecord::from_record(&RunRecord::from_summary(lc(None, Some(139))));
         assert_eq!(crash.exit_kind, "crash");
+    }
+
+    // ── v1.3.2 / DISPATCH 71 — WireActivityEntry parity tests ──────
+
+    /// Construct a minimal AI-classified LifecycleSummary so the
+    /// `from_lifecycle_summary` projection has all fields it needs.
+    /// The category is forced AI so `build_activity` doesn't filter
+    /// the row out.
+    fn ai_summary(pid: u32, name: &str, signal: Option<i32>) -> LifecycleSummary {
+        LifecycleSummary {
+            pid,
+            name: name.into(),
+            category: Some(crate::model::AICategory::Inference),
+            model_name: None,
+            spawn_time: Utc::now(),
+            exit_time: Utc::now(),
+            uptime_secs: 60,
+            exit_code: signal.map_or(Some(0), |_| None),
+            signal,
+            avg_cpu_pct: 12.0,
+            peak_cpu_pct: 33.0,
+            peak_rss_mb: 256,
+            peak_vram_mb: 0,
+            samples: 10,
+        }
+    }
+
+    fn audit_entry(
+        pid: u32,
+        name: &str,
+        success: bool,
+        source: crate::governor::manual::KillSource,
+    ) -> crate::governor::manual::AuditLogEntry {
+        use crate::governor::manual::{AuditLogEntry, ManualKillAction};
+        AuditLogEntry {
+            timestamp: Utc::now(),
+            action: ManualKillAction::SendSigterm,
+            source,
+            pid,
+            process_name: name.into(),
+            category: Some(crate::model::AICategory::Inference),
+            reason: "test reason".into(),
+            success,
+            error_msg: if success { None } else { Some("ESRCH".into()) },
+        }
+    }
+
+    fn regression_event(model: &str, severity: crate::analysis::Severity) -> crate::analysis::RegressionEvent {
+        use crate::analysis::{Regression, RegressionEvent};
+        RegressionEvent {
+            timestamp: Utc::now(),
+            model: model.into(),
+            baseline_size: 20,
+            regression: Regression {
+                metric: "tok/s".into(),
+                baseline: 40.0,
+                current: 22.0,
+                delta_pct: -45.0,
+                severity,
+            },
+        }
+    }
+
+    /// AI exit projects to `kind="exit"` with a clean-or-signal
+    /// severity. Severity classification mirrors
+    /// `activity::build_events` line 99-103: a non-None `signal`
+    /// flips Critical, a clean exit is Healthy.
+    #[test]
+    fn wire_activity_entry_from_lifecycle_summary_clean_exit() {
+        let s = ai_summary(1234, "phi3", None);
+        let w = WireActivityEntry::from_lifecycle_summary(&s);
+        assert_eq!(w.kind, "exit");
+        assert_eq!(w.pid, 1234);
+        assert_eq!(w.name, "phi3");
+        assert_eq!(w.severity, "healthy");
+        assert!(
+            w.summary.contains("exit pid=1234"),
+            "summary must mirror TUI's `exit pid=N` prefix: {:?}",
+            w.summary,
+        );
+    }
+
+    #[test]
+    fn wire_activity_entry_from_lifecycle_summary_signal_kill() {
+        let s = ai_summary(2222, "vllm", Some(9)); // SIGKILL
+        let w = WireActivityEntry::from_lifecycle_summary(&s);
+        assert_eq!(w.kind, "exit");
+        assert_eq!(w.severity, "critical");
+    }
+
+    /// Audit entry severity: failed → Critical; manual+success →
+    /// Attention; auto+success → Healthy. Mirrors
+    /// `activity::build_events` lines 124-131.
+    #[test]
+    fn wire_activity_entry_audit_severity_three_band() {
+        use crate::governor::manual::KillSource;
+        let failed = audit_entry(1, "x", false, KillSource::Manual);
+        let manual_ok = audit_entry(2, "y", true, KillSource::Manual);
+        let auto_ok = audit_entry(3, "z", true, KillSource::Automated);
+
+        assert_eq!(
+            WireActivityEntry::from_audit_entry(&failed).severity,
+            "critical",
+        );
+        assert_eq!(
+            WireActivityEntry::from_audit_entry(&manual_ok).severity,
+            "attention",
+        );
+        assert_eq!(
+            WireActivityEntry::from_audit_entry(&auto_ok).severity,
+            "healthy",
+        );
+    }
+
+    /// Audit `kind="kill"` and summary echoes the TUI's
+    /// `SIGTERM OK manual pid=N name - reason` format.
+    #[test]
+    fn wire_activity_entry_audit_summary_mirrors_tui_format() {
+        use crate::governor::manual::KillSource;
+        let e = audit_entry(5151, "ollama", true, KillSource::Manual);
+        let w = WireActivityEntry::from_audit_entry(&e);
+        assert_eq!(w.kind, "kill");
+        assert_eq!(w.pid, 5151);
+        assert_eq!(w.name, "ollama");
+        // Format match — see `activity::build_events` line 132.
+        assert!(
+            w.summary.starts_with("SIGTERM OK manual pid=5151 ollama"),
+            "summary must match TUI's audit-row format byte-for-byte: \
+             {:?}",
+            w.summary,
+        );
+        assert!(w.summary.contains("test reason"));
+    }
+
+    /// Regression severity: `>= Critical` → critical; else
+    /// attention. Mirrors `activity::build_events` line 145-149.
+    /// Regression PID sentinel is 0 because regressions are
+    /// model-scoped.
+    #[test]
+    fn wire_activity_entry_regression_severity_and_sentinel_pid() {
+        use crate::analysis::Severity;
+        let warn = regression_event("phi3", Severity::Warn);
+        let crit = regression_event("llama3", Severity::Critical);
+
+        let w_warn = WireActivityEntry::from_regression_event(&warn);
+        assert_eq!(w_warn.kind, "regression");
+        assert_eq!(w_warn.pid, 0, "regression PID sentinel");
+        assert_eq!(w_warn.name, "phi3");
+        assert_eq!(w_warn.severity, "attention");
+
+        let w_crit = WireActivityEntry::from_regression_event(&crit);
+        assert_eq!(w_crit.severity, "critical");
+        assert!(w_crit.summary.contains("REGRESSION"));
+        assert!(w_crit.summary.contains("llama3"));
+    }
+
+    /// End-to-end parity: `build_activity` merges all three
+    /// sources, sorts time-descending, caps at
+    /// ACTIVITY_FEED_WIRE_MAX. The merged Vec contains entries from
+    /// every populated source.
+    #[test]
+    fn build_activity_merges_three_sources_time_descending() {
+        use crate::governor::manual::KillSource;
+        use crate::analysis::Severity;
+        let mut runtime = Runtime::new(Config::default()).expect("runtime");
+        runtime.state_mut().completed.push_back(ai_summary(10, "exit-one", None));
+        runtime.state_mut().audit.push_back(audit_entry(11, "kill-one", true, KillSource::Manual));
+        runtime.state_mut().regressions.push_back(regression_event("reg-model", Severity::Warn));
+
+        let merged = build_activity(runtime.state());
+        let kinds: Vec<&str> = merged.iter().map(|e| e.kind.as_str()).collect();
+        assert!(
+            kinds.contains(&"exit"),
+            "merged feed must include the exit source: {kinds:?}",
+        );
+        assert!(
+            kinds.contains(&"kill"),
+            "merged feed must include the kill source: {kinds:?}",
+        );
+        assert!(
+            kinds.contains(&"regression"),
+            "merged feed must include the regression source: {kinds:?}",
+        );
+        // Time-descending: each entry's timestamp >= the next.
+        for pair in merged.windows(2) {
+            assert!(
+                pair[0].timestamp >= pair[1].timestamp,
+                "merged feed must be sorted time-descending; got out-of-order pair: \
+                 {} → {}",
+                pair[0].timestamp,
+                pair[1].timestamp,
+            );
+        }
+    }
+
+    /// End-to-end wire shape: stuff all three sources, build the
+    /// snapshot, serialize to JSON, and assert each kind appears
+    /// with the expected canonical strings. This is the strongest
+    /// JSON-shape proof we can produce without driving a real ROS2
+    /// / ollama exit cycle: a downstream Svelte consumer that
+    /// reads the JSON sees the exact same shape this test asserts.
+    /// Mirrors the operator's manual gate
+    /// `curl /api/snapshot | jq '.activity'` 3-kind check.
+    #[test]
+    fn wire_snapshot_serializes_three_kind_activity_feed() {
+        use crate::analysis::Severity;
+        use crate::governor::manual::KillSource;
+        let mut runtime = Runtime::new(Config::default()).expect("runtime");
+        runtime
+            .state_mut()
+            .completed
+            .push_back(ai_summary(10, "ollama", None));
+        runtime
+            .state_mut()
+            .audit
+            .push_back(audit_entry(11, "phi3", true, KillSource::Manual));
+        runtime
+            .state_mut()
+            .regressions
+            .push_back(regression_event("llama3", Severity::Critical));
+
+        let snap = WireSnapshot::from_runtime_state(runtime.state());
+        let json = serde_json::to_string(&snap).expect("serialize");
+        assert!(
+            json.contains("\"kind\":\"exit\""),
+            "exit kind missing from snapshot JSON",
+        );
+        assert!(
+            json.contains("\"kind\":\"kill\""),
+            "kill kind missing from snapshot JSON",
+        );
+        assert!(
+            json.contains("\"kind\":\"regression\""),
+            "regression kind missing from snapshot JSON",
+        );
+        assert!(
+            json.contains("\"severity\":\"healthy\"")
+                || json.contains("\"severity\":\"attention\"")
+                || json.contains("\"severity\":\"critical\""),
+            "at least one severity classifier must surface in JSON",
+        );
+        // Legacy WireRunRecord regression check.
+        assert!(
+            !json.contains("\"exit_kind\":"),
+            "legacy WireRunRecord `exit_kind` key must not appear in \
+             the v1.3.2 activity feed (schema bumped to \
+             WireActivityEntry); got JSON: {json}",
+        );
+    }
+
+    /// AI-only filter for exits, mirroring the TUI guard at
+    /// `activity::build_events` lines 94-97.
+    #[test]
+    fn build_activity_skips_non_ai_exits() {
+        let mut runtime = Runtime::new(Config::default()).expect("runtime");
+        let mut non_ai = ai_summary(99, "sh", None);
+        non_ai.category = None;
+        runtime.state_mut().completed.push_back(non_ai);
+        runtime.state_mut().completed.push_back(ai_summary(100, "phi3", None));
+
+        let merged = build_activity(runtime.state());
+        let names: Vec<&str> = merged
+            .iter()
+            .filter(|e| e.kind == "exit")
+            .map(|e| e.name.as_str())
+            .collect();
+        assert!(
+            names.contains(&"phi3"),
+            "AI exit must be present: {names:?}",
+        );
+        assert!(
+            !names.contains(&"sh"),
+            "non-AI exit (category=None) must be filtered out: {names:?}",
+        );
     }
 }

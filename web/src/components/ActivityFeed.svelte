@@ -1,45 +1,66 @@
 <script lang="ts">
-    import type { WireRunRecord } from '../lib/types';
+    /*
+     * v1.3.2 / DISPATCH 71 — uniform activity feed.
+     *
+     * Renders the merged 3-source list the Rust wire builder
+     * produces (`src/web/wire.rs::build_activity`): exits + governor
+     * kills + Tier-1.3 regressions, time-descending, sliced to
+     * ACTIVITY_FEED_WEB_MAX rows.
+     *
+     * Shape B: the server pre-classifies severity and pre-renders
+     * `summary`. The TypeScript side ONLY maps severity to a
+     * tailwind class and lays out the row — no template
+     * substitution, no per-kind classification logic.
+     *
+     * {#each} keying: `${kind}-${pid}-${timestamp}` is unique
+     * across all 3 sources, including the legitimate
+     * "same PID has both an exit and a kill" case. Pid alone is
+     * insufficient (the D65 each_key_duplicate failure class);
+     * timestamp at sub-second resolution may also collide on a
+     * busy tick. The composite is what stays unique.
+     */
+    import type { WireActivityEntry } from '../lib/types';
     import { ACTIVITY_FEED_WEB_MAX } from '../lib/limits';
-    export let activity: WireRunRecord[];
+    export let activity: WireActivityEntry[];
 
-    // v1.0.1 B-NEW-11 — "unknown" exit_kind routes to muted, not
-    // critical. Inspector #3 found that transient non-AI processes
-    // with no wait status (or AI processes whose runtime couldn't
-    // attribute the exit) painted as red alarms. "unknown" means
-    // "no signal," not "alarming"; muted is the right neutral.
-    //
-    // The visible-alarm classes (critical-red) are now reserved for
-    // outcomes where the runtime DOES know something went wrong:
-    // crash, segfault, oom, cuda. Mapping table is exhaustive on
-    // the wire-schema `exit_kind` strings (see WireRunRecord docs).
-    function exitClass(kind: string): string {
-        switch (kind) {
-            case 'clean':
-                return 'text-healthy';
-            case 'governor':
-            case 'signal':
-                return 'text-attention';
-            case 'unknown':
-                return 'text-fg-muted';
-            case 'crash':
-            case 'segfault':
-            case 'oom':
-            case 'cuda':
+    // Pre-classified severity → tailwind class. Mirrors the same
+    // single-source-of-truth pattern as AlertsPanel.svelte and
+    // VitalsPanel.svelte: the contract pre-classified the
+    // severity; we render.
+    function severityClass(severity: WireActivityEntry['severity']): string {
+        switch (severity) {
+            case 'critical':
                 return 'text-critical';
+            case 'attention':
+                return 'text-attention';
+            case 'healthy':
             default:
-                // Defensive default — a future wire schema bump that
-                // adds a new exit_kind variant would land here until
-                // the table is extended. Muted-not-critical keeps the
-                // unknown-variant case quiet rather than alarming.
-                return 'text-fg-muted';
+                return 'text-healthy';
+        }
+    }
+
+    // Per-kind label for the small badge in the right column. The
+    // server-rendered `summary` is the primary content; this badge
+    // gives the operator a one-glance hint of the event class.
+    function kindLabel(kind: WireActivityEntry['kind']): string {
+        switch (kind) {
+            case 'exit':
+                return 'exit';
+            case 'kill':
+                return 'kill';
+            case 'regression':
+                return 'regression';
         }
     }
 
     function shortTime(iso: string): string {
         try {
             const d = new Date(iso);
-            return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+            return d.toLocaleTimeString([], {
+                hour: '2-digit',
+                minute: '2-digit',
+                second: '2-digit',
+            });
         } catch {
             return '--:--:--';
         }
@@ -53,13 +74,12 @@
         <div class="text-fg-muted italic text-sm py-2">No recent activity.</div>
     {:else}
         <ul class="space-y-1 text-sm">
-            {#each activity.slice(0, ACTIVITY_FEED_WEB_MAX) as ev (ev.pid + '-' + ev.exit_time)}
-                <li class="grid grid-cols-[5rem_1fr_auto_auto] gap-x-3">
-                    <span class="text-fg-muted text-xs">{shortTime(ev.exit_time)}</span>
-                    <span class="text-fg truncate">{ev.model_name ?? ev.name}</span>
-                    <span class="text-fg-muted text-xs">{ev.uptime_secs}s</span>
-                    <span class="text-xs {exitClass(ev.exit_kind)}">
-                        {ev.exit_kind}{#if ev.exit_detail} · {ev.exit_detail}{/if}
+            {#each activity.slice(0, ACTIVITY_FEED_WEB_MAX) as ev (`${ev.kind}-${ev.pid}-${ev.timestamp}`)}
+                <li class="grid grid-cols-[5rem_1fr_auto] gap-x-3">
+                    <span class="text-fg-muted text-xs">{shortTime(ev.timestamp)}</span>
+                    <span class="text-fg truncate" title={ev.summary}>{ev.summary}</span>
+                    <span class="text-xs {severityClass(ev.severity)}">
+                        {kindLabel(ev.kind)}
                     </span>
                 </li>
             {/each}

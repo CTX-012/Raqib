@@ -13,7 +13,17 @@ export interface WireSnapshot {
     mission: WireMission;
     vitals: WireVitals;
     workloads: WireWorkload[];
-    activity: WireRunRecord[];
+    // v1.3.2 / DISPATCH 71 — wire-format change: was
+    // `WireRunRecord[]` (exits only) pre-bump; now
+    // `WireActivityEntry[]` (exits + governor-audit kills +
+    // Tier-1.3 regressions). Ties to ux_contract v0.3.17
+    // (`ActivityKind`, `ActivitySeverity`). The element type
+    // changed but the field name is stable — no `activity?`
+    // optional gate needed since the array is non-optional in
+    // both schema versions; an older binary's
+    // `WireRunRecord` payload simply fails to satisfy the new
+    // type (the wire-schema bump is intentional, not additive).
+    activity: WireActivityEntry[];
     // v1.1.13 / DISPATCH 42 — currently visible alerts (closes the
     // v1.1.11 web-wire deferral). Server pre-classifies severity
     // against `ux_contract::AlertId`'s tier mapping, so the
@@ -180,6 +190,55 @@ export interface WireRunRecord {
     peak_vram_mb: number;
     exit_kind: string;
     exit_detail: string | null;
+}
+
+/**
+ * v1.3.2 / DISPATCH 71 — uniform activity-feed entry.
+ *
+ * One entry per row in §1 region 6 ("last N events"). The Rust
+ * builder (`src/web/wire.rs::WireActivityEntry`) merges THREE
+ * source vecs (`state.completed` exits, `state.audit` governor
+ * kills, `state.regressions` Tier-1.3 alerts) into a single
+ * time-descending list, projects each to this uniform shape,
+ * sorts by timestamp DESC, and caps at
+ * `ACTIVITY_FEED_WIRE_MAX = 50`. The Svelte renderer applies its
+ * own narrower `ACTIVITY_FEED_WEB_MAX = 12` slice at the {#each}
+ * call site.
+ *
+ * Shape B (thin uniform): the server pre-classifies severity and
+ * pre-renders the per-row summary string. The TypeScript side does
+ * NO template substitution; `summary` prints verbatim and
+ * `severity` maps to a tailwind class. Mirrors `WireAlertEntry`
+ * (v1.1.13) — house precedent.
+ *
+ * Key composition (closes the D65 each_key_duplicate failure mode):
+ * `${kind}-${pid}-${timestamp}` is unique across all three sources
+ * even when the same PID has both an exit AND a kill audit entry.
+ */
+export interface WireActivityEntry {
+    // 'exit' | 'kill' | 'regression' — sourced from
+    // ux_contract::activity::ActivityKind v0.3.17. The renderer
+    // may use the literal to drive a per-kind icon or future
+    // post-mortem routing.
+    kind: 'exit' | 'kill' | 'regression';
+    // RFC 3339 timestamp string. The server has already sorted
+    // the array time-descending; clients render in receive order.
+    timestamp: string;
+    // PID the event is scoped to. Regressions wire `0` as a
+    // sentinel because they're model-scoped, not PID-scoped; the
+    // renderer may suppress the PID column for regression rows.
+    pid: number;
+    // Process `comm` for exits/kills; model name for regressions.
+    name: string;
+    // Server-rendered one-line summary; print verbatim, no
+    // template substitution in TS.
+    summary: string;
+    // 'healthy' | 'attention' | 'critical' — sourced from
+    // ux_contract::activity::ActivitySeverity v0.3.17. The
+    // renderer maps the literal to a tailwind class; DO NOT
+    // re-derive severity in TS, the contract is the single source
+    // of truth.
+    severity: 'healthy' | 'attention' | 'critical';
 }
 
 /** Empty snapshot used as the initial store value. */

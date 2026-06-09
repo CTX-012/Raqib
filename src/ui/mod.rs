@@ -178,24 +178,16 @@ fn run_loop(
             // older entries are still queryable via the persistent
             // run store, just not pushed every tick.
             if let Some(tx) = web_tx.as_ref() {
-                // v1.0.1 B-NEW-8 — filter on `.category.is_some()` so
-                // non-AI shell exits (sh / sleep / ls / grep …) don't
-                // flood the activity feed. Pre-v1.0.1 the wire took
-                // any LifecycleSummary, AI or not; web users saw
-                // background-shell churn that the TUI's category-
-                // filtered Activity panel hides.
-                let recent: Vec<crate::storage::RunRecord> = runtime
-                    .state()
-                    .completed
-                    .iter()
-                    .rev()
-                    .filter(|s| s.category.is_some())
-                    .take(ux_contract::limits::ACTIVITY_FEED_WIRE_MAX)
-                    .cloned()
-                    .map(crate::storage::RunRecord::from_summary)
-                    .collect();
-                let snap =
-                    crate::web::WireSnapshot::from_runtime_state(runtime.state(), &recent);
+                // v1.0.1 B-NEW-8 — AI-only filter for exit events now
+                // lives inside `web::wire::build_activity` (DISPATCH
+                // 71's merged 3-source feed). Non-AI shell exits
+                // still don't reach the dashboard.
+                // v1.3.2 / DISPATCH 71 — wire activity is now a
+                // merged time-descending event log of `completed` +
+                // `audit` + `regressions`; reading directly from
+                // state at the builder removed the need to
+                // pre-build `recent`.
+                let snap = crate::web::WireSnapshot::from_runtime_state(runtime.state());
                 let _ = tx.send(snap);
             }
 

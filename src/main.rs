@@ -694,22 +694,16 @@ fn run_headless(
         // web is a defensible mode: headless logging + remote
         // dashboard for ops who don't want a terminal up).
         if let Some(tx) = web_tx.as_ref() {
-            // v1.0.1 B-NEW-8 — AI-only filter, matches the TUI loop
-            // at src/ui/mod.rs. Non-AI shell exits don't belong in
-            // the dashboard's activity feed. Cap comes from
-            // ux_contract v0.3.10 (`limits::ACTIVITY_FEED_WIRE_MAX`).
-            let recent: Vec<edge_monitor::storage::RunRecord> = runtime
-                .state()
-                .completed
-                .iter()
-                .rev()
-                .filter(|s| s.category.is_some())
-                .take(ux_contract::limits::ACTIVITY_FEED_WIRE_MAX)
-                .cloned()
-                .map(edge_monitor::storage::RunRecord::from_summary)
-                .collect();
-            let snap =
-                edge_monitor::web::WireSnapshot::from_runtime_state(runtime.state(), &recent);
+            // v1.0.1 B-NEW-8 — AI-only filter for the exit branch
+            // lives inside `build_activity` now; non-AI shell exits
+            // still don't reach the dashboard's activity feed.
+            // v1.3.2 / DISPATCH 71 — the wire builder reads the
+            // three event sources directly from state
+            // (`completed` + `audit` + `regressions`); no more
+            // recent-RunRecord pre-mapping here. Cap +
+            // sort-time-desc + projection live in
+            // `web::wire::build_activity`.
+            let snap = edge_monitor::web::WireSnapshot::from_runtime_state(runtime.state());
             let _ = tx.send(snap);
         }
 

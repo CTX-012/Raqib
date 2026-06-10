@@ -286,6 +286,24 @@ impl RuntimeState {
             .iter()
             .filter(|p| p.category == AICategory::NotAi)
     }
+
+    /// v1.3.2 / CAR-D75 / DISPATCH 76 — atomically push a completed
+    /// summary AND its (optional) classification attribution to the
+    /// two lock-step VecDeques. Callers must use this entry point
+    /// rather than pushing to `completed` / `recent_exit_attribution`
+    /// directly so the lock-step invariant
+    /// (`completed.len() == recent_exit_attribution.len()`) never
+    /// breaks. The invariant is asserted by `build_events` /
+    /// `build_activity` at the consumer side; this helper is the
+    /// producer-side enforcement.
+    pub fn push_completed_exit(
+        &mut self,
+        summary: LifecycleSummary,
+        attribution: Option<ExitAttribution>,
+    ) {
+        self.completed.push_back(summary);
+        self.recent_exit_attribution.push_back(attribution);
+    }
 }
 
 /// L19 / UX_CONTRACT.md §5 — transient per-PID stderr buffer feeding

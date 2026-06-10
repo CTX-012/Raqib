@@ -39,6 +39,17 @@ const DEFERRED_FILES: &[&str] = &[
     "src/ui/panels/history_overlay.rs", // CAR-6: overlay header + column labels not in v0.3
     "src/ui/panels/postmortem.rs",   // L16 split + CAR-2 resolved in v0.3.2 (postmortem_labels::*)
     "src/ui/panels/vitals.rs",       // L11 (rename to System)
+    // v1.3.2 / CAR-D75 / DISPATCH 76 — browse-mode expand block
+    // mirrors the postmortem card's per-field layout. Most labels
+    // (`Cause:`, `Peak RAM:`, `Peak VRAM:`, `Kill action:`,
+    // `Kill result:`) come from `ux_contract::postmortem_labels::*`
+    // (v0.3.18); the inline cursor decoration (`▸ `, 4-space
+    // indents) is contract-side decoration. Two labels — `CPU:`
+    // and `error:` — don't yet have contract constants; they're
+    // candidates for the next contract amendment alongside
+    // `postmortem_labels::CPU` / `RUNTIME_ERROR`. Deferral matches
+    // the standing `postmortem.rs` precedent on row 5.
+    "src/ui/panels/activity.rs",
 ];
 
 const SEPARATOR_ALLOWLIST: &[&str] = &[

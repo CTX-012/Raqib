@@ -245,8 +245,39 @@ fn apply_action(
     match action {
         Action::Quit => app.request_quit(),
         Action::ToggleHelp => app.toggle_help(),
-        Action::SelectUp => app.select_prev(runtime.state()),
-        Action::SelectDown => app.select_next(runtime.state()),
+        Action::SelectUp => {
+            // v1.3.2 / CAR-D75 / DISPATCH 76 — modal capture.
+            // While the activity panel is in browse mode, j/k
+            // belong to the activity cursor; the workloads-panel
+            // selection is suppressed. Same shape kill_confirm
+            // captures Enter/Esc — the active modal owns the keys
+            // it cares about. The renderer's event-key list is
+            // recomputed against the live state so a refresh that
+            // arrived between the dispatcher's read and the
+            // cursor's move sees consistent indices.
+            if app.is_activity_browsing() {
+                let keys: Vec<String> =
+                    crate::ui::panels::activity::build_events(runtime.state())
+                        .iter()
+                        .map(|e| e.key())
+                        .collect();
+                app.activity_browse_prev(&keys);
+            } else {
+                app.select_prev(runtime.state());
+            }
+        }
+        Action::SelectDown => {
+            if app.is_activity_browsing() {
+                let keys: Vec<String> =
+                    crate::ui::panels::activity::build_events(runtime.state())
+                        .iter()
+                        .map(|e| e.key())
+                        .collect();
+                app.activity_browse_next(&keys);
+            } else {
+                app.select_next(runtime.state());
+            }
+        }
         Action::KillOrConfirm => {
             // CAR-17 — `k` opens the kill_confirm card on the focused
             // workload. Confirm fires on Enter (Action::OpenDetail
@@ -310,6 +341,35 @@ fn apply_action(
             // Steps 4/5 also land in the same handler.
             if let Some(card) = app.take_kill_confirm() {
                 confirm_kill_from_card(runtime, app, card);
+            } else if app.is_activity_browsing() {
+                // v1.3.2 / CAR-D75 / DISPATCH 76 — Enter in browse
+                // mode toggles expand on the selected entry, but
+                // ONLY when the entry has detail. Regression rows
+                // are a deliberate no-op (mirrors the web's
+                // disabled-button behavior from D74). The
+                // selected entry is resolved via the same
+                // composite-key lookup the cursor uses, so a
+                // refresh between Enter dispatch and the toggle
+                // doesn't lose the operator's intent.
+                let events =
+                    crate::ui::panels::activity::build_events(runtime.state());
+                let keys: Vec<String> = events.iter().map(|e| e.key()).collect();
+                if let Some(b) = app.activity_browse() {
+                    let i = b
+                        .selected_key
+                        .as_ref()
+                        .and_then(|k| keys.iter().position(|x| x == k))
+                        .unwrap_or(0);
+                    if let Some(ev) = events.get(i)
+                        && ev.detail.is_some()
+                    {
+                        app.activity_browse_toggle_expand();
+                    }
+                    // Else: regression row OR empty feed → Enter
+                    // is a no-op. No status footer noise; the lack
+                    // of an expansion chevron in the render path
+                    // makes it visually clear nothing happened.
+                }
             } else {
                 handle_open_detail(runtime, app, live_detail, live_buffers);
             }
@@ -349,6 +409,13 @@ fn apply_action(
         // contract-templated status footer live on the App
         // method; this dispatch site is just the routing.
         Action::CycleTopSort => app.cycle_top_sort(),
+        // v1.3.2 / CAR-D75 / DISPATCH 76 — `A` toggles the activity
+        // browse mode. Lowercase `a` stays AcknowledgeAlerts; the
+        // capital is the modal capture trigger. Default render is
+        // unchanged — browse mode is OPT-IN.
+        Action::ToggleActivityBrowse => {
+            app.toggle_activity_browse(runtime.state());
+        }
     }
 }
 

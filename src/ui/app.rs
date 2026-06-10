@@ -105,6 +105,46 @@ pub struct App {
     /// `handle_escape -> bool` contract (consumed-or-quit) stays
     /// stable for the L24 cascade tests.
     dismissed_pid: Option<u32>,
+    /// v1.3.2 / CAR-D75 / DISPATCH 76 — opt-in activity browse mode.
+    /// `Some(_)` while the operator is browsing the activity panel
+    /// (toggled via `A` → `Action::ToggleActivityBrowse`). Default
+    /// `None` keeps the activity panel rendering as a passive log
+    /// (the contract-locked §1 region 6 default — at-a-glance scan
+    /// property preserved).
+    ///
+    /// When browse mode is active:
+    ///   * j/k move the cursor within the visible activity rows
+    ///     (modal capture — workloads panel j/k is suppressed,
+    ///     mirroring how `kill_confirm` captures Enter/Esc).
+    ///   * Enter toggles in-place expand on the selected entry.
+    ///   * Esc collapses the expanded entry first; the next Esc
+    ///     exits browse mode; then the existing Esc cascade
+    ///     proceeds.
+    activity_browse: Option<ActivityBrowse>,
+}
+
+/// v1.3.2 / CAR-D75 / DISPATCH 76 — activity-panel browse state.
+///
+/// Selection identity is the entry's composite key
+/// (`${kind}-${pid}-${timestamp.rfc3339()}`), NOT a positional
+/// index. This is the dispatch's STOP #4 fix for selection
+/// stability under refresh: when a new event arrives at the top of
+/// the time-descending feed mid-browse, the cursor follows the
+/// logical row rather than sliding to whatever happens to be at
+/// the same slot.
+///
+/// `selected_key = None` is the "just entered, default to top
+/// entry" state — the renderer resolves it to the first event at
+/// render time so the lookup can survive a tick where the event
+/// list was momentarily empty.
+#[derive(Debug, Clone, Default)]
+pub struct ActivityBrowse {
+    /// Composite key of the cursor row, or `None` to fall back to
+    /// the top entry at render time.
+    pub selected_key: Option<String>,
+    /// Whether the cursor row is currently expanded (showing the
+    /// detail block below the row).
+    pub expanded: bool,
 }
 
 impl Default for App {
@@ -131,6 +171,7 @@ impl App {
             history: None,
             status: None,
             symbol_set,
+            activity_browse: None,
             top_processes_sort: TopProcessesSort::default(),
             dismissed_pid: None,
         }
@@ -167,6 +208,111 @@ impl App {
             self.set_status(msg);
         }
         count
+    }
+
+    // ── v1.3.2 / CAR-D75 / DISPATCH 76 — activity browse mode ──
+
+    /// Toggle the activity-panel browse mode on or off. When
+    /// activated, the renderer paints a cursor on the selected
+    /// activity row and j/k get modally captured by the activity
+    /// panel (the workloads-panel j/k handling is suppressed for
+    /// the duration). When deactivated, the panel reverts to its
+    /// passive read-only render.
+    ///
+    /// On enter: default-select the topmost (newest) activity
+    /// entry; on exit: clear selection + collapse expansion. The
+    /// `state` argument is `_state` today — we don't need to look
+    /// up the event list at toggle time because the renderer
+    /// resolves the `None` selection key to "first event" lazily
+    /// (so an empty activity feed at toggle time doesn't trap the
+    /// operator in browse mode with nothing selected).
+    pub fn toggle_activity_browse(&mut self, _state: &RuntimeState) {
+        if self.activity_browse.is_some() {
+            self.activity_browse = None;
+        } else {
+            self.activity_browse = Some(ActivityBrowse::default());
+        }
+    }
+
+    /// Read-only access to the browse state. `None` when not
+    /// browsing — the activity panel renders passively in that
+    /// case.
+    pub fn activity_browse(&self) -> Option<&ActivityBrowse> {
+        self.activity_browse.as_ref()
+    }
+
+    /// True iff the activity panel is in browse mode. Routed
+    /// against by the j/k modal-capture handler in
+    /// `ui::apply_action` so the workloads-panel `select_next` /
+    /// `select_prev` are bypassed while browsing.
+    pub fn is_activity_browsing(&self) -> bool {
+        self.activity_browse.is_some()
+    }
+
+    /// Move the activity-panel cursor to the next (older) entry.
+    /// `event_keys` is the time-descending list of composite keys
+    /// (`${kind}-${pid}-${timestamp}`) the renderer just produced;
+    /// the caller hands them in so we don't re-derive them.
+    ///
+    /// Collapses any current expansion (operator changed
+    /// selection, so the previous expansion no longer applies).
+    pub fn activity_browse_next(&mut self, event_keys: &[String]) {
+        let Some(b) = self.activity_browse.as_mut() else {
+            return;
+        };
+        if event_keys.is_empty() {
+            b.selected_key = None;
+            b.expanded = false;
+            return;
+        }
+        let i = current_browse_index(b, event_keys);
+        let next = (i + 1).min(event_keys.len() - 1);
+        b.selected_key = Some(event_keys[next].clone());
+        b.expanded = false;
+    }
+
+    /// Move the activity-panel cursor to the previous (newer)
+    /// entry. Same shape as [`Self::activity_browse_next`].
+    pub fn activity_browse_prev(&mut self, event_keys: &[String]) {
+        let Some(b) = self.activity_browse.as_mut() else {
+            return;
+        };
+        if event_keys.is_empty() {
+            b.selected_key = None;
+            b.expanded = false;
+            return;
+        }
+        let i = current_browse_index(b, event_keys);
+        let prev = i.saturating_sub(1);
+        b.selected_key = Some(event_keys[prev].clone());
+        b.expanded = false;
+    }
+
+    /// Enter on the selected activity entry — toggles expand/
+    /// collapse. The dispatcher's Enter cascade routes here when
+    /// browse mode is active AND the selected entry has detail
+    /// (Exit / Kill); a Regression-row Enter is a no-op (mirrors
+    /// the web's button-disabled regression case from D74).
+    pub fn activity_browse_toggle_expand(&mut self) {
+        if let Some(b) = self.activity_browse.as_mut() {
+            b.expanded = !b.expanded;
+        }
+    }
+
+    /// Esc while browsing: collapse first, then exit browse mode
+    /// on next Esc, then fall through to the rest of the cascade.
+    /// Returns `true` when this method consumed the Esc.
+    pub fn handle_activity_browse_escape(&mut self) -> bool {
+        if let Some(b) = self.activity_browse.as_mut() {
+            if b.expanded {
+                b.expanded = false;
+                return true;
+            }
+            // Collapsed — second Esc exits browse mode.
+            self.activity_browse = None;
+            return true;
+        }
+        false
     }
 
     /// Current Top processes panel sort. Read by `panels::render`
@@ -376,6 +522,16 @@ impl App {
     /// cascade semantics are unchanged: Esc still ack's alerts
     /// immediately, no one-tick delay.
     pub fn handle_escape(&mut self, runtime: &mut crate::runtime::Runtime) -> bool {
+        // v1.3.2 / CAR-D75 / DISPATCH 76 — activity-browse Esc lives
+        // ABOVE kill_confirm in the cascade so the operator's
+        // "back out of browse" intent isn't shadowed by a card
+        // they didn't open. Each Esc in browse mode shaves one
+        // layer: expanded → collapsed; collapsed → exit browse;
+        // anything else → fall through to the existing cascade
+        // below.
+        if self.handle_activity_browse_escape() {
+            return true;
+        }
         if self.kill_confirm.is_some() {
             self.dismiss_kill_confirm();
             return true;
@@ -461,6 +617,21 @@ impl App {
     pub fn visible(&self, state: &RuntimeState) -> Vec<u32> {
         crate::ui::panels::workloads::ordered_pids(state, self)
     }
+}
+
+/// v1.3.2 / CAR-D75 / DISPATCH 76 — resolve a browse cursor's
+/// composite key to its index in the current event-key list. Falls
+/// back to `0` when:
+///   * the cursor has no selected key (just-entered browse mode)
+///   * the previously selected key is no longer in the list (the
+///     entry aged out of the time-descending window between
+///     browse-mode toggles, or the operator was reading an entry
+///     that just rolled off)
+fn current_browse_index(b: &ActivityBrowse, event_keys: &[String]) -> usize {
+    b.selected_key
+        .as_ref()
+        .and_then(|k| event_keys.iter().position(|x| x == k))
+        .unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -914,5 +1085,213 @@ mod tests {
         let expected = ux_contract::status::TOP_SORT_CHANGED
             .replace("{dimension}", "CPU");
         assert_eq!(status, expected);
+    }
+
+    // ── v1.3.2 / CAR-D75 / DISPATCH 76 — browse-mode App tests ────
+
+    /// Default state: NOT browsing. The contract-locked passive
+    /// log behavior depends on this invariant — every render path
+    /// that branches on `app.is_activity_browsing()` must see
+    /// `false` until the operator presses `A`.
+    #[test]
+    fn default_app_is_not_activity_browsing() {
+        let app = App::new();
+        assert!(
+            !app.is_activity_browsing(),
+            "default render MUST be passive — `is_activity_browsing` \
+             returns false until `A` is pressed",
+        );
+        assert!(app.activity_browse().is_none());
+    }
+
+    /// `A` toggles browse mode on; pressing again toggles it off.
+    /// The dispatcher hands `runtime.state()` in; with no events
+    /// in the empty default state, the cursor stays at None (the
+    /// renderer falls back to index 0 when present, gracefully
+    /// no-ops when absent).
+    #[test]
+    fn toggle_activity_browse_round_trip() {
+        let mut app = App::new();
+        let state = RuntimeState::default();
+        app.toggle_activity_browse(&state);
+        assert!(app.is_activity_browsing());
+        assert!(
+            app.activity_browse().expect("just toggled on")
+                .selected_key
+                .is_none(),
+            "fresh browse mode defaults selected_key to None — renderer \
+             resolves it to the first event lazily",
+        );
+        app.toggle_activity_browse(&state);
+        assert!(
+            !app.is_activity_browsing(),
+            "second toggle MUST exit browse mode",
+        );
+    }
+
+    /// j/k modal capture: while browsing, the cursor moves
+    /// through the event key list — workloads-panel `select_next`
+    /// / `select_prev` (still on `app.selected`) is NOT touched
+    /// by these methods. The dispatcher's routing is what
+    /// suppresses the workloads call; this test pins the App-side
+    /// behavior so a future refactor that accidentally bleeds the
+    /// workloads selection into browse_next can't sneak through.
+    #[test]
+    fn activity_browse_next_prev_navigate_key_list() {
+        let mut app = App::new();
+        app.toggle_activity_browse(&RuntimeState::default());
+        let keys: Vec<String> = vec!["e1".into(), "e2".into(), "e3".into()];
+
+        // Initial Next: from None (resolves to idx 0) → next is idx 1.
+        app.activity_browse_next(&keys);
+        assert_eq!(
+            app.activity_browse().unwrap().selected_key.as_deref(),
+            Some("e2"),
+        );
+
+        // Next again → idx 2.
+        app.activity_browse_next(&keys);
+        assert_eq!(
+            app.activity_browse().unwrap().selected_key.as_deref(),
+            Some("e3"),
+        );
+
+        // Next at the bottom clamps (doesn't wrap).
+        app.activity_browse_next(&keys);
+        assert_eq!(
+            app.activity_browse().unwrap().selected_key.as_deref(),
+            Some("e3"),
+            "Next must clamp at the bottom, not wrap",
+        );
+
+        // Prev: e3 → e2 → e1 → e1 (clamp at top, no underflow).
+        app.activity_browse_prev(&keys);
+        assert_eq!(
+            app.activity_browse().unwrap().selected_key.as_deref(),
+            Some("e2"),
+        );
+        app.activity_browse_prev(&keys);
+        assert_eq!(
+            app.activity_browse().unwrap().selected_key.as_deref(),
+            Some("e1"),
+        );
+        app.activity_browse_prev(&keys);
+        assert_eq!(
+            app.activity_browse().unwrap().selected_key.as_deref(),
+            Some("e1"),
+            "Prev must clamp at the top, not underflow",
+        );
+    }
+
+    /// Composite-key stability under refresh (STOP #4): when a new
+    /// event arrives at the top of the time-descending feed mid-
+    /// browse, the cursor follows the LOGICAL row (composite key),
+    /// not the positional slot. This pins the dispatch's choice to
+    /// key by `${kind}-${pid}-${timestamp}`.
+    #[test]
+    fn selection_follows_key_not_index_across_refresh() {
+        let mut app = App::new();
+        app.toggle_activity_browse(&RuntimeState::default());
+        // Tick T0: 3 events.
+        let keys_t0: Vec<String> =
+            vec!["e1".into(), "e2".into(), "e3".into()];
+        // Operator moves cursor to e2.
+        app.activity_browse_next(&keys_t0);
+        assert_eq!(
+            app.activity_browse().unwrap().selected_key.as_deref(),
+            Some("e2"),
+        );
+
+        // Tick T1: a new event (e0) arrives at the top of the
+        // time-descending feed. Same logical e2 is now at index 2,
+        // not 1.
+        let keys_t1: Vec<String> =
+            vec!["e0".into(), "e1".into(), "e2".into(), "e3".into()];
+
+        // Without Next/Prev being called, the cursor still points
+        // at "e2" — the renderer resolves the composite key, NOT
+        // an index. Pressing Next from e2 lands on e3, not on e2's
+        // post-refresh neighbor.
+        assert_eq!(
+            app.activity_browse().unwrap().selected_key.as_deref(),
+            Some("e2"),
+            "cursor identity must survive the refresh",
+        );
+        app.activity_browse_next(&keys_t1);
+        assert_eq!(
+            app.activity_browse().unwrap().selected_key.as_deref(),
+            Some("e3"),
+            "Next from e2 lands on e3 even after a refresh shifted indices",
+        );
+    }
+
+    /// Esc cascade: while browsing AND expanded, first Esc
+    /// collapses. Second Esc exits browse mode. Subsequent Esc
+    /// falls through to the existing cascade
+    /// (kill_confirm/postmortem/history/help/ack/quit).
+    #[test]
+    fn esc_cascade_collapses_then_exits_browse_then_falls_through() {
+        let mut app = App::new();
+        app.toggle_activity_browse(&RuntimeState::default());
+        app.activity_browse_toggle_expand();
+        assert!(app.activity_browse().unwrap().expanded);
+
+        // 1st Esc: collapse the expansion. Browse mode stays on.
+        assert!(app.handle_activity_browse_escape());
+        assert!(!app.activity_browse().unwrap().expanded);
+        assert!(app.is_activity_browsing());
+
+        // 2nd Esc: exit browse mode.
+        assert!(app.handle_activity_browse_escape());
+        assert!(!app.is_activity_browsing());
+
+        // 3rd Esc: out of browse, helper returns false so the
+        // dispatcher's cascade continues to kill_confirm/etc.
+        assert!(!app.handle_activity_browse_escape());
+    }
+
+    /// `toggle_expand` on a cursor with no event resolved to
+    /// (browse mode just entered, no events) is a no-op — the
+    /// renderer's expand block branch requires `events.get(i)`
+    /// to succeed AND the row's `detail.is_some()` (regression
+    /// rows are filtered there). The App-side method itself just
+    /// toggles the flag; the gating is the dispatcher's job.
+    /// This test pins the App-side simplicity so the dispatcher
+    /// stays the single decision-point.
+    #[test]
+    fn toggle_expand_is_unconditional_at_app_level() {
+        let mut app = App::new();
+        app.toggle_activity_browse(&RuntimeState::default());
+        // App.toggle_expand doesn't know about events; it just
+        // flips the flag. The dispatcher is responsible for not
+        // calling it on a regression row.
+        assert!(!app.activity_browse().unwrap().expanded);
+        app.activity_browse_toggle_expand();
+        assert!(app.activity_browse().unwrap().expanded);
+        app.activity_browse_toggle_expand();
+        assert!(!app.activity_browse().unwrap().expanded);
+    }
+
+    /// Exiting browse mode (Esc, Esc) resets selection so a
+    /// subsequent re-entry doesn't surprise the operator with a
+    /// stale cursor on an entry that may have aged out.
+    #[test]
+    fn exiting_browse_clears_selection_and_expansion() {
+        let mut app = App::new();
+        app.toggle_activity_browse(&RuntimeState::default());
+        let keys: Vec<String> = vec!["x".into(), "y".into()];
+        app.activity_browse_next(&keys);
+        app.activity_browse_toggle_expand();
+
+        // Exit via Esc cascade (collapse → exit-browse).
+        app.handle_activity_browse_escape();
+        app.handle_activity_browse_escape();
+        assert!(!app.is_activity_browsing());
+
+        // Re-enter: fresh selected_key (None) and not expanded.
+        app.toggle_activity_browse(&RuntimeState::default());
+        let b = app.activity_browse().expect("re-entered");
+        assert!(b.selected_key.is_none());
+        assert!(!b.expanded);
     }
 }

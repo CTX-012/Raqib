@@ -22,7 +22,7 @@
 //! card z-slot so a single Enter on the focused workload routes to
 //! confirm, not to live_detail.
 
-mod activity;
+pub(crate) mod activity;
 pub mod alerts;
 pub mod header;
 mod help;
@@ -241,12 +241,12 @@ fn render_default(
 
     if tier == SizeTier::Narrow {
         // §12: Top processes is "first to drop on narrow screens".
-        activity::render(f, layout[5], state, theme);
+        activity::render(f, layout[5], state, app, theme);
         render_footer(f, layout[6], app, theme);
     } else {
         top_processes::render(f, layout[5], state, app.top_processes_sort(), theme);
         // layout[6] is the FIX-1 spacer (top → activity) — unrendered.
-        activity::render(f, layout[7], state, theme);
+        activity::render(f, layout[7], state, app, theme);
         render_footer(f, layout[8], app, theme);
     }
 }

@@ -29,7 +29,7 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{List, ListItem, Paragraph, Wrap};
+use ratatui::widgets::{Paragraph, Wrap};
 
 use crate::analysis::Severity;
 use crate::governor::manual::{KillSource, ManualKillAction};
@@ -77,11 +77,93 @@ impl EventTone {
     }
 }
 
+/// v1.3.2 / CAR-D75 / DISPATCH 76 — discriminator for the three
+/// activity sources. Used by the browse-mode renderer to decide
+/// whether a row is Enter-expandable (Exit / Kill) or not
+/// (Regression — no RunRecord, no detail). Mirrors
+/// `ux_contract::activity::ActivityKind` v0.3.17 + the web's
+/// `WireActivityEntry::kind` so the TUI's expand surface stays in
+/// lock-step with the web's click-to-expand (D74).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ActivityKind {
+    Exit,
+    Kill,
+    Regression,
+}
+
+/// v1.3.2 / CAR-D75 / DISPATCH 76 — per-entry detail for the
+/// browse-mode expand surface. Carries the same fields the web's
+/// `WireActivityDetail` (D74) carries; TUI ↔ web parity by
+/// construction (same source data, same field set).
+///
+/// Regression rows carry no detail (hard rule #4 — "no fabricated
+/// exit fields"). The `Option<ActivityEventDetail>` on
+/// `ActivityEvent` is `None` for them.
+#[derive(Debug, Clone)]
+pub(crate) enum ActivityEventDetail {
+    Exit {
+        uptime_secs: i64,
+        avg_cpu_pct: f32,
+        peak_cpu_pct: f32,
+        peak_rss_mb: u64,
+        peak_vram_mb: u64,
+        /// STOP #3 honesty — mirrors the web's `vram_unmeasured`
+        /// flag. `true` when the lifecycle summary's `samples`
+        /// count is 0 (no resource sample ever fired for this PID,
+        /// so the 0 in `peak_vram_mb` is "no measurement," not
+        /// "real zero"). The renderer prints
+        /// `status::VRAM_UNMEASURED` in that case rather than
+        /// "0 MB."
+        vram_unmeasured: bool,
+        /// Sourced from `RuntimeState::recent_exit_attribution`
+        /// (D74 lock-step buffer). `None` when no classification
+        /// ran for this exit (non-AI exit, or attribution slot
+        /// was never patched).
+        exit_kind: Option<String>,
+        exit_detail: Option<String>,
+    },
+    Kill {
+        action: String,
+        success: bool,
+        error_msg: Option<String>,
+    },
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct ActivityEvent {
     pub timestamp: DateTime<Utc>,
     pub text: String,
     pub tone: EventTone,
+    /// v1.3.2 / CAR-D75 / DISPATCH 76 — kind discriminator for the
+    /// browse-mode expand surface. Drives the per-kind detail
+    /// renderer + the Enter-is-no-op rule for Regression rows
+    /// (mirrors the web's button-disabled regression case from
+    /// D74).
+    pub kind: ActivityKind,
+    /// Per-kind detail. `None` for Regression entries.
+    pub detail: Option<ActivityEventDetail>,
+    /// Identity for the entry. PID for Exit / Kill rows;
+    /// regression rows wire `0` as the sentinel (same as the
+    /// web's wire shape per D71).
+    pub pid: u32,
+}
+
+impl ActivityEvent {
+    /// Composite key matching the web's `{#each}` key
+    /// `${kind}-${pid}-${timestamp}` (D71 + D74). Used by the
+    /// browse-mode cursor so selection survives live 1 Hz
+    /// refreshes — the cursor pins by IDENTITY, not by index. If a
+    /// new event arrives at the top of the feed mid-browse, the
+    /// cursor stays on the same logical row, not on whatever
+    /// happens to be at the same index.
+    pub fn key(&self) -> String {
+        let kind = match self.kind {
+            ActivityKind::Exit => "exit",
+            ActivityKind::Kill => "kill",
+            ActivityKind::Regression => "regression",
+        };
+        format!("{kind}-{}-{}", self.pid, self.timestamp.to_rfc3339())
+    }
 }
 
 /// Build the time-descending event list from RuntimeState. Pure;
@@ -91,7 +173,24 @@ pub(crate) fn build_events(state: &RuntimeState) -> Vec<ActivityEvent> {
 
     // Run summaries (AI-only — matches the pre-L15 `completed.rs`
     // filter; non-AI exits still hit the persistent JSONL log).
-    for s in &state.completed {
+    //
+    // v1.3.2 / CAR-D75 / DISPATCH 76 — also zip the lock-step
+    // `state.recent_exit_attribution` buffer (D74) so the per-row
+    // detail carries the classified exit_kind/exit_detail. The
+    // attribution VecDeque length matches `state.completed` length
+    // by construction (push/pop in lock-step at the runtime
+    // exit-drain site); a debug_assert here pins the invariant for
+    // the browse-mode renderer.
+    debug_assert_eq!(
+        state.completed.len(),
+        state.recent_exit_attribution.len(),
+        "state.recent_exit_attribution must stay lock-step with state.completed",
+    );
+    for (s, attr) in state
+        .completed
+        .iter()
+        .zip(state.recent_exit_attribution.iter())
+    {
         if s.category.is_none() {
             continue;
         }
@@ -102,10 +201,27 @@ pub(crate) fn build_events(state: &RuntimeState) -> Vec<ActivityEvent> {
             EventTone::Healthy
         };
         let text = format_run_summary(s);
+        let detail = ActivityEventDetail::Exit {
+            uptime_secs: s.uptime_secs,
+            avg_cpu_pct: s.avg_cpu_pct,
+            peak_cpu_pct: s.peak_cpu_pct,
+            peak_rss_mb: s.peak_rss_mb,
+            peak_vram_mb: s.peak_vram_mb,
+            // STOP #3 honesty — `samples=0` ⇒ no resource sample
+            // ever fired ⇒ `peak_vram_mb=0` is "no measurement,"
+            // not real zero. The renderer prints
+            // `status::VRAM_UNMEASURED` in that case.
+            vram_unmeasured: s.samples == 0,
+            exit_kind: attr.as_ref().map(|a| a.exit_kind.clone()),
+            exit_detail: attr.as_ref().and_then(|a| a.exit_detail.clone()),
+        };
         events.push(ActivityEvent {
             timestamp: s.exit_time,
             text,
             tone,
+            kind: ActivityKind::Exit,
+            detail: Some(detail),
+            pid: s.pid,
         });
     }
 
@@ -137,6 +253,13 @@ pub(crate) fn build_events(state: &RuntimeState) -> Vec<ActivityEvent> {
             timestamp: e.timestamp,
             text,
             tone,
+            kind: ActivityKind::Kill,
+            detail: Some(ActivityEventDetail::Kill {
+                action: action.to_string(),
+                success: e.success,
+                error_msg: e.error_msg.clone(),
+            }),
+            pid: e.pid,
         });
     }
 
@@ -159,6 +282,14 @@ pub(crate) fn build_events(state: &RuntimeState) -> Vec<ActivityEvent> {
             timestamp: r.timestamp,
             text,
             tone,
+            kind: ActivityKind::Regression,
+            // CAR-D75 hard rule #4 / dispatch hard rule #6 —
+            // regression entries have no detail. Enter on a
+            // selected regression row is a no-op (the renderer
+            // doesn't paint an expand chevron); same shape the
+            // web's regression rendering takes per D74.
+            detail: None,
+            pid: 0,
         });
     }
 
@@ -188,7 +319,13 @@ fn format_run_summary(s: &crate::lifecycle::LifecycleSummary) -> String {
     row
 }
 
-pub fn render(f: &mut Frame, area: Rect, state: &RuntimeState, theme: &UiTheme) {
+pub fn render(
+    f: &mut Frame,
+    area: Rect,
+    state: &RuntimeState,
+    app: &crate::ui::app::App,
+    theme: &UiTheme,
+) {
     let block = panel_block("Activity", false, theme);
     let events = build_events(state);
 
@@ -210,20 +347,169 @@ pub fn render(f: &mut Frame, area: Rect, state: &RuntimeState, theme: &UiTheme) 
         return;
     }
 
-    let items: Vec<ListItem<'_>> = events
-        .iter()
-        .map(|ev| {
-            ListItem::new(format!(
-                "{}  {}",
-                ev.timestamp.format("%H:%M:%S"),
-                ev.text
-            ))
-            .style(Style::default().fg(ev.tone.color(theme)))
-        })
-        .collect();
+    // v1.3.2 / CAR-D75 / DISPATCH 76 — when browse mode is active,
+    // render a cursor + (when expanded) a detail block below the
+    // selected row. Default render (browse mode off) stays exactly
+    // as before — passive log, severity-colored, no cursor — so
+    // the §1 region 6 at-a-glance scan property is preserved
+    // byte-for-byte for operators who never press `A`.
+    let browse = app.activity_browse();
+    let selected_idx: Option<usize> = browse.and_then(|b| {
+        // Resolve the composite key to an index in the current
+        // event list. `None` selected_key (just-entered browse
+        // mode) falls back to index 0 so the cursor always paints
+        // somewhere visible.
+        match b.selected_key.as_ref() {
+            Some(k) => events.iter().position(|e| &e.key() == k),
+            None => Some(0),
+        }
+    });
+    let expanded = browse.is_some_and(|b| b.expanded);
 
-    let list = List::new(items).block(block);
-    f.render_widget(list, area);
+    // Build the rendered lines. Pre-bump this was a `List` of
+    // single-line ListItems; we switch to a `Paragraph` of
+    // multi-line content so the expand block can live underneath
+    // the selected row without a separate widget. The visual
+    // result for the passive (no-browse) path is byte-identical
+    // to the pre-bump `List` render — same row format, same
+    // severity tone, no cursor.
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    for (i, ev) in events.iter().enumerate() {
+        let is_selected = selected_idx == Some(i);
+        let cursor_prefix = if browse.is_some() {
+            if is_selected { "▸ " } else { "  " }
+        } else {
+            ""
+        };
+        let text = format!(
+            "{}{}  {}",
+            cursor_prefix,
+            ev.timestamp.format("%H:%M:%S"),
+            ev.text
+        );
+        let mut style = Style::default().fg(ev.tone.color(theme));
+        if is_selected {
+            // Bold the selected row so the cursor + bold combo
+            // are unambiguous regardless of terminal mono-color
+            // limitations.
+            style = style.add_modifier(Modifier::BOLD);
+        }
+        lines.push(Line::from(Span::styled(text, style)));
+
+        // Expanded detail block — only for the selected row,
+        // only while browse mode is active and `expanded == true`,
+        // and only when the row carries a detail (Exit / Kill).
+        // Regression rows (`detail = None`) silently skip — the
+        // operator's Enter was a no-op per the contract.
+        if is_selected
+            && expanded
+            && let Some(detail) = ev.detail.as_ref()
+        {
+            for detail_line in detail_lines(detail, theme) {
+                lines.push(detail_line);
+            }
+        }
+    }
+
+    let paragraph = Paragraph::new(lines).block(block).wrap(Wrap { trim: false });
+    f.render_widget(paragraph, area);
+}
+
+/// Format the per-kind detail block for a selected, expanded entry.
+/// Field labels source from `ux_contract::postmortem_labels::*` and
+/// `ux_contract::status::VRAM_UNMEASURED` (v0.3.18 lift) so the TUI
+/// shares its label vocabulary with the web (D74) and the post-mortem
+/// card.
+fn detail_lines(
+    detail: &ActivityEventDetail,
+    theme: &UiTheme,
+) -> Vec<Line<'static>> {
+    let muted = Style::default().fg(theme.muted);
+    let fg = Style::default().fg(theme.foreground);
+    let mut out: Vec<Line<'static>> = Vec::new();
+    match detail {
+        ActivityEventDetail::Exit {
+            uptime_secs,
+            avg_cpu_pct,
+            peak_cpu_pct,
+            peak_rss_mb,
+            peak_vram_mb,
+            vram_unmeasured,
+            exit_kind,
+            exit_detail,
+        } => {
+            if let Some(kind) = exit_kind.as_deref() {
+                let mut spans = vec![
+                    Span::styled("    cause: ", muted),
+                    Span::styled(kind.to_string(), fg),
+                ];
+                if let Some(d) = exit_detail.as_deref() {
+                    spans.push(Span::styled(format!(" — {d}"), muted));
+                }
+                out.push(Line::from(spans));
+            }
+            out.push(Line::from(vec![
+                Span::styled("    uptime: ", muted),
+                Span::styled(format!("{uptime_secs}s"), fg),
+            ]));
+            out.push(Line::from(vec![
+                Span::styled("    peak RSS: ", muted),
+                Span::styled(format!("{peak_rss_mb} MB"), fg),
+            ]));
+            // STOP #3 honesty — never render "0 MB" when the
+            // value was never sampled. The contract-locked
+            // `status::VRAM_UNMEASURED` string ("no measurements")
+            // is the single source of truth shared with the web
+            // (D74's `vramLabel()`).
+            let vram_text = if *vram_unmeasured {
+                ux_contract::status::VRAM_UNMEASURED.to_string()
+            } else {
+                format!("{peak_vram_mb} MB")
+            };
+            out.push(Line::from(vec![
+                Span::styled("    peak GPU memory: ", muted),
+                Span::styled(vram_text, fg),
+            ]));
+            out.push(Line::from(vec![
+                Span::styled("    CPU: ", muted),
+                Span::styled(
+                    format!("avg {avg_cpu_pct:.0}% / peak {peak_cpu_pct:.0}%"),
+                    fg,
+                ),
+            ]));
+        }
+        ActivityEventDetail::Kill {
+            action,
+            success,
+            error_msg,
+        } => {
+            // v0.3.18 contract labels — KILL_ACTION / KILL_RESULT.
+            out.push(Line::from(vec![
+                Span::styled(
+                    format!("    {} ", ux_contract::postmortem_labels::KILL_ACTION),
+                    muted,
+                ),
+                Span::styled(action.clone(), fg),
+            ]));
+            out.push(Line::from(vec![
+                Span::styled(
+                    format!("    {} ", ux_contract::postmortem_labels::KILL_RESULT),
+                    muted,
+                ),
+                Span::styled(
+                    if *success { "delivered" } else { "failed" }.to_string(),
+                    fg,
+                ),
+            ]));
+            if let Some(err) = error_msg.as_deref() {
+                out.push(Line::from(vec![
+                    Span::styled("    error: ", muted),
+                    Span::styled(err.to_string(), Style::default().fg(theme.critical)),
+                ]));
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -300,9 +586,7 @@ mod tests {
     #[test]
     fn activity_renders_run_summary_event() {
         let mut state = empty_state();
-        state
-            .completed
-            .push_back(run_summary(206, "phi3", ts(1_000)));
+        state.push_completed_exit(run_summary(206, "phi3", ts(1_000)), None);
         let events = build_events(&state);
         assert_eq!(events.len(), 1);
         assert!(
@@ -320,7 +604,7 @@ mod tests {
         let mut state = empty_state();
         let mut non_ai = run_summary(99, "bash", ts(1_000));
         non_ai.category = None;
-        state.completed.push_back(non_ai);
+        state.push_completed_exit(non_ai, None);
         assert!(build_events(&state).is_empty());
     }
 
@@ -357,9 +641,7 @@ mod tests {
         // sources. `build_events` interleaves them and emits
         // newest-first regardless of source.
         let mut state = empty_state();
-        state
-            .completed
-            .push_back(run_summary(1, "early", ts(1_000)));
+        state.push_completed_exit(run_summary(1, "early", ts(1_000)), None);
         state.audit.push_back(audit_entry(2, "middle", ts(2_000)));
         state.regressions.push_back(regression_event(ts(3_000)));
 
@@ -376,9 +658,10 @@ mod tests {
         // to five with the oldest dropped.
         let mut state = empty_state();
         for i in 0..6 {
-            state
-                .completed
-                .push_back(run_summary(i + 1, "x", ts((i + 1) as i64 * 100)));
+            state.push_completed_exit(
+                run_summary(i + 1, "x", ts((i + 1) as i64 * 100)),
+                None,
+            );
         }
         let events = build_events(&state);
         assert_eq!(events.len(), MAX_VISIBLE_EVENTS);
@@ -395,7 +678,7 @@ mod tests {
         let mut killed = run_summary(206, "phi3", ts(1_000));
         killed.signal = Some(15);
         killed.exit_code = None;
-        state.completed.push_back(killed);
+        state.push_completed_exit(killed, None);
         let events = build_events(&state);
         assert_eq!(events[0].tone, EventTone::Critical);
     }
@@ -465,7 +748,7 @@ mod tests {
         // Defensive against a refactor that re-clones the entire
         // state per render — `build_events` borrows immutably.
         let mut state = empty_state();
-        state.completed.push_back(run_summary(1, "x", ts(1_000)));
+        state.push_completed_exit(run_summary(1, "x", ts(1_000)), None);
         // Take immutable references and call repeatedly.
         let _ = build_events(&state);
         let _ = build_events(&state);
@@ -500,5 +783,108 @@ mod tests {
         // the field is renamed, this test breaks at compile time
         // with a clear signal pointing at `build_events`.
         &state.completed
+    }
+
+    // ── v1.3.2 / CAR-D75 / DISPATCH 76 — browse-mode tests ────────
+
+    /// Build_events now stamps `kind` + `detail` + composite
+    /// `key()` on every event. Pins the projection so a future
+    /// refactor that drops a field surfaces here.
+    #[test]
+    fn build_events_populates_kind_pid_and_composite_key() {
+        let mut state = empty_state();
+        state.push_completed_exit(run_summary(206, "phi3", ts(1_000)), None);
+        state.audit.push_back(audit_entry(207, "ollama", ts(2_000)));
+        state.regressions.push_back(regression_event(ts(3_000)));
+
+        let events = build_events(&state);
+        // Time-descending: regression (3000) → kill (2000) → exit (1000).
+        assert_eq!(events.len(), 3);
+        assert!(matches!(events[0].kind, ActivityKind::Regression));
+        assert_eq!(events[0].pid, 0); // regression sentinel
+        assert!(events[0].detail.is_none());
+        assert!(matches!(events[1].kind, ActivityKind::Kill));
+        assert_eq!(events[1].pid, 207);
+        assert!(matches!(events[1].detail, Some(ActivityEventDetail::Kill { .. })));
+        assert!(matches!(events[2].kind, ActivityKind::Exit));
+        assert_eq!(events[2].pid, 206);
+        assert!(matches!(events[2].detail, Some(ActivityEventDetail::Exit { .. })));
+
+        // Composite keys are pid+kind+timestamp; unique across the
+        // three sources even if a same-PID exit+kill collide later.
+        let keys: std::collections::HashSet<String> = events.iter().map(|e| e.key()).collect();
+        assert_eq!(keys.len(), 3, "composite keys must stay unique: {keys:?}");
+    }
+
+    /// Exit detail carries the lock-step attribution and the
+    /// `vram_unmeasured` honest discriminator. Pins both branches
+    /// of STOP #3 — `samples=0` ⇒ unmeasured, `samples>0` + 0 MB ⇒
+    /// real CPU-only zero.
+    #[test]
+    fn exit_detail_carries_attribution_and_vram_honesty() {
+        let mut state = empty_state();
+        let mut s_with_samples = run_summary(10, "ollama", ts(1_000));
+        s_with_samples.samples = 30;
+        s_with_samples.peak_vram_mb = 0;
+        state.push_completed_exit(
+            s_with_samples,
+            Some(crate::runtime::ExitAttribution {
+                exit_kind: "governor".into(),
+                exit_detail: Some("operator pressed k".into()),
+            }),
+        );
+        let events = build_events(&state);
+        let Some(ActivityEventDetail::Exit {
+            exit_kind,
+            exit_detail,
+            vram_unmeasured,
+            peak_vram_mb,
+            ..
+        }) = events[0].detail.clone() else {
+            panic!("expected Exit detail on the only event");
+        };
+        assert_eq!(exit_kind.as_deref(), Some("governor"));
+        assert_eq!(exit_detail.as_deref(), Some("operator pressed k"));
+        assert!(
+            !vram_unmeasured,
+            "samples>0 ⇒ vram_unmeasured=false (real CPU-only zero)",
+        );
+        assert_eq!(peak_vram_mb, 0);
+
+        // Inverse: samples=0 ⇒ unmeasured (the tick-window-short
+        // process that never sampled VRAM).
+        let mut state2 = empty_state();
+        let mut s_no_samples = run_summary(11, "shortlived", ts(2_000));
+        s_no_samples.samples = 0;
+        s_no_samples.peak_vram_mb = 0;
+        state2.push_completed_exit(s_no_samples, None);
+        let events2 = build_events(&state2);
+        if let Some(ActivityEventDetail::Exit { vram_unmeasured, .. }) =
+            events2[0].detail.clone()
+        {
+            assert!(vram_unmeasured, "samples=0 ⇒ vram_unmeasured=true");
+        } else {
+            panic!("expected Exit detail");
+        }
+    }
+
+    /// Regression rows have `detail = None` — hard rule #4. Enter
+    /// in browse mode is a no-op for these rows (the dispatcher
+    /// checks `ev.detail.is_some()` before toggling expand). Pins
+    /// the contract so a future "we have nothing structured to
+    /// show but let's invent some text" temptation fails this
+    /// test.
+    #[test]
+    fn regression_event_has_no_detail() {
+        let mut state = empty_state();
+        state.regressions.push_back(regression_event(ts(1_000)));
+        let events = build_events(&state);
+        assert_eq!(events.len(), 1);
+        assert!(matches!(events[0].kind, ActivityKind::Regression));
+        assert!(
+            events[0].detail.is_none(),
+            "regression rows MUST have detail=None (hard rule #4); got {:?}",
+            events[0].detail,
+        );
     }
 }

@@ -8,7 +8,9 @@ use std::path::PathBuf;
 use crate::analysis::compare::{RegressionConfig as DetectorConfig, detect_regressions_with};
 use crate::classifier;
 use crate::config::{Config, WorkloadRule, expand_tilde};
-use crate::exit_classify::{ExitContext, classify_exit, read_recent_kernel_log};
+use crate::exit_classify::{
+    ExitContext, classify_exit, exit_reason_to_wire_strings, read_recent_kernel_log,
+};
 use crate::fingerprint::Fingerprinter;
 use crate::governor::manual::{AuditLogEntry, ManualKillAction};
 use crate::governor::{AuditWriter, GovernorExecutor, KillAction, ManualKiller};
@@ -79,6 +81,29 @@ pub struct AnnotatedProcess {
     pub first_observed_at: Instant,
 }
 
+/// v1.3.2 / DISPATCH 74 — per-exit classification projected to
+/// wire-stable strings. Populated for AI-classified exits at the
+/// lifecycle-drain site using the same `(kind, detail)` projection
+/// `WireRunRecord::from_record` uses for the legacy
+/// /api/snapshot.activity feed; lock-step with
+/// [`RuntimeState::completed`] so the activity-feed wire builder
+/// can read the attribution by index without re-classifying.
+///
+/// `None` for non-AI exits (no classification runs) — the parallel
+/// VecDeque carries a `None` slot to keep alignment with
+/// `completed`. The wire builder skips detail emission when the
+/// slot is `None`.
+#[derive(Debug, Clone)]
+pub struct ExitAttribution {
+    /// Wire string for the kind: `"clean" | "governor" | "oom" |
+    /// "signal" | "segfault" | "cuda" | "crash" | "unknown"`. Matches
+    /// [`crate::web::wire::WireRunRecord::exit_kind`].
+    pub exit_kind: String,
+    /// Free-form detail (kill reason, dmesg fragment, signal
+    /// number, exit code). `None` for plain `clean`.
+    pub exit_detail: Option<String>,
+}
+
 /// Aggregated state from the most recent tick. Cheap to clone for the UI
 /// to render between samples.
 #[derive(Debug, Clone, Default)]
@@ -88,6 +113,10 @@ pub struct RuntimeState {
     pub annotated: Vec<AnnotatedProcess>,
     pub decisions: Vec<(u32, KillAction, String)>,
     pub completed: VecDeque<LifecycleSummary>,
+    /// v1.3.2 / DISPATCH 74 — lock-step with [`Self::completed`].
+    /// Same length, same index alignment. Populated for AI exits;
+    /// `None` for non-AI exits. See [`ExitAttribution`].
+    pub recent_exit_attribution: VecDeque<Option<ExitAttribution>>,
     pub audit: VecDeque<AuditLogEntry>,
     /// Recent regression alerts (Tier 1.3). Bounded by
     /// `runtime.audit_history` so it doesn't grow unbounded.
@@ -977,20 +1006,115 @@ impl Runtime {
         // Record run summaries as they fire. Bounded by config to keep memory flat.
         for summary in &lifecycle.recent_exits {
             self.state.completed.push_back(summary.clone());
+            // v1.3.2 / DISPATCH 74 — push a placeholder into the
+            // lock-step attribution VecDeque. Will be patched below
+            // for AI exits once classify_exit runs. Non-AI exits
+            // leave the slot as `None`. Push-pair pattern keeps
+            // `recent_exit_attribution.len() == completed.len()`
+            // every step of the way.
+            self.state.recent_exit_attribution.push_back(None);
             while self.state.completed.len() > self.config.runtime.completed_history {
                 self.state.completed.pop_front();
+                self.state.recent_exit_attribution.pop_front();
             }
             if let Some(s) = &self.summary_store
                 && let Err(e) = s.append(summary)
             {
                 tracing::warn!(error = %e, "failed to persist run summary");
             }
+
+            // v1.3.2 / DISPATCH 74 — classify ALL AI exits, not just
+            // those that hit the RunStore branch. Pre-D74 the
+            // classification was gated by `if let Some(rs) = &mut
+            // self.run_store && summary.category.is_some()`, so an
+            // operator with `run_store_path = ""` got
+            // `exit_kind=Unknown` everywhere — and the new
+            // activity-feed wire detail (shape A) would also be
+            // empty for them. Hoisting the classifier out of the
+            // RunStore branch makes the attribution available on
+            // every host, with the same D73 dmesg caching keeping
+            // the cost bounded.
+            //
+            // Side benefits the hoist unlocks:
+            //   * `pid_stderr` exit-marking now runs for AI exits
+            //     even on run_store-disabled hosts (the 30 s
+            //     post-mortem buffer survives long enough for
+            //     anything that reads it).
+            //   * Exit-driven alerts (`OomDetected` / `WorkloadExited`
+            //     per §4) fire on every host, not just RunStore ones.
+            //     The original gating was an unintended side
+            //     effect of nesting alert queueing inside the
+            //     RunStore branch.
+            let classification: Option<(
+                crate::storage::run_store::ExitReason,
+                String,
+                Option<String>,
+            )> =
+                if summary.category.is_some() {
+                    let dmesg_lines = if matches!(summary.signal, Some(9) | None) {
+                        dmesg_cache
+                            .get_or_insert_with(|| read_recent_kernel_log(10))
+                            .clone()
+                    } else {
+                        Vec::new()
+                    };
+                    let governor_reason =
+                        self.governor_killed_pids.remove(&summary.pid);
+                    let now_for_stderr = Instant::now();
+                    let stderr_lines = self
+                        .pid_stderr
+                        .get(&summary.pid)
+                        .filter(|b| !b.is_expired_at(now_for_stderr))
+                        .map(|b| b.tail())
+                        .unwrap_or_default();
+                    let ctx = ExitContext {
+                        dmesg_lines,
+                        stderr_lines,
+                        killed_by_governor: governor_reason.is_some(),
+                        governor_reason,
+                    };
+                    let reason = classify_exit(summary, &ctx);
+                    let (kind_str, detail_str) = exit_reason_to_wire_strings(&reason);
+                    // L19 — mark the buffer for 30 s expiry from
+                    // this exit. Hoisted with the classify call so
+                    // the marker fires even on no-RunStore hosts
+                    // (was previously coupled by accident).
+                    if let Some(buf) = self.pid_stderr.get_mut(&summary.pid) {
+                        buf.exit_at = Some(now_for_stderr);
+                    }
+                    // L8 / UX_CONTRACT.md §4 — exit-driven alerts.
+                    // Same hoist rationale: fire on every host, not
+                    // just RunStore ones.
+                    if let Some((alert_id, alert_reason)) =
+                        classify_for_alert(&reason)
+                    {
+                        self.state.pending_exit_alerts.push(ExitAlertEvent {
+                            pid: summary.pid,
+                            workload_name: summary.name.clone(),
+                            alert_id,
+                            reason: alert_reason,
+                        });
+                    }
+                    // Patch the lock-step attribution back-slot.
+                    if let Some(back) =
+                        self.state.recent_exit_attribution.back_mut()
+                    {
+                        *back = Some(ExitAttribution {
+                            exit_kind: kind_str.clone(),
+                            exit_detail: detail_str.clone(),
+                        });
+                    }
+                    Some((reason, kind_str, detail_str))
+                } else {
+                    None
+                };
+
             // RunStore is query-optimized (latest.md Tier 1.1) — only
             // AI-classified processes get a record. Non-AI exits stay in
             // the legacy `summary_log_path` JSONL when configured, which
             // remains the unfiltered forensic trail.
             if let Some(rs) = &mut self.run_store
-                && summary.category.is_some()
+                && let Some((reason, _, _)) = classification.clone()
             {
                 let mut summary_to_record = summary.clone();
                 // Tier 1.2c — promote authoritative model_name from
@@ -1032,75 +1156,11 @@ impl Runtime {
                 {
                     record.model_fingerprint = Some(fp);
                 }
-                // Tier 3.5 — richer exit-reason classification. We
-                // only spend the (~25 ms) journalctl invocation when
-                // the signal hint admits the OOM branch: SIGKILL
-                // (Some(9)) OR no-wait-status (None — the passive-
-                // monitoring case). Known non-OOM signals
-                // (SIGTERM=15, SIGSEGV=11, SIGINT=2, …) skip the
-                // shellout entirely. v1.3.2 / DISPATCH 73 (P1#2) —
-                // pre-bump this branch was `Some(9)` ONLY, which
-                // locked passive OOMs out: tracker.rs:56 emits
-                // `mark_exit(None, None)` for passive exits, so
-                // workloads we don't own (ollama, the operator's
-                // ROS2 graph, etc.) had `summary.signal=None` and
-                // their OOM was misclassified as Unknown. Cached
-                // via `dmesg_cache` above — multiple exits in the
-                // same tick share one journalctl call.
-                let dmesg_lines = if matches!(summary.signal, Some(9) | None) {
-                    dmesg_cache
-                        .get_or_insert_with(|| read_recent_kernel_log(10))
-                        .clone()
-                } else {
-                    Vec::new()
-                };
-                let governor_reason = self.governor_killed_pids.remove(&summary.pid);
-                // L19 — feed the transient buffer's tail into
-                // `ExitContext` so Tier 3.5 classification can see
-                // recent stderr (CUDA OOM / CUDA error patterns)
-                // when a runtime-side sampler has populated the
-                // buffer for this PID. Empty when no sampler ran
-                // against this PID — exec_wrapper-launched workloads
-                // still use their in-process tail. Direct field
-                // access keeps the borrow scoped to `pid_stderr`
-                // (a sibling field) so the surrounding
-                // `&mut self.run_store` borrow stays live.
-                let now_for_stderr = Instant::now();
-                let stderr_lines = self
-                    .pid_stderr
-                    .get(&summary.pid)
-                    .filter(|b| !b.is_expired_at(now_for_stderr))
-                    .map(|b| b.tail())
-                    .unwrap_or_default();
-                let ctx = ExitContext {
-                    dmesg_lines,
-                    stderr_lines,
-                    killed_by_governor: governor_reason.is_some(),
-                    governor_reason,
-                };
-                record.exit_reason = classify_exit(summary, &ctx);
-                // L19 — mark the buffer for 30 s expiry from this
-                // exit. Until then the post-mortem card can render
-                // the captured tail; after that the entry is swept
-                // by `sweep_expired_stderr`. Direct field access
-                // for the same borrow-scope reason as above.
-                if let Some(buf) = self.pid_stderr.get_mut(&summary.pid) {
-                    buf.exit_at = Some(now_for_stderr);
-                }
-                // L8 / UX_CONTRACT.md §4 — queue an exit-driven
-                // alert if the classified reason warrants one.
-                // Clean exits are silent per §4 ("never on clean
-                // (code 0) exits"); OOM cases fire OomDetected;
-                // everything else non-clean fires WorkloadExited
-                // with a `{reason}` string captured at fire time.
-                if let Some((alert_id, alert_reason)) = classify_for_alert(&record.exit_reason) {
-                    self.state.pending_exit_alerts.push(ExitAlertEvent {
-                        pid: summary.pid,
-                        workload_name: summary.name.clone(),
-                        alert_id,
-                        reason: alert_reason,
-                    });
-                }
+                // v1.3.2 / DISPATCH 74 — exit_reason now comes from
+                // the hoisted `classification` block above so it's
+                // available regardless of RunStore. Same `ExitReason`
+                // enum value, no double-classification.
+                record.exit_reason = reason;
                 let model = record.model_or_name().to_string();
                 let record_clone = record.clone();
                 if let Err(e) = rs.append(record) {

@@ -239,6 +239,56 @@ export interface WireActivityEntry {
     // re-derive severity in TS, the contract is the single source
     // of truth.
     severity: 'healthy' | 'attention' | 'critical';
+    // v1.3.2 / DISPATCH 74 — shape-A click-to-expand detail.
+    // Optional per the server's `#[serde(skip_serializing_if =
+    // "Option::is_none")]` — regression entries always omit it
+    // (hard rule #4), and very-old binaries that pre-date this
+    // dispatch also omit it. The renderer treats absence as
+    // "nothing to expand."
+    detail?: WireActivityDetail;
+}
+
+/**
+ * v1.3.2 / DISPATCH 74 — shape-A activity detail.
+ *
+ * Each row's fields are optional; the server only populates
+ * what's available per `kind`. The renderer inspects
+ * `WireActivityEntry.kind` to decide which fields to display:
+ *
+ * - `kind === 'exit'`: uptime + 4 peaks + exit_kind + exit_detail
+ *   are populated; action/success/error_msg are undefined.
+ * - `kind === 'kill'`: action + success + error_msg (if failed)
+ *   are populated; peaks + exit_kind are undefined (a kill
+ *   audit fires before its matching exit; correlating peaks is
+ *   v2 scope).
+ * - `kind === 'regression'`: no detail at all (the entry's
+ *   `detail` is `undefined`).
+ *
+ * `vram_unmeasured` distinguishes a real `peak_vram_mb = 0`
+ * (CPU-only workload) from "no resource sample fired"
+ * (very-short-lived process). The renderer should NOT label
+ * `peak_vram_mb` as "0 MB" when this flag is true — render
+ * "no measurements" or omit the field instead, per the
+ * dispatch's STOP #3 honesty constraint.
+ */
+export interface WireActivityDetail {
+    // ── exit-shaped fields ───────────────────────────────────────
+    uptime_secs?: number;
+    avg_cpu_pct?: number;
+    peak_cpu_pct?: number;
+    peak_rss_mb?: number;
+    peak_vram_mb?: number;
+    // Defaults to false on the server's skip_serializing_if
+    // branch (omitted from JSON when false). TS reads `undefined`
+    // as `false` at the use site.
+    vram_unmeasured?: boolean;
+    exit_kind?: string;
+    exit_detail?: string;
+
+    // ── kill-shaped fields ───────────────────────────────────────
+    action?: 'SIGTERM' | 'SIGKILL' | 'CANCELLED' | 'ABORT-PID-REUSE';
+    success?: boolean;
+    error_msg?: string;
 }
 
 /** Empty snapshot used as the initial store value. */

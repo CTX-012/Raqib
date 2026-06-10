@@ -31,7 +31,6 @@ use crate::lifecycle::LifecycleSummary;
 use crate::model::{AICategory, WorkloadCategory};
 use crate::runtime::RuntimeState;
 use crate::storage::RunRecord;
-use crate::storage::run_store::ExitReason;
 
 /// Top-level snapshot delivered on every WebSocket tick AND returned
 /// by `GET /api/snapshot`. Sized for "smallish JSON" — ~5–10 KB at
@@ -606,6 +605,95 @@ pub struct WireActivityEntry {
     /// tailwind class; same single-source-of-truth pattern as
     /// `WireAlertEntry::severity`.
     pub severity: String,
+    /// v1.3.2 / DISPATCH 74 — shape-A click-to-expand detail.
+    /// Populated for `kind=exit` (uptime + 4 peaks + exit_kind +
+    /// exit_detail) and `kind=kill` (action + success + error_msg).
+    /// `None` for `kind=regression` per the dispatch's explicit
+    /// hard rule "REGRESSION entries: expand = summary only, no
+    /// fabricated exit fields." `#[serde(skip_serializing_if)]`
+    /// keeps the JSON tight when None — additive-default, no
+    /// schema break.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<WireActivityDetail>,
+}
+
+/// v1.3.2 / DISPATCH 74 — shape-A click-to-expand detail.
+///
+/// One row per source. Every field is `Option<>` so a per-kind
+/// projection only populates the fields that apply; the renderer
+/// inspects the outer `WireActivityEntry::kind` to decide which
+/// sections to display.
+///
+/// **Shape choice — flat optional fields, not a tagged union.**
+/// A tagged enum (`{type: "exit", ...} | {type: "kill", ...}`)
+/// would be cleaner in idealised TypeScript but uglier in Svelte
+/// template-control. The flat shape keeps the renderer's
+/// `{#if detail.uptime_secs}` checks honest about what's
+/// available without `as` casts. Mirrors the
+/// `WireAlertEntry::severity` precedent: server pre-classifies,
+/// client just maps literals.
+///
+/// **Wire-byte budget.** Each populated detail is ~80 bytes;
+/// `ACTIVITY_FEED_WIRE_MAX = 50` × 80 ≈ 4 KB extra at the
+/// per-poll high water mark — negligible on the 1 Hz REST
+/// transport (D68). Empty (`None`) detail serializes to
+/// nothing thanks to `skip_serializing_if`.
+#[derive(Debug, Clone, Serialize)]
+pub struct WireActivityDetail {
+    // ── exit-shaped fields ──────────────────────────────────────
+    /// Lifecycle uptime in seconds (the workload lived this long
+    /// before exit). `None` for kill entries (audit happens before
+    /// the matching exit; no peaks yet).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub uptime_secs: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub avg_cpu_pct: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub peak_cpu_pct: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub peak_rss_mb: Option<u64>,
+    /// Peak GPU memory in MB. `None` for kill entries. `Some(0)`
+    /// is **ambiguous**: it could mean the workload never used
+    /// VRAM (CPU-only inference, embedding worker, …) OR that the
+    /// VRAM channel was never sampled (very short-lived process,
+    /// no GPU on the host). The companion `vram_unmeasured` flag
+    /// disambiguates — see its doc-comment.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub peak_vram_mb: Option<u64>,
+    /// v1.3.2 / DISPATCH 74 — STOP #3 surface for the
+    /// `peak_vram_mb=0` ambiguity. `true` when the lifecycle
+    /// summary's `samples` count is 0, meaning no resource sample
+    /// fired at all (process appeared and vanished inside a single
+    /// tick). The renderer labels the row "no measurements" in
+    /// that case instead of "0 MB" — `do NOT show a misleading 0`.
+    /// `false` when `samples > 0`: the workload was sampled but
+    /// genuinely used no VRAM (real 0).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub vram_unmeasured: bool,
+    /// Wire-stable exit kind. Sourced from
+    /// `crate::exit_classify::exit_reason_to_wire_strings` — same
+    /// string taxonomy `WireRunRecord::exit_kind` uses. `None`
+    /// when no classification ran (non-AI exit, or kill entry).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_kind: Option<String>,
+    /// Companion to `exit_kind`. Kill reason for `governor`,
+    /// dmesg fragment for `oom`, etc.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_detail: Option<String>,
+
+    // ── kill-shaped fields ──────────────────────────────────────
+    /// `"SIGTERM" | "SIGKILL" | "CANCELLED" | "ABORT-PID-REUSE"`.
+    /// Only set for `kind=kill`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub action: Option<String>,
+    /// Whether the kill signal actually went out (`libc::kill`
+    /// returned 0). Only set for `kind=kill`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub success: Option<bool>,
+    /// `error_msg` from the AuditLogEntry when `success=false`.
+    /// Only set for `kind=kill` with a failed kill.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_msg: Option<String>,
 }
 
 /// One completed-run record, suitable for both the history view and
@@ -885,27 +973,13 @@ impl WireRunRecord {
     /// to a stable two-string pair so the wire schema doesn't track
     /// every variant the reason taxonomy might add.
     pub fn from_record(rec: &RunRecord) -> Self {
-        let (kind, detail) = match &rec.exit_reason {
-            ExitReason::CleanExit => ("clean", None),
-            ExitReason::UserSignal { signal } => ("signal", Some(format!("signal {signal}"))),
-            ExitReason::GovernorKill { reason } => ("governor", Some(reason.clone())),
-            ExitReason::Segfault => ("segfault", None),
-            ExitReason::OutOfMemory { ram, vram } => {
-                let detail = match (ram, vram) {
-                    (true, true) => "RAM and GPU memory",
-                    (true, false) => "RAM",
-                    (false, true) => "GPU memory",
-                    (false, false) => "unknown",
-                };
-                ("oom", Some(detail.to_string()))
-            }
-            ExitReason::CudaError { last_msg } => {
-                ("cuda", last_msg.clone())
-            }
-            ExitReason::Crash { exit_code } => ("crash", Some(format!("exit {exit_code}"))),
-            ExitReason::Unknown => ("unknown", None),
-        };
-        Self::from_summary_with_exit(&rec.summary, kind.to_string(), detail)
+        // v1.3.2 / DISPATCH 74 — projection lifted to
+        // `crate::exit_classify::exit_reason_to_wire_strings` so the
+        // shape-A activity-feed detail surface uses the same
+        // (kind, detail) string pair this legacy history surface
+        // does. Single source of truth; no taxonomy divergence.
+        let (kind, detail) = crate::exit_classify::exit_reason_to_wire_strings(&rec.exit_reason);
+        Self::from_summary_with_exit(&rec.summary, kind, detail)
     }
 
     fn from_summary_with_exit(
@@ -973,13 +1047,43 @@ impl WireActivityEntry {
     /// AI-only filter is the caller's responsibility (it lives in
     /// `build_activity` below) to match the TUI's pre-filter at
     /// `activity::build_events` line 94-97.
-    pub fn from_lifecycle_summary(s: &LifecycleSummary) -> Self {
+    ///
+    /// v1.3.2 / DISPATCH 74 — `attribution` is the optional
+    /// `(exit_kind, exit_detail)` pair sourced from
+    /// `state.recent_exit_attribution` at the matching index. None
+    /// when no classification ran for this exit (non-AI exit, or
+    /// the lock-step attribution slot was never patched). The
+    /// `detail` field is populated with the lifecycle peaks +
+    /// attribution; the `vram_unmeasured` flag distinguishes a
+    /// real `peak_vram_mb = 0` from "no resource sample fired."
+    pub fn from_lifecycle_summary(
+        s: &LifecycleSummary,
+        attribution: Option<&crate::runtime::ExitAttribution>,
+    ) -> Self {
         use ux_contract::activity::{ActivityKind, ActivitySeverity};
         let severity = if s.signal.is_some() {
             ActivitySeverity::Critical
         } else {
             ActivitySeverity::Healthy
         };
+        let detail = Some(WireActivityDetail {
+            uptime_secs: Some(s.uptime_secs),
+            avg_cpu_pct: Some(s.avg_cpu_pct),
+            peak_cpu_pct: Some(s.peak_cpu_pct),
+            peak_rss_mb: Some(s.peak_rss_mb),
+            peak_vram_mb: Some(s.peak_vram_mb),
+            // STOP #3 honest discriminator: a `peak_vram_mb=0` row
+            // with `samples=0` was never measured (process
+            // appeared and vanished inside a tick); the renderer
+            // labels it "no measurements." `samples>0 + 0 MB` is a
+            // genuine zero (CPU-only workload, embeddings worker).
+            vram_unmeasured: s.samples == 0,
+            exit_kind: attribution.map(|a| a.exit_kind.clone()),
+            exit_detail: attribution.and_then(|a| a.exit_detail.clone()),
+            action: None,
+            success: None,
+            error_msg: None,
+        });
         Self {
             kind: activity_kind_to_str(ActivityKind::Exit).to_string(),
             timestamp: s.exit_time,
@@ -987,6 +1091,7 @@ impl WireActivityEntry {
             name: s.name.clone(),
             summary: format_exit_summary(s),
             severity: activity_severity_to_str(severity).to_string(),
+            detail,
         }
     }
 
@@ -997,7 +1102,7 @@ impl WireActivityEntry {
     /// failed kills → Critical; manual successes → Attention;
     /// automated successes → Healthy.
     pub fn from_audit_entry(e: &crate::governor::manual::AuditLogEntry) -> Self {
-        use crate::governor::manual::KillSource;
+        use crate::governor::manual::{KillSource, ManualKillAction};
         use ux_contract::activity::{ActivityKind, ActivitySeverity};
         let severity = if !e.success {
             ActivitySeverity::Critical
@@ -1006,6 +1111,32 @@ impl WireActivityEntry {
         } else {
             ActivitySeverity::Healthy
         };
+        // v1.3.2 / DISPATCH 74 — kill detail. Mirrors the existing
+        // TUI audit-row format keys (`action` / `success` / `error`).
+        // No correlated exit-peaks yet — a kill audit is recorded
+        // BEFORE the matching exit; surfacing the peaks here would
+        // require correlation with `state.completed` (same PID, near
+        // timestamp), which is the v2 "post-mortem card" scope, not
+        // shape A.
+        let action_str = match e.action {
+            ManualKillAction::SendSigterm => "SIGTERM",
+            ManualKillAction::SendSigkill => "SIGKILL",
+            ManualKillAction::Cancelled => "CANCELLED",
+            ManualKillAction::PidReusedAborted => "ABORT-PID-REUSE",
+        };
+        let detail = Some(WireActivityDetail {
+            uptime_secs: None,
+            avg_cpu_pct: None,
+            peak_cpu_pct: None,
+            peak_rss_mb: None,
+            peak_vram_mb: None,
+            vram_unmeasured: false,
+            exit_kind: None,
+            exit_detail: None,
+            action: Some(action_str.to_string()),
+            success: Some(e.success),
+            error_msg: e.error_msg.clone(),
+        });
         Self {
             kind: activity_kind_to_str(ActivityKind::Kill).to_string(),
             timestamp: e.timestamp,
@@ -1013,6 +1144,7 @@ impl WireActivityEntry {
             name: e.process_name.clone(),
             summary: format_audit_summary(e),
             severity: activity_severity_to_str(severity).to_string(),
+            detail,
         }
     }
 
@@ -1045,6 +1177,13 @@ impl WireActivityEntry {
             name: r.model.clone(),
             summary: format_regression_summary(r),
             severity: activity_severity_to_str(severity).to_string(),
+            // v1.3.2 / DISPATCH 74 — hard rule #4 ("REGRESSION
+            // entries: expand = summary only, no fabricated exit
+            // fields"). The summary string already carries the
+            // metric / delta / baseline, so click-to-expand on a
+            // regression row has nothing extra to show; the
+            // renderer skips the expand affordance entirely.
+            detail: None,
         }
     }
 }
@@ -1116,11 +1255,29 @@ fn build_activity(state: &RuntimeState) -> Vec<WireActivityEntry> {
     let mut events: Vec<WireActivityEntry> = Vec::new();
     // Exits — AI-only, matching the TUI filter
     // (`activity::build_events` lines 94-97).
-    for s in &state.completed {
+    //
+    // v1.3.2 / DISPATCH 74 — `state.recent_exit_attribution` is
+    // maintained in lock-step with `state.completed` at the
+    // runtime exit-drain site (`runtime.rs:983`), so the per-index
+    // zip below is safe. A debug assert pins the invariant on
+    // builds where it could silently drift.
+    debug_assert_eq!(
+        state.completed.len(),
+        state.recent_exit_attribution.len(),
+        "state.recent_exit_attribution must stay lock-step with state.completed",
+    );
+    for (s, attr) in state
+        .completed
+        .iter()
+        .zip(state.recent_exit_attribution.iter())
+    {
         if s.category.is_none() {
             continue;
         }
-        events.push(WireActivityEntry::from_lifecycle_summary(s));
+        events.push(WireActivityEntry::from_lifecycle_summary(
+            s,
+            attr.as_ref(),
+        ));
     }
     // Governor-audit kills + their CANCELLED / PID-reuse-abort
     // companions.
@@ -1808,7 +1965,7 @@ mod tests {
     #[test]
     fn wire_activity_entry_from_lifecycle_summary_clean_exit() {
         let s = ai_summary(1234, "phi3", None);
-        let w = WireActivityEntry::from_lifecycle_summary(&s);
+        let w = WireActivityEntry::from_lifecycle_summary(&s, None);
         assert_eq!(w.kind, "exit");
         assert_eq!(w.pid, 1234);
         assert_eq!(w.name, "phi3");
@@ -1823,7 +1980,7 @@ mod tests {
     #[test]
     fn wire_activity_entry_from_lifecycle_summary_signal_kill() {
         let s = ai_summary(2222, "vllm", Some(9)); // SIGKILL
-        let w = WireActivityEntry::from_lifecycle_summary(&s);
+        let w = WireActivityEntry::from_lifecycle_summary(&s, None);
         assert_eq!(w.kind, "exit");
         assert_eq!(w.severity, "critical");
     }
@@ -1904,6 +2061,8 @@ mod tests {
         use crate::analysis::Severity;
         let mut runtime = Runtime::new(Config::default()).expect("runtime");
         runtime.state_mut().completed.push_back(ai_summary(10, "exit-one", None));
+        // v1.3.2 / DISPATCH 74 — lock-step attribution slot.
+        runtime.state_mut().recent_exit_attribution.push_back(None);
         runtime.state_mut().audit.push_back(audit_entry(11, "kill-one", true, KillSource::Manual));
         runtime.state_mut().regressions.push_back(regression_event("reg-model", Severity::Warn));
 
@@ -1950,6 +2109,8 @@ mod tests {
             .state_mut()
             .completed
             .push_back(ai_summary(10, "ollama", None));
+        // v1.3.2 / DISPATCH 74 — lock-step attribution slot.
+        runtime.state_mut().recent_exit_attribution.push_back(None);
         runtime
             .state_mut()
             .audit
@@ -1988,6 +2149,180 @@ mod tests {
         );
     }
 
+    // ── v1.3.2 / DISPATCH 74 — shape-A detail tests ───────────────
+
+    /// Exit projection carries the full shape-A detail block:
+    /// peaks-at-death + exit_kind/detail from attribution. Pins
+    /// the per-field plumbing so a future refactor that drops one
+    /// field surfaces here.
+    #[test]
+    fn from_lifecycle_summary_populates_full_exit_detail() {
+        let mut s = ai_summary(1234, "ollama", None);
+        s.uptime_secs = 120;
+        s.avg_cpu_pct = 25.0;
+        s.peak_cpu_pct = 73.0;
+        s.peak_rss_mb = 8192;
+        s.peak_vram_mb = 4096;
+        s.samples = 60;
+        let attr = crate::runtime::ExitAttribution {
+            exit_kind: "oom".into(),
+            exit_detail: Some("RAM".into()),
+        };
+        let w = WireActivityEntry::from_lifecycle_summary(&s, Some(&attr));
+        let d = w
+            .detail
+            .as_ref()
+            .expect("exit entry must carry a detail block");
+        assert_eq!(d.uptime_secs, Some(120));
+        assert!((d.avg_cpu_pct.unwrap() - 25.0).abs() < 1e-6);
+        assert!((d.peak_cpu_pct.unwrap() - 73.0).abs() < 1e-6);
+        assert_eq!(d.peak_rss_mb, Some(8192));
+        assert_eq!(d.peak_vram_mb, Some(4096));
+        assert!(
+            !d.vram_unmeasured,
+            "samples > 0 → genuine measurement; vram_unmeasured must be false",
+        );
+        assert_eq!(d.exit_kind.as_deref(), Some("oom"));
+        assert_eq!(d.exit_detail.as_deref(), Some("RAM"));
+        assert!(d.action.is_none(), "exit detail must not carry kill fields");
+        assert!(d.success.is_none());
+        assert!(d.error_msg.is_none());
+    }
+
+    /// STOP #3 surface: a `peak_vram_mb = 0` row with `samples = 0`
+    /// flips `vram_unmeasured = true` — the workload appeared and
+    /// vanished inside a single tick, so the 0 is genuinely
+    /// "no measurement" not "real zero." The renderer uses this
+    /// flag to suppress the misleading "0 MB" label.
+    #[test]
+    fn vram_unmeasured_marker_set_when_samples_zero() {
+        let mut s = ai_summary(7777, "shortlived", None);
+        s.peak_vram_mb = 0;
+        s.samples = 0;
+        let w = WireActivityEntry::from_lifecycle_summary(&s, None);
+        let d = w.detail.as_ref().unwrap();
+        assert!(d.vram_unmeasured, "samples=0 ⇒ vram_unmeasured=true");
+        // And the inverse: samples > 0 with peak_vram_mb=0 is a
+        // genuine zero (CPU-only workload).
+        let mut s2 = ai_summary(7778, "cpu-only", None);
+        s2.peak_vram_mb = 0;
+        s2.samples = 30;
+        let w2 = WireActivityEntry::from_lifecycle_summary(&s2, None);
+        let d2 = w2.detail.as_ref().unwrap();
+        assert!(
+            !d2.vram_unmeasured,
+            "samples>0 + peak_vram_mb=0 ⇒ vram_unmeasured=false (real CPU-only zero)",
+        );
+    }
+
+    /// Kill entries carry action / success / error_msg in detail,
+    /// and DO NOT carry peaks (a kill audit fires before the
+    /// matching exit; correlating peaks is v2 post-mortem scope).
+    #[test]
+    fn from_audit_entry_populates_kill_detail_no_peaks() {
+        use crate::governor::manual::KillSource;
+        let e = audit_entry(5151, "ollama", true, KillSource::Manual);
+        let w = WireActivityEntry::from_audit_entry(&e);
+        let d = w.detail.as_ref().unwrap();
+        assert_eq!(d.action.as_deref(), Some("SIGTERM"));
+        assert_eq!(d.success, Some(true));
+        assert!(d.error_msg.is_none(), "success=true ⇒ no error_msg");
+        // No exit peaks on a kill detail.
+        assert!(d.uptime_secs.is_none());
+        assert!(d.peak_rss_mb.is_none());
+        assert!(d.peak_vram_mb.is_none());
+        assert!(d.exit_kind.is_none());
+    }
+
+    /// Failed-kill audit surfaces `error_msg` in the detail.
+    #[test]
+    fn from_audit_entry_failed_kill_carries_error_msg() {
+        use crate::governor::manual::KillSource;
+        let e = audit_entry(5151, "phi3", false, KillSource::Manual);
+        let w = WireActivityEntry::from_audit_entry(&e);
+        let d = w.detail.as_ref().unwrap();
+        assert_eq!(d.success, Some(false));
+        assert_eq!(d.error_msg.as_deref(), Some("ESRCH"));
+    }
+
+    /// Hard rule #4: regressions have NO detail. Click-to-expand
+    /// on a regression row shows nothing extra (the summary
+    /// already carries metric / delta / baseline). Pins the
+    /// "no fabricated exit fields" promise.
+    #[test]
+    fn from_regression_event_has_no_detail() {
+        use crate::analysis::Severity;
+        let r = regression_event("phi3", Severity::Warn);
+        let w = WireActivityEntry::from_regression_event(&r);
+        assert!(
+            w.detail.is_none(),
+            "regression entries MUST carry no detail (hard rule #4); got {:?}",
+            w.detail,
+        );
+    }
+
+    /// Lock-step invariant: `build_activity` zips `state.completed`
+    /// against `state.recent_exit_attribution` by index. When the
+    /// attribution slot is populated, the EXIT entry's
+    /// `detail.exit_kind` echoes it.
+    #[test]
+    fn build_activity_zips_exit_with_attribution_by_index() {
+        let mut runtime = Runtime::new(Config::default()).expect("runtime");
+        runtime
+            .state_mut()
+            .completed
+            .push_back(ai_summary(10, "phi3", None));
+        runtime
+            .state_mut()
+            .recent_exit_attribution
+            .push_back(Some(crate::runtime::ExitAttribution {
+                exit_kind: "clean".into(),
+                exit_detail: None,
+            }));
+        let merged = build_activity(runtime.state());
+        let exit = merged
+            .iter()
+            .find(|e| e.kind == "exit")
+            .expect("at least one exit");
+        let d = exit.detail.as_ref().expect("exit must have detail");
+        assert_eq!(d.exit_kind.as_deref(), Some("clean"));
+    }
+
+    /// End-to-end JSON: shape-A detail surfaces in the serialized
+    /// snapshot. Mirrors `wire_snapshot_serializes_three_kind
+    /// _activity_feed` for shape A so an external operator running
+    /// `curl /api/snapshot | jq '.activity[0].detail'` sees the
+    /// fields this dispatch promises.
+    #[test]
+    fn wire_snapshot_carries_shape_a_detail_in_json() {
+        let mut runtime = Runtime::new(Config::default()).expect("runtime");
+        let mut s = ai_summary(10, "ollama", None);
+        s.uptime_secs = 240;
+        s.samples = 30;
+        runtime.state_mut().completed.push_back(s);
+        runtime
+            .state_mut()
+            .recent_exit_attribution
+            .push_back(Some(crate::runtime::ExitAttribution {
+                exit_kind: "governor".into(),
+                exit_detail: Some("VRAM > limit".into()),
+            }));
+        let snap = WireSnapshot::from_runtime_state(runtime.state());
+        let json = serde_json::to_string(&snap).expect("serialize");
+        assert!(
+            json.contains("\"exit_kind\":\"governor\""),
+            "shape-A detail.exit_kind missing from JSON: {json}",
+        );
+        assert!(
+            json.contains("\"exit_detail\":\"VRAM > limit\""),
+            "shape-A detail.exit_detail missing from JSON: {json}",
+        );
+        assert!(
+            json.contains("\"uptime_secs\":240"),
+            "shape-A detail.uptime_secs missing from JSON: {json}",
+        );
+    }
+
     /// AI-only filter for exits, mirroring the TUI guard at
     /// `activity::build_events` lines 94-97.
     #[test]
@@ -1996,7 +2331,9 @@ mod tests {
         let mut non_ai = ai_summary(99, "sh", None);
         non_ai.category = None;
         runtime.state_mut().completed.push_back(non_ai);
+        runtime.state_mut().recent_exit_attribution.push_back(None);
         runtime.state_mut().completed.push_back(ai_summary(100, "phi3", None));
+        runtime.state_mut().recent_exit_attribution.push_back(None);
 
         let merged = build_activity(runtime.state());
         let names: Vec<&str> = merged

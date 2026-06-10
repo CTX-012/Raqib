@@ -111,6 +111,42 @@ pub fn classify_exit(summary: &LifecycleSummary, ctx: &ExitContext) -> ExitReaso
     ExitReason::from_summary(summary)
 }
 
+/// v1.3.2 / DISPATCH 74 — project an [`ExitReason`] to the
+/// wire-stable `(kind, detail)` string pair the activity-feed
+/// detail surface consumes. Mirrors the per-variant table inline
+/// in [`crate::web::wire::WireRunRecord::from_record`] so both
+/// projections stay in sync — single source of truth, no string
+/// taxonomy divergence between the legacy history surface and the
+/// new shape-A activity-feed detail.
+///
+/// The kind strings (`"clean" | "governor" | "oom" | "signal" |
+/// "segfault" | "cuda" | "crash" | "unknown"`) are pinned by the
+/// per-variant tests in `src/web/wire.rs::tests::exit_kind_…`.
+pub fn exit_reason_to_wire_strings(reason: &ExitReason) -> (String, Option<String>) {
+    match reason {
+        ExitReason::CleanExit => ("clean".into(), None),
+        ExitReason::UserSignal { signal } => {
+            ("signal".into(), Some(format!("signal {signal}")))
+        }
+        ExitReason::GovernorKill { reason } => ("governor".into(), Some(reason.clone())),
+        ExitReason::Segfault => ("segfault".into(), None),
+        ExitReason::OutOfMemory { ram, vram } => {
+            let detail = match (ram, vram) {
+                (true, true) => "RAM and GPU memory",
+                (true, false) => "RAM",
+                (false, true) => "GPU memory",
+                (false, false) => "unknown",
+            };
+            ("oom".into(), Some(detail.to_string()))
+        }
+        ExitReason::CudaError { last_msg } => ("cuda".into(), last_msg.clone()),
+        ExitReason::Crash { exit_code } => {
+            ("crash".into(), Some(format!("exit {exit_code}")))
+        }
+        ExitReason::Unknown => ("unknown".into(), None),
+    }
+}
+
 /// Returns true iff at least one dmesg line matches both the OOM
 /// phrase and the literal `pid=NNN` (or `process NNN`) pattern.
 fn dmesg_killed_pid(ctx: &ExitContext, pid: u32) -> bool {

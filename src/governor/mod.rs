@@ -35,6 +35,24 @@ pub enum KillAction {
     Whitelisted,
     /// Process is already exited; nothing to do.
     AlreadyExited,
+    /// v1.3.2 / DISPATCH 77 / 62-E — process already has an
+    /// outstanding SIGTERM that hasn't yet been reaped. Returned
+    /// by `evaluate()` for any PID still in `pending_kills` so a
+    /// stubborn post-SIGTERM workload doesn't re-emit
+    /// `SignalTermSent` every tick (which would drain the
+    /// 3-per-60s rate-limit budget alone over three ticks,
+    /// starving every other AI process that needs a fresh kill).
+    /// Symmetric with [`Self::AlreadyExited`] — same position in
+    /// `evaluate_process`, same "don't act, just observe" intent.
+    ///
+    /// AUTHORITY: this is a DECISION discriminator, NOT an
+    /// action. It records "we know we already SIGTERM'd this PID"
+    /// — it does not itself send a signal. Step-0 prerequisite
+    /// for the actuation arc per
+    /// `docs/PHASE4_AUTOKILL_DESIGN.md`; step-5 actuation reads
+    /// this variant to skip pending PIDs, but the actuation
+    /// wiring itself stays unbuilt until that dispatch lands.
+    AlreadyPending,
     /// SIGTERM sent; waiting for graceful shutdown.
     SignalTermSent,
     /// Process did not exit after SIGTERM; SIGKILL sent.

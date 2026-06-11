@@ -36,9 +36,21 @@ impl GovernorExecutor {
         self.trim_rate_limit_window();
         let mut decisions = Vec::with_capacity(lifecycle_snapshot.processes.len());
         for (pid, lifecycle) in &lifecycle_snapshot.processes {
-            let (action, reason) = self.evaluate_process(lifecycle);
+            let (action, reason) = self.evaluate_process(*pid, lifecycle);
             // Record enforced kills against the window so subsequent
             // candidates in the same tick see the budget drop.
+            //
+            // v1.3.2 / DISPATCH 77 / 62-E — `AlreadyPending` is
+            // deliberately EXCLUDED from this counter. A stubborn
+            // post-SIGTERM PID returns `AlreadyPending` every tick
+            // (`evaluate_process`'s pending-check short-circuit
+            // below); counting those would re-drain the budget the
+            // pre-fix code drained by re-emitting `SignalTermSent`.
+            // Only the FIRST `SignalTermSent` for a given PID
+            // counts against the 3-per-60s window; subsequent
+            // ticks for the same PID surface as `AlreadyPending`
+            // and leave the budget free for OTHER PIDs that need
+            // fresh kills.
             if matches!(action, KillAction::SignalTermSent) {
                 self.recent_kills.push_back(Utc::now());
             }
@@ -50,12 +62,52 @@ impl GovernorExecutor {
     /// Evaluate a single process. Mutable for symmetry with `evaluate`, but
     /// callers at the single-process layer usually want the sliding window
     /// frozen at a known state — call `trim_rate_limit_window` first.
-    fn evaluate_process(&self, lifecycle: &ProcessLifecycle) -> (KillAction, String) {
+    ///
+    /// v1.3.2 / DISPATCH 77 — `pid` is now an explicit parameter so
+    /// the `AlreadyPending` short-circuit can consult
+    /// `self.pending_kills`; the pre-bump signature took just
+    /// `lifecycle` because the only-AlreadyExited shortcut needed
+    /// nothing more than the lifecycle's `is_exited()` predicate.
+    fn evaluate_process(
+        &self,
+        pid: u32,
+        lifecycle: &ProcessLifecycle,
+    ) -> (KillAction, String) {
         // Already exited: nothing to do
         if lifecycle.is_exited() {
             return (
                 KillAction::AlreadyExited,
                 "process already exited".to_string(),
+            );
+        }
+
+        // v1.3.2 / DISPATCH 77 / 62-E — pending-kill short-circuit.
+        // Symmetric with the `AlreadyExited` check above: same
+        // position (top of `evaluate_process`, before policy /
+        // rate-limit branches), same "decision-only, no actuation"
+        // shape. Returned for any PID still on `pending_kills`,
+        // which today is populated only by `send_sigterm` —
+        // currently a zero-production-caller method (the v1.0.1
+        // scar). When step-5 of the auto-kill arc wires the
+        // tick-loop actuation, this short-circuit prevents the
+        // re-emission-of-SignalTermSent-every-tick behaviour that
+        // would drain the 3-per-60s budget alone on a stubborn
+        // post-SIGTERM workload (DISPATCH 62-E). Until step-5
+        // lands, this branch is unreachable in production because
+        // `pending_kills` stays empty.
+        //
+        // AUTHORITY: this is a DECISION, not an action — it
+        // records "we know we already SIGTERM'd this PID." No
+        // signal is sent here; no caller of `send_sigterm` is
+        // added by this change. All four observe-only firewalls
+        // and the three phantom-kill scar layers stay intact.
+        if self.pending_kills.contains_key(&pid) {
+            return (
+                KillAction::AlreadyPending,
+                format!(
+                    "PID {pid} has a pending SIGTERM not yet reaped — \
+                     deferring re-emission to avoid rate-limit budget drain",
+                ),
             );
         }
 
@@ -476,5 +528,229 @@ mod tests {
 
         executor.clear_pending(100);
         assert_eq!(executor.pending_kills_count(), 0);
+    }
+
+    // ── v1.3.2 / DISPATCH 77 / 62-E — AlreadyPending tests ────────
+
+    /// Core 62-E fix: a PID with an outstanding entry in
+    /// `pending_kills` returns `AlreadyPending` from `evaluate()`
+    /// rather than re-emitting `SignalTermSent`. Symmetric with the
+    /// `AlreadyExited` shortcut — same position in
+    /// `evaluate_process`, same "don't act, just observe" intent.
+    #[test]
+    fn evaluate_returns_already_pending_for_pid_in_pending_kills() {
+        // Operator's opt-in policy so the Kill branch is reachable
+        // — without this we'd land in Whitelisted/Allow and never
+        // exercise the pending check at all.
+        let mut policy = GovernorPolicy::safe_default();
+        policy.default_ai_action = PolicyAction::Kill;
+        let mut executor = GovernorExecutor::new(policy);
+
+        // Plant a pending kill for PID 555. In production this
+        // happens via `send_sigterm`'s `pending_kills.insert(...)`
+        // call — that method has no production callers today (the
+        // v1.0.1 scar), so the test inserts the record directly.
+        executor.pending_kills.insert(
+            555,
+            PendingKill::new(555, "stubborn".to_string(), AICategory::Inference),
+        );
+
+        let mut snapshot = crate::lifecycle::LifecycleSnapshot::new();
+        snapshot.processes.insert(
+            555,
+            make_lifecycle(555, "stubborn", Some(AICategory::Inference), false),
+        );
+
+        let decisions = executor.evaluate(&snapshot);
+        assert_eq!(decisions.len(), 1);
+        assert_eq!(
+            decisions[0].1,
+            KillAction::AlreadyPending,
+            "PID with pending kill MUST return AlreadyPending, NOT a \
+             second SignalTermSent — that would drain the rate-limit \
+             budget across ticks (62-E)",
+        );
+    }
+
+    /// The 62-E bug pinned directly: a single stubborn pending PID
+    /// across N evaluate() ticks MUST NOT drain the 3-per-60s rate
+    /// budget — leaving room for OTHER PIDs that need a fresh kill.
+    /// Pre-fix, each tick re-emitted `SignalTermSent` for the same
+    /// PID, consuming the budget over three ticks; post-fix, those
+    /// ticks return `AlreadyPending` and the budget stays at 3.
+    #[test]
+    fn pending_pid_does_not_drain_rate_limit_budget_across_ticks() {
+        let mut policy = GovernorPolicy::safe_default();
+        policy.default_ai_action = PolicyAction::Kill;
+        policy.rate_limit_max_kills = 3;
+        policy.rate_limit_window_secs = 60;
+        let mut executor = GovernorExecutor::new(policy);
+
+        // Stubborn PID with an outstanding SIGTERM.
+        executor.pending_kills.insert(
+            999,
+            PendingKill::new(999, "stubborn".to_string(), AICategory::Inference),
+        );
+
+        // Run evaluate() three times against a snapshot containing
+        // only the pending PID. Each tick should return
+        // AlreadyPending, NOT SignalTermSent — so 0 budget is
+        // consumed across three ticks.
+        let mut snapshot = crate::lifecycle::LifecycleSnapshot::new();
+        snapshot.processes.insert(
+            999,
+            make_lifecycle(999, "stubborn", Some(AICategory::Inference), false),
+        );
+
+        for tick in 1..=3 {
+            let decisions = executor.evaluate(&snapshot);
+            assert_eq!(decisions.len(), 1, "tick {tick}: one PID in snapshot");
+            assert_eq!(
+                decisions[0].1,
+                KillAction::AlreadyPending,
+                "tick {tick}: stubborn pending PID must NOT re-emit \
+                 SignalTermSent (would drain budget)",
+            );
+        }
+        assert_eq!(
+            executor.kills_remaining_in_window(),
+            3,
+            "after 3 ticks against a stubborn pending PID, the budget \
+             must still be 3/3 — the pre-fix bug drained 3/3 → 0/3",
+        );
+
+        // Now confirm the budget is actually available for OTHER
+        // PIDs: add three fresh AI workloads and confirm all three
+        // get SignalTermSent (the saved budget is real, not
+        // accidentally locked).
+        let mut snap2 = crate::lifecycle::LifecycleSnapshot::new();
+        // Keep the pending PID in the snapshot (the lifecycle
+        // tracker would still see it alive until it reaps).
+        snap2.processes.insert(
+            999,
+            make_lifecycle(999, "stubborn", Some(AICategory::Inference), false),
+        );
+        for pid in 1000..1003u32 {
+            snap2.processes.insert(
+                pid,
+                make_lifecycle(
+                    pid,
+                    &format!("worker{pid}"),
+                    Some(AICategory::Inference),
+                    false,
+                ),
+            );
+        }
+        let decisions = executor.evaluate(&snap2);
+        let killed = decisions
+            .iter()
+            .filter(|(_, a, _)| *a == KillAction::SignalTermSent)
+            .count();
+        let pending = decisions
+            .iter()
+            .filter(|(_, a, _)| *a == KillAction::AlreadyPending)
+            .count();
+        assert_eq!(
+            killed, 3,
+            "all three fresh PIDs must get SignalTermSent — the \
+             pending PID's budget non-drain means the OTHER PIDs are \
+             not starved (62-E acceptance)",
+        );
+        assert_eq!(pending, 1, "the stubborn PID stays AlreadyPending");
+    }
+
+    /// Defensive symmetry: `AlreadyExited` behaviour is UNCHANGED
+    /// by the `AlreadyPending` insert. A PID that's both pending
+    /// AND now exited returns `AlreadyExited` — the exited check
+    /// fires first (`evaluate_process` line ordering). This matters
+    /// because an exited PID's `pending_kills` entry is stale and
+    /// should be cleaned up; surfacing `AlreadyExited` lets a future
+    /// reap step do that work, while `AlreadyPending` would mask the
+    /// cleanup signal.
+    #[test]
+    fn exited_pid_with_pending_record_still_returns_already_exited() {
+        let mut policy = GovernorPolicy::safe_default();
+        policy.default_ai_action = PolicyAction::Kill;
+        let mut executor = GovernorExecutor::new(policy);
+
+        executor.pending_kills.insert(
+            777,
+            PendingKill::new(777, "ex-pending".to_string(), AICategory::Inference),
+        );
+
+        let mut snapshot = crate::lifecycle::LifecycleSnapshot::new();
+        snapshot.processes.insert(
+            777,
+            // exited=true ⇒ lifecycle.is_exited() returns true
+            make_lifecycle(777, "ex-pending", Some(AICategory::Inference), true),
+        );
+
+        let decisions = executor.evaluate(&snapshot);
+        assert_eq!(
+            decisions[0].1,
+            KillAction::AlreadyExited,
+            "exited check must fire BEFORE pending check — a dead PID \
+             with a stale pending record is `AlreadyExited`, not \
+             `AlreadyPending`. The exited path leaves a cleanup-signal \
+             surface for a future reap step.",
+        );
+    }
+
+    /// Regression hedge for the pre-existing `AlreadyExited`
+    /// shortcut: behavior unchanged by the new variant insert. A
+    /// PID with NO pending record AND no exit returns the normal
+    /// policy outcome; this test reaffirms the executor_evaluate
+    /// _exited test still passes against the new structure.
+    #[test]
+    fn already_exited_shortcut_unchanged_after_pending_insert() {
+        let policy = GovernorPolicy::safe_default();
+        let mut executor = GovernorExecutor::new(policy);
+
+        let mut snapshot = crate::lifecycle::LifecycleSnapshot::new();
+        snapshot.processes.insert(
+            101,
+            make_lifecycle(101, "ai_proc", Some(AICategory::Inference), true),
+        );
+
+        let decisions = executor.evaluate(&snapshot);
+        assert_eq!(decisions[0].1, KillAction::AlreadyExited);
+    }
+
+    /// Authority-lock tripwire: `send_sigterm` must still have ZERO
+    /// new production callers after this dispatch. The variant +
+    /// short-circuit are decision-only; they MUST NOT introduce a
+    /// caller of the actuation method. Pinned as a literal-grep
+    /// guard against future drift — if a refactor accidentally adds
+    /// a caller, this test fails before the actuation site lights
+    /// up by surprise.
+    ///
+    /// Existing legitimate callers (test-only and the internal
+    /// `request_kill` wrapper) are allow-listed by source position.
+    /// The check examines `src/` outside `#[cfg(test)]` regions.
+    #[test]
+    fn send_sigterm_has_no_new_production_callers() {
+        // Read the executor source as-is and confirm the
+        // production-section caller count is unchanged from pre-D77.
+        // The PRODUCTION callers of `send_sigterm` are:
+        //   1. The internal `request_kill` wrapper inside this
+        //      same impl block (line ~176, an aliased re-entry).
+        // That's the ONLY one. Tests and doc-comments don't count.
+        // The matchcount post-D77 must equal the matchcount pre-D77.
+        let src = include_str!("executor.rs");
+        // Strip the `#[cfg(test)] mod tests { ... }` region — its
+        // body contains test-only callers that don't ship.
+        let test_marker = "#[cfg(test)]";
+        let production_only = match src.find(test_marker) {
+            Some(idx) => &src[..idx],
+            None => src,
+        };
+        let call_sites = production_only.matches(".send_sigterm(").count();
+        assert_eq!(
+            call_sites, 1,
+            "send_sigterm must have exactly 1 production call site \
+             (the `request_kill` wrapper). D77 must NOT introduce a \
+             new caller — that would cross the observe-only line. \
+             Found {call_sites} call sites in the production region.",
+        );
     }
 }

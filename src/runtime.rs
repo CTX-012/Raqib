@@ -1230,6 +1230,15 @@ impl Runtime {
                 KillAction::SignalKillSent => "sigkill".to_string(),
                 KillAction::Whitelisted => "whitelisted".to_string(),
                 KillAction::AlreadyExited => "already_exited".to_string(),
+                // v1.3.2 / DISPATCH 77 / 62-E — sibling of
+                // `already_exited` for the Prometheus exporter's
+                // `kills_by_reason` counter. Currently never
+                // increments in production because `pending_kills`
+                // stays empty until step-5 of the auto-kill arc
+                // wires actuation; reserving the bucket here means
+                // the dashboard renderer doesn't need a separate
+                // update when that lands.
+                KillAction::AlreadyPending => "already_pending".to_string(),
                 KillAction::RateLimited => "rate_limited".to_string(),
                 KillAction::PidReusedAborted => "pid_reused_aborted".to_string(),
                 KillAction::Skipped => format!("skipped:{}", reason),

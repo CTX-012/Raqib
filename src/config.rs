@@ -80,21 +80,49 @@ pub struct Config {
 /// `config_schema_has_no_action_verb_fields` guard. Field names
 /// like `auto_kill`, `action_on_breach`, etc. are CI-rejected by
 /// that test. `auto_actuate` is the canonical name; do not rename.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GovernorConfig {
-    /// Opt-in gate for any future automated actuation surface.
-    /// Default `false` (the v1.0.1 phantom-kill scar — `bool`'s
-    /// `Default::default()` agrees, which is why this struct can
-    /// `#[derive(Default)]`). No code reads this yet; flipping to
-    /// `true` in your TOML today is a no-op. When the future
-    /// actuation site lands, it MUST consult this field AND
-    /// `policy.default_ai_action` AND have `send_sigterm` wired
-    /// before any signal goes out; all three layers must be
-    /// operator-flipped before automated kills can happen. See
-    /// [`Config::validate`] for the cross-layer comment
-    /// pointing forward to where those assertions will live.
+    /// Opt-in gate for the automated actuation surface (DISPATCH 80).
+    /// Default `false` (the v1.0.1 phantom-kill scar). Setting this
+    /// to `true` IS the operator's consent to automated kills —
+    /// when `true`, [`crate::runtime::Runtime::record_governor_audit`]
+    /// walks `state.decisions` for `KillAction::SignalTermSent` and
+    /// calls [`crate::governor::GovernorExecutor::send_sigterm`]
+    /// for any PID whose VRAM breach has persisted at least
+    /// [`Self::kill_sustain_secs`]. Default-OFF means the shipped
+    /// binary is byte-identical to v1.3.2's observe-only behaviour;
+    /// an operator must NAME the verb in their TOML to cross the
+    /// line. Pinned by `default_off_emits_zero_kills` (the headline
+    /// regression guard).
     pub auto_actuate: bool,
+    /// DISPATCH 80 / Q3 — sustain window for the auto-kill path.
+    /// A VRAM-breach must persist at least this many seconds before
+    /// the actuation site fires a SIGTERM. Default **10 s**.
+    ///
+    /// Validated `>= thresholds.alert_sustain_secs` at config load:
+    /// a kill MUST NOT undercut the alert-smoothing window. The
+    /// operator sees the alert first; only sustained breaches
+    /// escalate to kill. A briefly-flashing breach (e.g. a model
+    /// load that spikes VRAM for one tick) must never kill.
+    ///
+    /// Independent of `policy.sigterm_grace_secs` (which gates the
+    /// SIGTERM → SIGKILL escalation, a separate after-kill timer).
+    /// This is the BEFORE-kill timer.
+    pub kill_sustain_secs: u64,
+}
+
+impl Default for GovernorConfig {
+    fn default() -> Self {
+        Self {
+            auto_actuate: false,
+            // DISPATCH 80 / Q3 — 10 s default. Matches the
+            // design-doc text and exceeds the contract's 5 s
+            // ALERT_SUSTAIN_SECS default, so a fresh-install
+            // config validates without operator intervention.
+            kill_sustain_secs: 10,
+        }
+    }
 }
 
 /// v1.3.2 / DISPATCH 57 — per-workload suppression rule.
@@ -515,13 +543,35 @@ impl Config {
         }
         // v1.3.1 / DISPATCH 60 step 2 — `governor.auto_actuate` is a
         // boolean gate; both `true` and `false` are valid syntactic
-        // values. There is no actuation site reading it today, so no
-        // cross-layer invariant assertion fires here. When the future
-        // actuation site lands (DISPATCH 60+ step 5+) it will assert
-        // its own cross-layer prerequisites (`policy.default_ai_action`,
-        // `send_sigterm` wiring) at the actuation site rather than
-        // here, so this validator stays observation-side.
+        // values. The cross-layer invariant that `default_ai_action`
+        // must also be `Kill` for a kill to fire is asserted at the
+        // actuation site (`record_governor_audit`), not here — that
+        // way operators can flip `auto_actuate` and `default_ai_action`
+        // in either order and validate() rejects neither alone.
         let _ = self.governor.auto_actuate;
+
+        // v1.3.2 / DISPATCH 80 / C3 (Q3) — `kill_sustain_secs` must
+        // be >= `alert_sustain_secs`. A kill MUST NOT undercut the
+        // alert-smoothing window: the operator sees the alert first,
+        // only sustained breaches escalate to kill. Comparing against
+        // the resolved alert sustain (config override or contract
+        // default) catches both "missing override" and "operator set
+        // alert higher than kill" misconfigures.
+        let effective_alert_sustain = self
+            .thresholds
+            .alert_sustain_secs
+            .unwrap_or(ux_contract::thresholds::ALERT_SUSTAIN_SECS);
+        if self.governor.kill_sustain_secs < effective_alert_sustain {
+            return Err(ConfigError::Invalid(format!(
+                "governor.kill_sustain_secs ({}) must be >= thresholds.alert_sustain_secs ({}). \
+                 The kill path must never undercut the alert-smoothing window — \
+                 raise governor.kill_sustain_secs to at least {}.",
+                self.governor.kill_sustain_secs,
+                effective_alert_sustain,
+                effective_alert_sustain,
+            )));
+        }
+
         Ok(())
     }
 

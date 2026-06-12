@@ -420,6 +420,21 @@ pub struct Runtime {
     /// `ExitReason::GovernorKill`. (Pre-CAR-17 this also populated
     /// on dry-run "would-fire" entries — dry-run is gone now.)
     governor_killed_pids: HashMap<u32, String>,
+    /// DISPATCH 80 / C3 — per-PID wall-clock instant of the first
+    /// tick at which the PID was observed as VRAM-breaching. The
+    /// `record_governor_audit` actuation site reads this to decide
+    /// whether `(now - first_breached) >= kill_sustain_secs`. A PID
+    /// whose breach clears (no longer in `breaches` with
+    /// `vram_breached=true`) is dropped from the map next tick, so
+    /// a re-emerging breach restarts the sustain window. Bounded by
+    /// concurrent AI workload count (few-dozen max); pruned each
+    /// tick alongside the breach update so it can't drift unbounded.
+    ///
+    /// Honesty: an unmeasured VRAM PID (`vram_pct = None` ⇒
+    /// `vram_breached = false`) never appears here — same
+    /// "absence is not breach" discipline the projection layer
+    /// enforces.
+    breach_since: HashMap<u32, Instant>,
     /// Previous tick's cumulative CPU ticks, per PID, plus the wall-clock
     /// timestamp that reading was taken at. Used to compute cpu_pct as
     /// delta_ticks / CLK_TCK / elapsed_secs × 100.
@@ -553,6 +568,7 @@ impl Runtime {
             pid_to_model_path: HashMap::new(),
             pid_first_seen_at: HashMap::new(),
             governor_killed_pids: HashMap::new(),
+            breach_since: HashMap::new(),
             prev_cpu: HashMap::new(),
             pid_stderr: HashMap::new(),
             clk_tck: read_clk_tck(),
@@ -1240,6 +1256,31 @@ impl Runtime {
         } else {
             Vec::new()
         };
+
+        // DISPATCH 80 / C3 — refresh the per-PID breach-since map
+        // before the actuation site reads it. Two-step update so the
+        // map stays bounded by the currently-breaching PID set:
+        //   1. Insert (or keep) an entry for every breaching PID.
+        //   2. Drop entries whose PID is no longer breaching (clears,
+        //      exits, or VRAM unmeasured this tick).
+        // A breach that clears and re-emerges restarts the window —
+        // an intermittent breach must never accumulate sustain credit.
+        // The update lives here (before `evaluate`) so the sustain
+        // check at the actuation site reads a map already accurate
+        // for THIS tick — including the just-arrived breach (window
+        // = 0 s, will not yet pass the gate).
+        let now_for_sustain = Instant::now();
+        let breaching_pids: std::collections::HashSet<u32> = breaches
+            .iter()
+            .filter(|b| b.vram_breached)
+            .map(|b| b.pid)
+            .collect();
+        for pid in &breaching_pids {
+            self.breach_since.entry(*pid).or_insert(now_for_sustain);
+        }
+        self.breach_since
+            .retain(|pid, _| breaching_pids.contains(pid));
+
         let decisions = self.governor.evaluate(&lifecycle, &breaches);
 
         // Tier 2.3 — count governor decisions by reason, for the
@@ -1478,50 +1519,211 @@ impl Runtime {
         result
     }
 
-    /// Mirror governor (automated) decisions into the audit ring buffer.
-    /// Called once per tick by the loop owner so the UI sees them.
+    /// Walk per-tick governor decisions and — when the operator has
+    /// opted in — actuate them. Called once per tick by the loop
+    /// owner (main.rs / ui/mod.rs) right after `tick()`.
     ///
-    /// v1.0.1 B-NEW-1 / B-NEW-3 — the runtime never wires
-    /// `GovernorExecutor::send_sigterm` to a real `libc::kill`
-    /// call. Pre-v1.0.1 this loop populated `governor_killed_pids`
-    /// and wrote `success: true` audit entries directly from
-    /// `state.decisions` — phantom kills that left a trail without
-    /// actually sending a signal.
+    /// ## DISPATCH 80 — THE LINE CROSSING
     ///
-    /// v1.0.1 closes the gap two ways:
-    ///   * `safe_default()`'s `default_ai_action` flipped from
-    ///     `Kill` to `Allow`, so `state.decisions` carries no kill
-    ///     verbs unless the operator explicitly opts in.
-    ///   * If a future config opts in, this loop stays a no-op
-    ///     for the kill-verb branches — audit entries are now
-    ///     written only when `send_sigterm` is wired AND succeeds.
-    ///     The matched `kill_action` is kept for the v1.x+ wiring
-    ///     target so when the path lights up the audit shape is
-    ///     already correct.
+    /// This function is where the v1.0.1 phantom-kill scar's
+    /// **layer 2** (severed tick path) and **layer 3** (audit
+    /// silence) come down — gated. **Layer 1** (`default_ai_action
+    /// = Allow` at `policy.rs:59`) is UNTOUCHED. Even with this
+    /// function fully wired, an out-of-the-box install fires zero
+    /// kills because:
     ///
-    /// Manual kills via `Runtime::manual_kill` continue to write
-    /// audit entries with real success/failure — they go through
-    /// `ManualKiller::kill_sigterm` which actually calls
-    /// `libc::kill` and reports the OS result.
+    ///   * Layer 1 (default Allow) ⇒ `state.decisions` carries no
+    ///     `SignalTermSent` verbs ⇒ the loop body has nothing to act
+    ///     on. Pinned by
+    ///     `default_allow_policy_emits_no_signaltermsent_even_with_breaches`.
+    ///   * Layer 2 (this gate) ⇒ even if Layer 1 were flipped,
+    ///     `config.governor.auto_actuate` defaults `false` ⇒ early
+    ///     return below ⇒ byte-identical to v1.3.2 observe-only.
+    ///     Pinned by [`tests::default_off_emits_zero_kills`] — the
+    ///     headline regression guard.
+    ///
+    /// TWO independent operator opt-ins are required for ANY kill:
+    /// `policy.default_ai_action = Kill` (or a per-workload Kill
+    /// blacklist hit) AND `governor.auto_actuate = true`. Removing
+    /// EITHER prevents kills. Pinned by
+    /// [`tests::two_gate_invariant_holds`].
+    ///
+    /// ## Sustain (Q3)
+    ///
+    /// A SignalTermSent decision only actuates when the PID has
+    /// been observed as VRAM-breaching for at least
+    /// `config.governor.kill_sustain_secs` (default 10 s,
+    /// validated `>= alert_sustain_secs`). The breach-since map is
+    /// refreshed in `tick()` BEFORE this runs, so a freshly-arriving
+    /// breach has `(now - since) ≈ 0` and is held until sustained.
+    ///
+    /// ## PID-reuse guard
+    ///
+    /// The actuation calls
+    /// [`crate::governor::GovernorExecutor::send_sigterm`], which
+    /// captures `pidfd_open` + `/proc/<pid>/stat` starttime BEFORE
+    /// sending SIGTERM — the v1.0.1 protection (TEST.md G.1.11). The
+    /// subsequent SIGKILL escalation (`execute_after_grace`) checks
+    /// the captured identity and aborts when it no longer matches.
+    /// This actuation goes THROUGH that guard, not around it.
+    ///
+    /// ## Web is OUT
+    ///
+    /// The actuation lives here (tick-loop, owning `&mut Runtime`),
+    /// per the standing network-never-in-safety-path lock. The web
+    /// thread does NOT drive kills; the web companion remains a
+    /// policy editor (writes config TOML; this loop reads it). The
+    /// observe-only firewalls 1/2/4 stay intact; firewall 3 (config
+    /// schema) is unaffected because `kill_sustain_secs` is a
+    /// duration knob, not an action verb.
+    ///
+    /// ## Audit
+    ///
+    /// Successful actuations mirror into `state.audit` with
+    /// `KillSource::Automated`, persist via `audit_writer` when
+    /// configured, and populate `governor_killed_pids` so the
+    /// eventual exit is classified `ExitReason::GovernorKill`
+    /// (DISPATCH 70 manual-kill bridge — same path, automated
+    /// source). Failures (ESRCH, EPERM) record `success=false`
+    /// audit entries but do NOT pre-tag the PID — same discipline
+    /// as `manual_kill`.
     pub fn record_governor_audit(&mut self) {
-        for (pid, action, _reason) in &self.state.decisions {
-            let kill_action = match action {
-                KillAction::SignalTermSent => Some(ManualKillAction::SendSigterm),
-                KillAction::SignalKillSent => Some(ManualKillAction::SendSigkill),
+        // GATE 1 — operator opt-in. Default false ⇒ no-op. This
+        // is THE invariant pinned by `default_off_emits_zero_kills`:
+        // when this branch returns, ZERO `libc::kill` syscalls fire
+        // from this function, regardless of `state.decisions` shape.
+        // Out-of-the-box installs MUST take this branch — that's
+        // what makes shipping this dispatch safe.
+        if !self.config.governor.auto_actuate {
+            return;
+        }
+
+        // From here on, the operator has CONSENTED to automated
+        // kills. Anything below that fires a signal is intended.
+        let kill_sustain = std::time::Duration::from_secs(self.config.governor.kill_sustain_secs);
+        let now = Instant::now();
+        let audit_history = self.config.runtime.audit_history;
+
+        // Clone the (pid, action, reason) triples we need to act on
+        // so the iteration doesn't borrow `self.state.decisions`
+        // immutably while the loop body mutates `state.audit` /
+        // `governor_killed_pids` / `governor`. The clone is cheap —
+        // few-dozen entries at most per tick.
+        let candidates: Vec<(u32, String)> = self
+            .state
+            .decisions
+            .iter()
+            .filter_map(|(pid, action, reason)| match action {
+                KillAction::SignalTermSent => Some((*pid, reason.clone())),
                 _ => None,
-            };
-            let Some(_kill_action) = kill_action else {
+            })
+            .collect();
+
+        for (pid, reason) in candidates {
+            // GATE 2 — sustain. A SignalTermSent decision is the
+            // governor's "this PID is breaching AND policy says
+            // kill," but a momentary breach (e.g. model-load VRAM
+            // spike) must never fire. Hold for `kill_sustain_secs`.
+            let Some(&since) = self.breach_since.get(&pid) else {
+                // No breach-since row: either the breach JUST appeared
+                // (insert ran in tick() before decisions; first-seen
+                // is `now`) and now.duration_since(now) = 0 < sustain,
+                // OR the projection layer didn't surface a breach this
+                // tick (race; possible if decisions and breaches drift).
+                // Either way: do not kill.
+                tracing::warn!(
+                    pid,
+                    "auto_actuate: SignalTermSent decision lacks a breach-since \
+                     entry; skipping (sustain gate not satisfied)"
+                );
                 continue;
             };
-            // v1.0.1 B-NEW-1 — intentional gap. See doc-comment.
-            // `governor_killed_pids` only gets populated when an
-            // actual `send_sigterm` call succeeds; that wiring lives
-            // in a future minor release. Until then the path is a
-            // no-op for kill verbs (Allow → no decisions, Kill +
-            // unwired send → no audit). Pid var stays as `_pid` to
-            // signal "we know this is the candidate but we are
-            // intentionally NOT recording an unrealised kill."
-            let _ = pid;
+            let observed_for = now.saturating_duration_since(since);
+            if observed_for < kill_sustain {
+                tracing::debug!(
+                    pid,
+                    observed_secs = observed_for.as_secs(),
+                    sustain_secs = kill_sustain.as_secs(),
+                    "auto_actuate: holding for sustain"
+                );
+                continue;
+            }
+
+            // Resolve the workload identity for the audit entry.
+            // The annotated set is the authoritative per-PID source
+            // for category + name; an annotated row exists for
+            // every PID `evaluate()` saw (same upstream feed).
+            let (name, category) = match self
+                .state
+                .annotated
+                .iter()
+                .find(|a| a.pid == pid)
+            {
+                Some(a) => (a.name.clone(), Some(a.category)),
+                None => {
+                    tracing::warn!(
+                        pid,
+                        "auto_actuate: SignalTermSent decision for PID with no \
+                         annotated row; skipping"
+                    );
+                    continue;
+                }
+            };
+
+            tracing::warn!(
+                pid,
+                name = %name,
+                reason = %reason,
+                "auto_actuate: firing SIGTERM (operator opted in via \
+                 governor.auto_actuate = true)"
+            );
+
+            // THE ACTUATION. send_sigterm captures pidfd + starttime
+            // BEFORE the libc::kill call (PID-reuse guard, v1.0.1).
+            let kill_result = self
+                .governor
+                .send_sigterm(pid, name.clone(), category.unwrap_or(crate::model::AICategory::Inference));
+
+            let entry = match &kill_result {
+                Ok(()) => AuditLogEntry::automated_success(
+                    ManualKillAction::SendSigterm,
+                    pid,
+                    name.clone(),
+                    category,
+                    reason.clone(),
+                ),
+                Err(e) => AuditLogEntry::automated_failure(
+                    ManualKillAction::SendSigterm,
+                    pid,
+                    name.clone(),
+                    category,
+                    reason.clone(),
+                    e.to_string(),
+                ),
+            };
+
+            // Persist before pushing into the in-memory ring so a
+            // crash between the two leaves the durable trail intact.
+            if let Some(w) = &self.audit_writer
+                && let Err(e) = w.append(&entry)
+            {
+                tracing::warn!(error = %e, "failed to persist automated-kill audit entry");
+            }
+
+            // Populate governor_killed_pids ONLY on success — same
+            // discipline as `manual_kill`. A failed kill must not
+            // pre-tag the PID; if the OS later assigns the PID to
+            // an unrelated process before the lifecycle reaper
+            // notices, the stale entry would mis-attribute that
+            // process's exit as a governor kill (DISPATCH 70).
+            if entry.success {
+                self.governor_killed_pids.insert(pid, reason.clone());
+            }
+
+            self.state.audit.push_back(entry);
+            while self.state.audit.len() > audit_history {
+                self.state.audit.pop_front();
+            }
         }
     }
 }
@@ -1920,6 +2122,361 @@ fn parse_used_gpu_memory_debug(s: &str) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ─────────────────────────────────────────────────────────────
+    // DISPATCH 80 — auto-actuate (THE LINE CROSSING) test suite.
+    //
+    // The headline regression guard is `default_off_emits_zero_kills`.
+    // Read first; the others nail down individual gates around it.
+    // ─────────────────────────────────────────────────────────────
+
+    /// Build a Runtime whose `state.decisions` and `state.annotated`
+    /// look as if `tick()` just produced one `SignalTermSent` entry
+    /// for `pid` (matching `name`, AICategory::Inference). The
+    /// breach-since map is seeded with `breached_at_offset` ago so
+    /// callers can choose "just-arrived" (sustain not yet met) or
+    /// "long sustained" (sustain easily met).
+    fn rt_with_signaltermsent_decision(
+        cfg: Config,
+        pid: u32,
+        name: &str,
+        breached_at_offset: std::time::Duration,
+    ) -> Runtime {
+        let mut rt = Runtime::new(cfg)
+            .expect("Runtime::new must succeed with provided config");
+        rt.state.annotated.push(AnnotatedProcess {
+            pid,
+            name: name.into(),
+            category: crate::model::AICategory::Inference,
+            workload_category: crate::model::WorkloadCategory::Unknown,
+            evidence: String::new(),
+            model_name: None,
+            cpu_pct: 0.0,
+            rss_mb: 0,
+            vram_bytes: None,
+            first_observed_at: Instant::now(),
+        });
+        rt.state.decisions = vec![(
+            pid,
+            crate::governor::KillAction::SignalTermSent,
+            "synthetic breach for D80 test".to_string(),
+        )];
+        let since = Instant::now() - breached_at_offset;
+        rt.breach_since.insert(pid, since);
+        rt
+    }
+
+    /// THE HEADLINE: when `auto_actuate` defaults to `false`, the
+    /// actuation site is a no-op even when EVERYTHING ELSE points to
+    /// "kill this PID." This pins layer 2 of the v1.0.1 phantom-kill
+    /// scar: the operator must NAME the verb. Failing this test
+    /// means a shipped binary could auto-kill out-of-the-box —
+    /// the exact regression v1.0.1 closed.
+    #[test]
+    fn default_off_emits_zero_kills() {
+        let cfg = Config::default();
+        // Sanity: the default really is off. If a future commit
+        // flips this, the dispatch's safety stance is broken at the
+        // schema layer, not the runtime layer — catch it loudly.
+        assert!(
+            !cfg.governor.auto_actuate,
+            "Config::default().governor.auto_actuate MUST be false. \
+             Flipping the default ships auto-kill on a fresh install."
+        );
+
+        // Use a fake PID that's definitely not running so any
+        // accidental kill attempt would surface as ESRCH (which we'd
+        // also detect, but the gate must short-circuit BEFORE that).
+        let pid = 1_000_000_001u32;
+        let mut rt = rt_with_signaltermsent_decision(
+            cfg,
+            pid,
+            "synthetic-llm",
+            std::time::Duration::from_secs(3600), // long-sustained
+        );
+
+        let audit_before = rt.state.audit.len();
+        let killed_before = rt.governor_killed_pids.contains_key(&pid);
+        rt.record_governor_audit();
+        let audit_after = rt.state.audit.len();
+        let killed_after = rt.governor_killed_pids.contains_key(&pid);
+
+        assert_eq!(
+            audit_after, audit_before,
+            "default-off MUST add ZERO audit entries — the actuation \
+             site is gated on auto_actuate, which is false here. Even \
+             with state.decisions carrying SignalTermSent, breach-since \
+             long-sustained, and an annotated row matching the PID, \
+             nothing should fire. v1.0.1 scar layer 2 holds.",
+        );
+        assert!(
+            !killed_after && !killed_before,
+            "default-off MUST NOT populate governor_killed_pids: would \
+             pre-tag a never-killed PID for ExitReason::GovernorKill \
+             at next drain. PID {pid} appeared.",
+        );
+    }
+
+    /// Two-gate invariant. Even with `auto_actuate = true`, a
+    /// state.decisions list with NO SignalTermSent entries (the
+    /// shape the default Allow policy produces — layer 1 of the
+    /// scar) yields zero actuations. Removing ONE gate without the
+    /// other must still prevent kills.
+    #[test]
+    fn two_gate_invariant_holds_when_policy_is_allow() {
+        let mut cfg = Config::default();
+        cfg.governor.auto_actuate = true; // operator-opt-in
+
+        // No SignalTermSent entries in state.decisions — this is
+        // what the default Allow policy produces in production
+        // (`default_allow_policy_emits_no_signaltermsent_even_with_breaches`
+        // pins that at the policy layer). Here we simulate the
+        // post-eval shape directly.
+        let mut rt = Runtime::new(cfg).expect("Runtime::new with auto_actuate=true must succeed");
+        rt.state.annotated.push(AnnotatedProcess {
+            pid: 4321,
+            name: "allow-policy-ai".into(),
+            category: crate::model::AICategory::Inference,
+            workload_category: crate::model::WorkloadCategory::Unknown,
+            evidence: String::new(),
+            model_name: None,
+            cpu_pct: 0.0,
+            rss_mb: 0,
+            vram_bytes: None,
+            first_observed_at: Instant::now(),
+        });
+        // state.decisions has nothing matching SignalTermSent (here:
+        // empty, but Whitelisted/Skipped/AlreadyExited would all
+        // behave the same).
+        rt.state.decisions = vec![(
+            4321,
+            crate::governor::KillAction::Whitelisted,
+            "allowed by policy".to_string(),
+        )];
+        // Even if breach-since said sustained:
+        rt.breach_since
+            .insert(4321, Instant::now() - std::time::Duration::from_secs(3600));
+
+        rt.record_governor_audit();
+        assert_eq!(
+            rt.state.audit.len(),
+            0,
+            "two-gate invariant: auto_actuate=true alone is not \
+             enough — a kill-deciding policy must also fire \
+             SignalTermSent. With state.decisions carrying only \
+             Whitelisted, no actuation should occur.",
+        );
+        assert!(
+            rt.governor_killed_pids.is_empty(),
+            "no governor_killed_pids entry without a SignalTermSent decision",
+        );
+    }
+
+    /// Sustain gate (C3). With `auto_actuate=true` and a real
+    /// SignalTermSent decision, but the breach observed only a
+    /// fraction of a second ago, the kill MUST NOT fire. The
+    /// `kill_sustain_secs` default is 10 s; we offset by 0 s.
+    #[test]
+    fn sustain_gate_blocks_unsustained_breach() {
+        let mut cfg = Config::default();
+        cfg.governor.auto_actuate = true;
+        assert!(
+            cfg.governor.kill_sustain_secs >= 5,
+            "kill_sustain_secs default must comfortably exceed the \
+             test's 0 s offset; got {}",
+            cfg.governor.kill_sustain_secs,
+        );
+
+        let pid = 1_000_000_002u32;
+        let mut rt = rt_with_signaltermsent_decision(
+            cfg,
+            pid,
+            "just-arrived-breach",
+            std::time::Duration::from_secs(0), // freshly arrived
+        );
+
+        rt.record_governor_audit();
+        assert_eq!(
+            rt.state.audit.len(),
+            0,
+            "sustain gate: a freshly-arrived breach must NOT fire a \
+             kill. The actuation site holds for kill_sustain_secs \
+             (default 10 s) before signalling.",
+        );
+        assert!(
+            rt.governor_killed_pids.is_empty(),
+            "governor_killed_pids must stay empty when sustain gate blocks",
+        );
+    }
+
+    /// Missing-breach-row guard. A SignalTermSent decision whose PID
+    /// has NO breach-since entry (race: decisions and breaches drift
+    /// across the tick boundary) MUST NOT fire. The actuation site
+    /// treats absence as "sustain unknown ⇒ refuse" — safer than
+    /// silently treating absence as sustained.
+    #[test]
+    fn missing_breach_since_blocks_actuation() {
+        let mut cfg = Config::default();
+        cfg.governor.auto_actuate = true;
+
+        let pid = 1_000_000_003u32;
+        let mut rt = Runtime::new(cfg).expect("Runtime::new");
+        rt.state.annotated.push(AnnotatedProcess {
+            pid,
+            name: "no-breach-row".into(),
+            category: crate::model::AICategory::Inference,
+            workload_category: crate::model::WorkloadCategory::Unknown,
+            evidence: String::new(),
+            model_name: None,
+            cpu_pct: 0.0,
+            rss_mb: 0,
+            vram_bytes: None,
+            first_observed_at: Instant::now(),
+        });
+        rt.state.decisions = vec![(
+            pid,
+            crate::governor::KillAction::SignalTermSent,
+            "decision without matching breach-since row".to_string(),
+        )];
+        // No breach_since.insert — that's the test condition.
+
+        rt.record_governor_audit();
+        assert_eq!(
+            rt.state.audit.len(),
+            0,
+            "missing breach-since row MUST block the kill (safe default \
+             on the unmeasured-sustain case, same discipline as \
+             vram_pct=None ⇒ vram_breached=false in the projection)."
+        );
+    }
+
+    /// OPT-IN actuation path: with both gates open and the sustain
+    /// satisfied, the actuation site DOES reach `send_sigterm` and
+    /// records an audit entry. We aim the signal at a non-existent
+    /// PID so `libc::kill` returns ESRCH (no real process dies) but
+    /// the wiring is exercised end-to-end: the failure is recorded
+    /// as `KillSource::Automated`, `success=false`, and the PID is
+    /// NOT pre-tagged for governor-kill attribution (mirrors the
+    /// `manual_kill` failure discipline).
+    #[test]
+    fn opt_in_actuation_reaches_send_sigterm_and_records_automated_audit() {
+        let mut cfg = Config::default();
+        cfg.governor.auto_actuate = true;
+
+        let pid = 1_000_000_004u32; // well above any real /proc PID
+        let mut rt = rt_with_signaltermsent_decision(
+            cfg,
+            pid,
+            "synthetic-target",
+            std::time::Duration::from_secs(3600),
+        );
+
+        rt.record_governor_audit();
+
+        assert_eq!(
+            rt.state.audit.len(),
+            1,
+            "opt-in path: exactly ONE audit entry written for the \
+             SignalTermSent decision; got {}",
+            rt.state.audit.len()
+        );
+        let entry = rt.state.audit.front().expect("audit entry");
+        assert_eq!(
+            entry.source,
+            crate::governor::manual::KillSource::Automated,
+            "audit entry source MUST be Automated (not Manual): the \
+             new automated path uses AuditLogEntry::automated_* \
+             constructors that hardcode KillSource::Automated."
+        );
+        assert_eq!(entry.pid, pid);
+        assert_eq!(
+            entry.action,
+            crate::governor::manual::ManualKillAction::SendSigterm,
+        );
+        // ESRCH → failure entry — but the wiring proves reach.
+        assert!(
+            !entry.success,
+            "expected ESRCH failure on a non-existent PID; the test \
+             host might have a process at PID {pid}, or the kernel's \
+             pid_max is unexpectedly high. error_msg={:?}",
+            entry.error_msg,
+        );
+        assert!(
+            !rt.governor_killed_pids.contains_key(&pid),
+            "a FAILED automated kill MUST NOT populate \
+             governor_killed_pids — the failed-tag discipline must \
+             mirror manual_kill's. Found {pid} pre-tagged.",
+        );
+    }
+
+    /// Config validation: `kill_sustain_secs` < `alert_sustain_secs`
+    /// must be rejected at load time with an operator-actionable
+    /// error message. Pinned because silent acceptance would let the
+    /// kill path undercut the alert window — the operator sees the
+    /// alert AFTER (or simultaneously with) the kill, breaking the
+    /// "alert first, kill only if sustained" stance.
+    #[test]
+    fn kill_sustain_below_alert_sustain_is_rejected() {
+        let mut cfg = Config::default();
+        cfg.thresholds.alert_sustain_secs = Some(30);
+        cfg.governor.kill_sustain_secs = 10; // < 30, must reject
+
+        let err = cfg.validate().expect_err("validate must reject");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("kill_sustain_secs") && msg.contains("alert_sustain_secs"),
+            "rejection message must name both fields so the operator \
+             can act on it; got: {msg}"
+        );
+        assert!(
+            msg.contains("10") && msg.contains("30"),
+            "rejection message must include both values so the \
+             operator sees what to change; got: {msg}",
+        );
+    }
+
+    /// Twin to the above: equal values validate, and a kill above
+    /// the alert validates. The validator's boundary is `>=`, NOT
+    /// `>`, matching the design (Q3: "validated >=
+    /// alert_sustain_secs").
+    #[test]
+    fn kill_sustain_at_or_above_alert_sustain_validates() {
+        let mut cfg = Config::default();
+        cfg.thresholds.alert_sustain_secs = Some(7);
+        cfg.governor.kill_sustain_secs = 7;
+        cfg.validate().expect("equal values must validate");
+
+        cfg.governor.kill_sustain_secs = 8;
+        cfg.validate().expect("kill > alert must validate");
+
+        cfg.governor.kill_sustain_secs = 600;
+        cfg.validate().expect("kill at upper bound must validate");
+    }
+
+    /// Default config validates without operator intervention — a
+    /// fresh install must not require the operator to set
+    /// `kill_sustain_secs` just to launch the binary. The default
+    /// (10 s) exceeds the contract's `ALERT_SUSTAIN_SECS` (5 s) so
+    /// this passes; if the contract ever raises the alert sustain
+    /// above 10 s, the GovernorConfig default must move in
+    /// lockstep — this test fires loudly when that drift happens.
+    #[test]
+    fn default_config_validates_with_default_sustains() {
+        let cfg = Config::default();
+        cfg.validate().expect(
+            "Config::default() must validate: kill_sustain_secs \
+             default (10) >= ALERT_SUSTAIN_SECS contract default (5)",
+        );
+        assert!(
+            cfg.governor.kill_sustain_secs >= ux_contract::thresholds::ALERT_SUSTAIN_SECS,
+            "GovernorConfig::default().kill_sustain_secs ({}) MUST \
+             stay >= ux_contract::thresholds::ALERT_SUSTAIN_SECS ({}). \
+             If the contract raised the alert default, raise this \
+             default to match.",
+            cfg.governor.kill_sustain_secs,
+            ux_contract::thresholds::ALERT_SUSTAIN_SECS,
+        );
+    }
 
     #[test]
     fn tick_populates_state() {

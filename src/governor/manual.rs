@@ -93,6 +93,62 @@ impl AuditLogEntry {
         }
     }
 
+    /// DISPATCH 80 / C4 — audit constructor for the automated
+    /// (governor-driven) kill path. Sets `source = KillSource::Automated`
+    /// so the audit trail distinguishes operator-initiated kills
+    /// (via `Runtime::manual_kill`) from auto-actuation kills (via
+    /// `Runtime::record_governor_audit` when `governor.auto_actuate
+    /// == true`). Display surfaces (TUI audit panel, JSONL trail)
+    /// already render the source field — the new variant lights up
+    /// existing UI without code changes there.
+    pub fn automated_success(
+        action: ManualKillAction,
+        pid: u32,
+        name: String,
+        category: Option<AICategory>,
+        reason: String,
+    ) -> Self {
+        Self {
+            timestamp: Utc::now(),
+            action,
+            source: KillSource::Automated,
+            pid,
+            process_name: name,
+            category,
+            reason,
+            success: true,
+            error_msg: None,
+        }
+    }
+
+    /// DISPATCH 80 / C4 — audit constructor for an automated kill
+    /// attempt that the OS rejected (ESRCH, EPERM, …). The PID
+    /// stays OFF `governor_killed_pids` (the failed kill must not
+    /// pre-tag the eventual exit as a governor kill — see
+    /// `runtime::manual_kill`'s analogous guard) but the audit
+    /// trail still records the attempt so operators can correlate
+    /// with system logs.
+    pub fn automated_failure(
+        action: ManualKillAction,
+        pid: u32,
+        name: String,
+        category: Option<AICategory>,
+        reason: String,
+        error: String,
+    ) -> Self {
+        Self {
+            timestamp: Utc::now(),
+            action,
+            source: KillSource::Automated,
+            pid,
+            process_name: name,
+            category,
+            reason,
+            success: false,
+            error_msg: Some(error),
+        }
+    }
+
     pub fn to_audit_line(&self) -> String {
         let action_str = match self.action {
             ManualKillAction::SendSigterm => "SIGTERM",

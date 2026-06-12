@@ -48,9 +48,9 @@ Steps **1–2 are observe-only-safe and fire now** (DISPATCH 60). Steps **3+ are
 | 2 | `governor.auto_actuate: bool` config field, **default false**; no actuation code | config | no |
 | 3 | Widen `evaluate()` to accept a **threshold-breach projection** (M4 option b), **VRAM%-only** | `governor/`, runtime projection | no |
 | 4 | Deterministic **lowest-PID** sort in the candidate ordering | `governor/` | no |
-| 5 | **Tick-loop actuation site** — walk `decisions`, call `send_sigterm` **only if `auto_actuate`**, mirror `state.audit` with `KillSource::Automated` | `runtime.rs` | **yes (gated, default-off)** |
+| 5 | ✅ DISPATCH 80 — **Tick-loop actuation site** lives at `runtime::Runtime::record_governor_audit`; walks `state.decisions`, calls `send_sigterm` only if `governor.auto_actuate`, mirrors `state.audit` with `KillSource::Automated`, populates `governor_killed_pids` for exit attribution. Workspace-wide tripwire (`send_sigterm_actuation_site_is_auto_actuate_gated`) pins **exactly one** runtime caller AND its `auto_actuate` proximity. Default-OFF guard `default_off_emits_zero_kills` pins layer 2 of the v1.0.1 scar. | `runtime.rs` | **yes (gated, default-off)** |
 | 6 | `execute_after_grace` SIGKILL escalation in the same loop, gated identically | `runtime.rs` | yes (gated) |
-| 7 | `kill_sustain_secs` field (Q3), validated ≥ `alert_sustain_secs` | config, `governor/` | yes (gated) |
+| 7 | ✅ DISPATCH 80 (landed with step-5) — `governor.kill_sustain_secs` (default 10 s), validated ≥ `thresholds.alert_sustain_secs` at config load; actuation site reads per-PID `breach_since` (refreshed in `tick()`) and holds for the window. Q3 sustain gate is live behind `auto_actuate`. | config, `runtime.rs` | yes (gated) |
 | 8 | (follow-up) thermal + RAM triggers (Q6) | projection, `governor/` | yes (gated) |
 | 9 | (v-next) `LiveTelemetry::last_active_at` + least-recent-activity tiebreaker (Q4) | runtime, `governor/` | yes (gated) |
 

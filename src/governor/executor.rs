@@ -1218,26 +1218,28 @@ mod tests {
         );
     }
 
-    /// Authority-lock tripwire: `send_sigterm` must still have ZERO
-    /// new production callers after this dispatch. The variant +
-    /// short-circuit are decision-only; they MUST NOT introduce a
-    /// caller of the actuation method. Pinned as a literal-grep
-    /// guard against future drift — if a refactor accidentally adds
-    /// a caller, this test fails before the actuation site lights
-    /// up by surprise.
+    /// Authority-lock tripwire: in-file caller-count guard for
+    /// `send_sigterm` inside `executor.rs`. D80 deliberately added
+    /// one production caller — but in `runtime.rs`, NOT here. The
+    /// executor-internal count must STAY at 1: the
+    /// `request_kill` wrapper (line ~176), an aliased re-entry
+    /// preserved for `tests/governor_pid_reuse.rs`. If a future
+    /// commit adds a SECOND caller inside `executor.rs`, this test
+    /// fires — that's almost certainly a refactor that broke the
+    /// single-actuation-site invariant the dispatch maintains.
     ///
-    /// Existing legitimate callers (test-only and the internal
-    /// `request_kill` wrapper) are allow-listed by source position.
-    /// The check examines `src/` outside `#[cfg(test)]` regions.
+    /// The workspace-wide caller-count invariant ("exactly 2 total,
+    /// one of them gated on `auto_actuate`") lives in
+    /// [`tests::send_sigterm_actuation_site_is_auto_actuate_gated`]
+    /// — it reads `runtime.rs` too, so it catches the more
+    /// dangerous drift (an UNGATED caller appearing anywhere).
     #[test]
-    fn send_sigterm_has_no_new_production_callers() {
-        // Read the executor source as-is and confirm the
-        // production-section caller count is unchanged from pre-D77.
-        // The PRODUCTION callers of `send_sigterm` are:
+    fn send_sigterm_executor_internal_caller_count_unchanged() {
+        // Read this file as-is and confirm the production-section
+        // caller count is unchanged from pre-D77:
         //   1. The internal `request_kill` wrapper inside this
         //      same impl block (line ~176, an aliased re-entry).
-        // That's the ONLY one. Tests and doc-comments don't count.
-        // The matchcount post-D77 must equal the matchcount pre-D77.
+        // Tests and doc-comments don't count.
         let src = include_str!("executor.rs");
         // Strip the `#[cfg(test)] mod tests { ... }` region — its
         // body contains test-only callers that don't ship.
@@ -1249,10 +1251,101 @@ mod tests {
         let call_sites = production_only.matches(".send_sigterm(").count();
         assert_eq!(
             call_sites, 1,
-            "send_sigterm must have exactly 1 production call site \
-             (the `request_kill` wrapper). D77 must NOT introduce a \
-             new caller — that would cross the observe-only line. \
-             Found {call_sites} call sites in the production region.",
+            "send_sigterm executor-internal call sites must equal 1 \
+             (the `request_kill` wrapper). D80's actuation caller \
+             belongs in `runtime.rs`, NOT here. Found {call_sites} \
+             sites in the production region of executor.rs.",
+        );
+    }
+
+    /// DISPATCH 80 — workspace-wide actuation guard. Reads BOTH
+    /// `executor.rs` and `runtime.rs` (the only production files
+    /// where a caller could live) and pins:
+    ///
+    ///   1. Total production callers = exactly 2.
+    ///      - `executor.rs::request_kill` (internal wrapper).
+    ///      - `runtime.rs::record_governor_audit` (the new gated
+    ///        actuation site).
+    ///   2. The `runtime.rs` caller is lexically preceded within
+    ///      2048 chars by an `auto_actuate` reference — the
+    ///      opt-in gate. If a future refactor accidentally moves
+    ///      the gate too far above the call, OR removes it
+    ///      entirely, this fires before the default-off invariant
+    ///      breaks in production.
+    ///
+    /// This is the CONVERTED form of the pre-D80 tripwire
+    /// `send_sigterm_has_no_new_production_callers`. The pre-D80
+    /// version asserted ZERO non-wrapper callers; D80 deliberately
+    /// adds ONE gated caller, so the test was updated rather than
+    /// deleted (per the dispatch's explicit instruction). The
+    /// guarantee shifts from "no production callers" to "exactly
+    /// one production caller, and it is auto_actuate-gated."
+    #[test]
+    fn send_sigterm_actuation_site_is_auto_actuate_gated() {
+        use std::fs;
+        use std::path::PathBuf;
+
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let test_marker = "#[cfg(test)]";
+
+        let read_production = |rel: &str| -> String {
+            let path = root.join(rel);
+            let src = fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+            match src.find(test_marker) {
+                Some(idx) => src[..idx].to_string(),
+                None => src,
+            }
+        };
+
+        let executor = read_production("src/governor/executor.rs");
+        let runtime = read_production("src/runtime.rs");
+        let executor_calls = executor.matches(".send_sigterm(").count();
+        let runtime_calls = runtime.matches(".send_sigterm(").count();
+        let total = executor_calls + runtime_calls;
+
+        assert_eq!(
+            total, 2,
+            "expected exactly TWO production callers of send_sigterm \
+             post-D80: (1) the internal `request_kill` wrapper in \
+             executor.rs (re-entry for tests/governor_pid_reuse.rs) \
+             and (2) the auto_actuate-gated tick-loop actuation site \
+             in runtime.rs::record_governor_audit. Found total={total} \
+             (executor={executor_calls}, runtime={runtime_calls}). \
+             A NEW caller anywhere is suspicious — actuation must \
+             stay funnelled through the gated site.",
+        );
+        assert_eq!(
+            runtime_calls, 1,
+            "runtime.rs must contain EXACTLY ONE call to \
+             .send_sigterm( — the auto_actuate-gated actuation \
+             site. Found {runtime_calls}.",
+        );
+
+        // Pin the gate proximity. The runtime.rs caller MUST be
+        // lexically preceded by an `auto_actuate` reference within
+        // a small window. We look BACKWARDS from the call site
+        // because the function shape is `if !auto_actuate { return; }
+        // ... .send_sigterm(...)` — the gate is the early-return
+        // above the call, anywhere within the same function body.
+        // 2048 chars is comfortably more than this function's
+        // current body but tight enough to catch a refactor that
+        // moves the gate out into a caller (which would leave the
+        // actuation site itself textually ungated).
+        let call_idx = runtime
+            .find(".send_sigterm(")
+            .expect("runtime.rs send_sigterm call must be findable");
+        let window_start = call_idx.saturating_sub(2048);
+        let window = &runtime[window_start..call_idx];
+        assert!(
+            window.contains("auto_actuate"),
+            "the runtime.rs send_sigterm call must be lexically \
+             preceded by an `auto_actuate` reference within 2048 \
+             chars (the opt-in gate). Without that, the default-OFF \
+             invariant is unenforceable by inspection. The gate \
+             pattern is `if !self.config.governor.auto_actuate {{ \
+             return; }}` at the top of the actuation function — \
+             if it has moved or been removed, this fires."
         );
     }
 }

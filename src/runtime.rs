@@ -1219,7 +1219,28 @@ impl Runtime {
             self.pid_first_seen_at.remove(&summary.pid);
         }
 
-        let decisions = self.governor.evaluate(&lifecycle);
+        // v1.3.2 / DISPATCH 78 / step-3 — build the per-tick
+        // threshold-breach projection (Q6 — VRAM%-first) and pass
+        // it into the governor alongside the lifecycle snapshot.
+        // The breach computation mirrors the VRAM-pct logic
+        // `observe_alerts` already uses (runtime.rs:716-721); both
+        // alert and kill surfaces see the same projection.
+        //
+        // Empty-fallback: when no platform snapshot is available
+        // yet (very first tick before the platform thread has
+        // produced one), we project against an empty GPU, which
+        // yields `vram_pct=None` for every PID → no breaches → no
+        // kill decisions. Honest default.
+        let breaches = if let Some(snap) = self.state.last_snapshot.as_ref() {
+            crate::governor::threshold_breach::build_threshold_breaches(
+                &self.state.annotated,
+                &snap.gpu,
+                &self.state.thresholds,
+            )
+        } else {
+            Vec::new()
+        };
+        let decisions = self.governor.evaluate(&lifecycle, &breaches);
 
         // Tier 2.3 — count governor decisions by reason, for the
         // Prometheus exporter. Done before we move `decisions` onto

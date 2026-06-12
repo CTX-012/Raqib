@@ -1,4 +1,5 @@
 use crate::governor::pid_reuse;
+use crate::governor::threshold_breach::ThresholdBreach;
 use crate::governor::{GovernorError, GovernorPolicy, GovernorResult, KillAction, PendingKill};
 use crate::lifecycle::{LifecycleSnapshot, ProcessLifecycle};
 use crate::model::AICategory;
@@ -29,14 +30,37 @@ impl GovernorExecutor {
 
     /// Evaluate all processes and determine actions. Mutable because the
     /// rate limiter records each kill intent against the sliding window.
+    ///
+    /// v1.3.2 / DISPATCH 78 / step-3 — `breaches` is the narrow
+    /// threshold-breach projection (Q6 — VRAM%-first). Built by the
+    /// runtime tick layer via [`crate::governor::threshold_breach::
+    /// build_threshold_breaches`] and passed in as a slice; the
+    /// executor stays decoupled from `&RuntimeState`. A PID with
+    /// no entry in `breaches` is treated as "not breached" (the
+    /// honesty default — absence is not breach). This is the
+    /// narrow-projection contract per DISPATCH 59 M4 option b;
+    /// widening to `&RuntimeState` is explicitly rejected by the
+    /// design (couples the governor to the whole state graph).
+    ///
+    /// AUTHORITY: the projection is a SIGNAL surface, not an
+    /// ACTUATION surface. `evaluate()` still only RETURNS decisions;
+    /// nothing in this function fires a signal. The 3 phantom-kill
+    /// scar layers and 4 observe-only firewalls remain intact.
     pub fn evaluate(
         &mut self,
         lifecycle_snapshot: &LifecycleSnapshot,
+        breaches: &[ThresholdBreach],
     ) -> Vec<(u32, KillAction, String)> {
         self.trim_rate_limit_window();
         let mut decisions = Vec::with_capacity(lifecycle_snapshot.processes.len());
         for (pid, lifecycle) in &lifecycle_snapshot.processes {
-            let (action, reason) = self.evaluate_process(*pid, lifecycle);
+            // Per-PID breach lookup; O(N·M) overall but N and M are
+            // both bounded by the few-dozen-AI-process headcount on
+            // realistic hosts, so a HashMap pre-index would be
+            // premature. If a future profile shows it matters, swap
+            // to a HashMap built once at evaluate() entry.
+            let breach = breaches.iter().find(|b| b.pid == *pid);
+            let (action, reason) = self.evaluate_process(*pid, lifecycle, breach);
             // Record enforced kills against the window so subsequent
             // candidates in the same tick see the budget drop.
             //
@@ -68,10 +92,22 @@ impl GovernorExecutor {
     /// `self.pending_kills`; the pre-bump signature took just
     /// `lifecycle` because the only-AlreadyExited shortcut needed
     /// nothing more than the lifecycle's `is_exited()` predicate.
+    ///
+    /// v1.3.2 / DISPATCH 78 / step-3 — `breach` is the per-PID
+    /// threshold-breach summary. `None` means "no projection row
+    /// for this PID" (e.g. the breach builder hasn't run yet or
+    /// the PID arrived between projection and evaluate). `Some(b)`
+    /// with `b.vram_breached == false` is the explicit
+    /// "measured-but-not-breaching" verdict. Both are treated as
+    /// "no breach" for the kill gate. Only the
+    /// `Some(b) && b.vram_breached` case can yield a kill DECISION,
+    /// and even then only when the policy permits — see the Kill
+    /// branch below for the gate ordering.
     fn evaluate_process(
         &self,
         pid: u32,
         lifecycle: &ProcessLifecycle,
+        breach: Option<&ThresholdBreach>,
     ) -> (KillAction, String) {
         // Already exited: nothing to do
         if lifecycle.is_exited() {
@@ -121,6 +157,39 @@ impl GovernorExecutor {
                 format!("allowed by policy ({})", lifecycle.name),
             ),
             crate::governor::policy::PolicyAction::Kill => {
+                // v1.3.2 / DISPATCH 78 / step-3 — breach gate.
+                // Even when the policy opts INTO Kill, we only
+                // emit a kill decision when the workload is
+                // actually breaching the VRAM% threshold. A PID
+                // with no breach (vram_pct below threshold OR
+                // unmeasured) stays as Skipped: the SIGNAL is
+                // present (policy says kill if needed); the
+                // workload is fine right now.
+                //
+                // Q6 / VRAM%-first: only `vram_breached` gates
+                // today. RAM + thermal breach fields land in step
+                // 8; their absence today is intentional, not an
+                // omission — the design doc lists them as a
+                // follow-up dispatch.
+                //
+                // HONESTY (matches D74/D76 VRAM_UNMEASURED): when
+                // `breach` is `None` (no projection row) OR
+                // `breach.vram_pct` is `None` (unmeasured), the
+                // breach builder sets `vram_breached = false` so
+                // this branch falls through to `Skipped`. NEVER
+                // treat absence-of-measurement as breach.
+                let is_breaching = breach.is_some_and(|b| b.vram_breached);
+                if !is_breaching {
+                    return (
+                        KillAction::Skipped,
+                        format!(
+                            "AI process not breaching VRAM threshold: {} \
+                             (vram_pct={:?})",
+                            lifecycle.name,
+                            breach.and_then(|b| b.vram_pct),
+                        ),
+                    );
+                }
                 if self.rate_limit_exceeded() {
                     (
                         KillAction::RateLimited,
@@ -135,8 +204,10 @@ impl GovernorExecutor {
                     (
                         KillAction::SignalTermSent,
                         format!(
-                            "AI process marked for kill: {:?}",
-                            category.unwrap_or(AICategory::NotAi)
+                            "AI process marked for kill: {:?} \
+                             (vram_breached, vram_pct={:?})",
+                            category.unwrap_or(AICategory::NotAi),
+                            breach.and_then(|b| b.vram_pct),
                         ),
                     )
                 }
@@ -420,7 +491,7 @@ mod tests {
             .processes
             .insert(100, make_lifecycle(100, "bash", None, false));
 
-        let decisions = executor.evaluate(&snapshot);
+        let decisions = executor.evaluate(&snapshot, &[]);
         assert_eq!(decisions.len(), 1);
         assert_eq!(decisions[0].1, KillAction::Whitelisted);
     }
@@ -436,7 +507,7 @@ mod tests {
             make_lifecycle(101, "ai_proc", Some(AICategory::Inference), true),
         );
 
-        let decisions = executor.evaluate(&snapshot);
+        let decisions = executor.evaluate(&snapshot, &[]);
         assert_eq!(decisions.len(), 1);
         assert_eq!(decisions[0].1, KillAction::AlreadyExited);
     }
@@ -467,6 +538,7 @@ mod tests {
         let mut executor = GovernorExecutor::new(policy);
 
         let mut snapshot = crate::lifecycle::LifecycleSnapshot::new();
+        let mut breaches: Vec<ThresholdBreach> = Vec::new();
         for pid in 200..210u32 {
             snapshot.processes.insert(
                 pid,
@@ -477,9 +549,18 @@ mod tests {
                     false,
                 ),
             );
+            // v1.3.2 / DISPATCH 78 — all 10 PIDs are breaching, so
+            // we reach the rate-limit branch. The test is about
+            // the per-window cap; the breach gate is "input" here,
+            // not "subject under test."
+            breaches.push(ThresholdBreach {
+                pid,
+                vram_pct: Some(99.0),
+                vram_breached: true,
+            });
         }
 
-        let decisions = executor.evaluate(&snapshot);
+        let decisions = executor.evaluate(&snapshot, &breaches);
         let killed = decisions
             .iter()
             .filter(|(_, a, _)| *a == KillAction::SignalTermSent)
@@ -503,13 +584,21 @@ mod tests {
         let mut executor = GovernorExecutor::new(policy);
 
         let mut snapshot = crate::lifecycle::LifecycleSnapshot::new();
+        let mut breaches: Vec<ThresholdBreach> = Vec::new();
         for pid in 400..410u32 {
             snapshot.processes.insert(
                 pid,
                 make_lifecycle(pid, &format!("w{pid}"), Some(AICategory::Inference), false),
             );
+            // v1.3.2 / DISPATCH 78 — all 10 breaching so the
+            // unlimited-budget path is reachable.
+            breaches.push(ThresholdBreach {
+                pid,
+                vram_pct: Some(99.0),
+                vram_breached: true,
+            });
         }
-        let decisions = executor.evaluate(&snapshot);
+        let decisions = executor.evaluate(&snapshot, &breaches);
         let killed = decisions
             .iter()
             .filter(|(_, a, _)| *a == KillAction::SignalTermSent)
@@ -561,7 +650,7 @@ mod tests {
             make_lifecycle(555, "stubborn", Some(AICategory::Inference), false),
         );
 
-        let decisions = executor.evaluate(&snapshot);
+        let decisions = executor.evaluate(&snapshot, &[]);
         assert_eq!(decisions.len(), 1);
         assert_eq!(
             decisions[0].1,
@@ -603,7 +692,7 @@ mod tests {
         );
 
         for tick in 1..=3 {
-            let decisions = executor.evaluate(&snapshot);
+            let decisions = executor.evaluate(&snapshot, &[]);
             assert_eq!(decisions.len(), 1, "tick {tick}: one PID in snapshot");
             assert_eq!(
                 decisions[0].1,
@@ -630,6 +719,12 @@ mod tests {
             999,
             make_lifecycle(999, "stubborn", Some(AICategory::Inference), false),
         );
+        let mut breaches2: Vec<ThresholdBreach> = Vec::new();
+        // v1.3.2 / DISPATCH 78 — the 3 fresh PIDs all need a
+        // breach entry to reach the rate-limit path. The stubborn
+        // PID 999 hits the AlreadyPending short-circuit BEFORE the
+        // breach gate, so its breach entry is moot — left out for
+        // clarity.
         for pid in 1000..1003u32 {
             snap2.processes.insert(
                 pid,
@@ -640,8 +735,13 @@ mod tests {
                     false,
                 ),
             );
+            breaches2.push(ThresholdBreach {
+                pid,
+                vram_pct: Some(99.0),
+                vram_breached: true,
+            });
         }
-        let decisions = executor.evaluate(&snap2);
+        let decisions = executor.evaluate(&snap2, &breaches2);
         let killed = decisions
             .iter()
             .filter(|(_, a, _)| *a == KillAction::SignalTermSent)
@@ -685,7 +785,7 @@ mod tests {
             make_lifecycle(777, "ex-pending", Some(AICategory::Inference), true),
         );
 
-        let decisions = executor.evaluate(&snapshot);
+        let decisions = executor.evaluate(&snapshot, &[]);
         assert_eq!(
             decisions[0].1,
             KillAction::AlreadyExited,
@@ -712,8 +812,184 @@ mod tests {
             make_lifecycle(101, "ai_proc", Some(AICategory::Inference), true),
         );
 
-        let decisions = executor.evaluate(&snapshot);
+        let decisions = executor.evaluate(&snapshot, &[]);
         assert_eq!(decisions[0].1, KillAction::AlreadyExited);
+    }
+
+    // ── v1.3.2 / DISPATCH 78 / step-3 — breach-gate tests ─────────
+
+    /// Core dispatch invariant: a VRAM-breached PID under an
+    /// opted-in policy yields `SignalTermSent` (a kill DECISION).
+    /// Production this still doesn't ACTUATE — `send_sigterm` has
+    /// no production caller (the tripwire below); step-5 wires
+    /// the actuation behind `auto_actuate`. This test is about
+    /// the decision-emission shape only.
+    #[test]
+    fn breached_pid_under_kill_policy_yields_signaltermsent_decision() {
+        let mut policy = GovernorPolicy::safe_default();
+        policy.default_ai_action = PolicyAction::Kill;
+        let mut executor = GovernorExecutor::new(policy);
+
+        let mut snapshot = crate::lifecycle::LifecycleSnapshot::new();
+        snapshot.processes.insert(
+            42,
+            make_lifecycle(42, "ai-greedy", Some(AICategory::Inference), false),
+        );
+        let breaches = vec![ThresholdBreach {
+            pid: 42,
+            vram_pct: Some(99.5),
+            vram_breached: true,
+        }];
+        let decisions = executor.evaluate(&snapshot, &breaches);
+        assert_eq!(decisions[0].1, KillAction::SignalTermSent);
+    }
+
+    /// The phantom-kill scar holds: with the production default
+    /// (Allow), a VRAM-breached PID produces a `Whitelisted`
+    /// decision — NO SignalTermSent. The policy gate fires
+    /// BEFORE the threshold matters. v1.0.1 phantom-kill scar
+    /// layer 2 explicit:  default Allow ⇒ no automated kills
+    /// even when a workload is genuinely over the line.
+    #[test]
+    fn breached_pid_under_default_allow_policy_does_not_kill() {
+        // safe_default() ships with default_ai_action = Allow.
+        let policy = GovernorPolicy::safe_default();
+        let mut executor = GovernorExecutor::new(policy);
+
+        let mut snapshot = crate::lifecycle::LifecycleSnapshot::new();
+        snapshot.processes.insert(
+            42,
+            make_lifecycle(42, "ai-greedy", Some(AICategory::Inference), false),
+        );
+        let breaches = vec![ThresholdBreach {
+            pid: 42,
+            vram_pct: Some(99.5),
+            vram_breached: true,
+        }];
+        let decisions = executor.evaluate(&snapshot, &breaches);
+        assert_eq!(
+            decisions[0].1,
+            KillAction::Whitelisted,
+            "v1.0.1 scar: default Allow MUST suppress kill decision \
+             even with a VRAM breach in evidence — policy gate fires \
+             before threshold gate",
+        );
+    }
+
+    /// Not-breached + opted-in policy: the policy says "kill if
+    /// needed," the metrics say "not needed." Decision is
+    /// `Skipped`, not `SignalTermSent`. This is the explicit
+    /// "measured-but-not-breaching" verdict — distinct from the
+    /// unmeasured case below.
+    #[test]
+    fn not_breached_pid_under_kill_policy_skips_kill() {
+        let mut policy = GovernorPolicy::safe_default();
+        policy.default_ai_action = PolicyAction::Kill;
+        let mut executor = GovernorExecutor::new(policy);
+
+        let mut snapshot = crate::lifecycle::LifecycleSnapshot::new();
+        snapshot.processes.insert(
+            43,
+            make_lifecycle(43, "ai-quiet", Some(AICategory::Inference), false),
+        );
+        let breaches = vec![ThresholdBreach {
+            pid: 43,
+            vram_pct: Some(20.0),
+            vram_breached: false,
+        }];
+        let decisions = executor.evaluate(&snapshot, &breaches);
+        assert_eq!(
+            decisions[0].1,
+            KillAction::Skipped,
+            "policy=Kill + vram_breached=false ⇒ Skipped (no kill); \
+             got {:?}",
+            decisions[0].1,
+        );
+    }
+
+    /// Hard rule #5: unmeasured VRAM (no breach entry for the PID)
+    /// is treated as NOT breached. The kill DECISION is Skipped,
+    /// NOT SignalTermSent. Pinned because the current host (with
+    /// the GPU driver unloaded) is in exactly this state — the
+    /// dispatch wants this case loud.
+    #[test]
+    fn unmeasured_vram_pid_under_kill_policy_does_not_decide_kill() {
+        let mut policy = GovernorPolicy::safe_default();
+        policy.default_ai_action = PolicyAction::Kill;
+        let mut executor = GovernorExecutor::new(policy);
+
+        let mut snapshot = crate::lifecycle::LifecycleSnapshot::new();
+        snapshot.processes.insert(
+            44,
+            make_lifecycle(44, "ai-unmeasured", Some(AICategory::Inference), false),
+        );
+        // NO breach entry for PID 44 — simulates "GPU driver
+        // unloaded, projection can't compute vram_pct."
+        let decisions = executor.evaluate(&snapshot, &[]);
+        assert_eq!(
+            decisions[0].1,
+            KillAction::Skipped,
+            "Hard rule #5: unmeasured VRAM (no breach row) ⇒ NEVER \
+             a kill decision. Got {:?}",
+            decisions[0].1,
+        );
+    }
+
+    /// Selective breach: in a snapshot of multiple PIDs, only the
+    /// breaching one gets the kill decision. The OTHERS that
+    /// happen to be measured-but-fine OR unmeasured stay
+    /// Skipped. This pins the per-PID independence of the breach
+    /// gate.
+    #[test]
+    fn breach_gate_is_per_pid_independent() {
+        let mut policy = GovernorPolicy::safe_default();
+        policy.default_ai_action = PolicyAction::Kill;
+        let mut executor = GovernorExecutor::new(policy);
+
+        let mut snapshot = crate::lifecycle::LifecycleSnapshot::new();
+        for pid in [50u32, 51, 52] {
+            snapshot.processes.insert(
+                pid,
+                make_lifecycle(pid, "ai", Some(AICategory::Inference), false),
+            );
+        }
+        let breaches = vec![
+            ThresholdBreach { pid: 50, vram_pct: Some(99.0), vram_breached: true },
+            ThresholdBreach { pid: 51, vram_pct: Some(30.0), vram_breached: false },
+            // pid 52: no entry — unmeasured.
+        ];
+        let decisions = executor.evaluate(&snapshot, &breaches);
+        let by_pid: std::collections::HashMap<u32, KillAction> = decisions
+            .iter()
+            .map(|(p, a, _)| (*p, *a))
+            .collect();
+        assert_eq!(by_pid[&50], KillAction::SignalTermSent);
+        assert_eq!(by_pid[&51], KillAction::Skipped);
+        assert_eq!(by_pid[&52], KillAction::Skipped);
+    }
+
+    /// Compile-time signature pin: `evaluate` accepts the narrow
+    /// projection (`&[ThresholdBreach]`), NOT `&RuntimeState`. If
+    /// a future refactor accidentally widens the signature to
+    /// take state, this fn fails to compile. STOP #1 from the
+    /// dispatch: the narrow projection is part of the design,
+    /// not a coincidence.
+    #[test]
+    fn evaluate_signature_takes_narrow_projection_not_runtime_state() {
+        // The function-pointer type assertion below cannot widen
+        // to `&RuntimeState`. If someone widens the signature,
+        // this `_FN_TYPE` binding fails to type-check.
+        type EvaluateFn = fn(
+            &mut GovernorExecutor,
+            &LifecycleSnapshot,
+            &[ThresholdBreach],
+        ) -> Vec<(u32, KillAction, String)>;
+        let _fn_type: EvaluateFn = GovernorExecutor::evaluate;
+        // Runtime smoke: empty inputs are accepted.
+        let policy = GovernorPolicy::safe_default();
+        let mut executor = GovernorExecutor::new(policy);
+        let snapshot = crate::lifecycle::LifecycleSnapshot::new();
+        let _ = executor.evaluate(&snapshot, &[]);
     }
 
     /// Authority-lock tripwire: `send_sigterm` must still have ZERO

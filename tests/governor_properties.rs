@@ -55,7 +55,7 @@ proptest! {
             .collect();
 
         let snap = snapshot_of(&entries);
-        let decisions = executor.evaluate(&snap);
+        let decisions = executor.evaluate(&snap, &[]);
         for (_, action, _) in &decisions {
             prop_assert!(
                 !matches!(
@@ -91,7 +91,19 @@ proptest! {
             .collect();
 
         let snap = snapshot_of(&entries);
-        let decisions = executor.evaluate(&snap);
+        // v1.3.2 / DISPATCH 78 — every candidate breaches so the
+        // rate-limit ceiling is the binding constraint, not the
+        // breach gate. Mirrors the executor's
+        // `executor_rate_limits_enforced_kills` test fixture.
+        let breaches: Vec<edge_monitor::governor::threshold_breach::ThresholdBreach> = entries
+            .iter()
+            .map(|(pid, _, _)| edge_monitor::governor::threshold_breach::ThresholdBreach {
+                pid: *pid,
+                vram_pct: Some(99.0),
+                vram_breached: true,
+            })
+            .collect();
+        let decisions = executor.evaluate(&snap, &breaches);
         let killed = decisions
             .iter()
             .filter(|(_, a, _)| *a == KillAction::SignalTermSent)

@@ -10,6 +10,11 @@ pub mod executor;
 pub mod manual;
 pub mod pid_reuse;
 pub mod policy;
+// v1.3.2 / DISPATCH 78 — threshold-breach projection (Q6 — VRAM%-
+// first). The narrow input the executor consumes alongside
+// LifecycleSnapshot; see module-level doc-comment for the
+// observe-only authority reasoning.
+pub mod threshold_breach;
 
 pub use audit::AuditWriter;
 pub use executor::GovernorExecutor;

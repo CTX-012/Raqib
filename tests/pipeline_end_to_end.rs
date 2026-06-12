@@ -50,7 +50,16 @@ fn ai_process_with_model_path_is_tracked_and_killed_in_enforce_mode() {
     let mut policy = GovernorPolicy::safe_default();
     policy.default_ai_action = PolicyAction::Kill;
     let mut governor = GovernorExecutor::new(policy);
-    let decisions = governor.evaluate(&snapshot);
+    // v1.3.2 / DISPATCH 78 — the AI process is the one we want to
+    // kill; pass a breach for its PID so the new
+    // policy-Kill-needs-breach gate is satisfied. The shell isn't
+    // an AI process and policy will allow it regardless.
+    let breaches = vec![edge_monitor::governor::threshold_breach::ThresholdBreach {
+        pid: 1000,
+        vram_pct: Some(99.0),
+        vram_breached: true,
+    }];
+    let decisions = governor.evaluate(&snapshot, &breaches);
 
     let ai_action = decisions
         .iter()

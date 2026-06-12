@@ -2,7 +2,7 @@ mod gpu_nvidia;
 pub mod host_vitals;
 mod linux_proc;
 
-pub use gpu_nvidia::{GpuCollector, GpuSnapshot};
+pub use gpu_nvidia::{GpuCollector, GpuDeviceMetrics, GpuSnapshot};
 pub use linux_proc::ProcessCollector;
 
 use crate::model::ProcessSample;

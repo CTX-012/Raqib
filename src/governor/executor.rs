@@ -52,15 +52,54 @@ impl GovernorExecutor {
         breaches: &[ThresholdBreach],
     ) -> Vec<(u32, KillAction, String)> {
         self.trim_rate_limit_window();
-        let mut decisions = Vec::with_capacity(lifecycle_snapshot.processes.len());
-        for (pid, lifecycle) in &lifecycle_snapshot.processes {
+        // v1.3.2 / DISPATCH 79 / step-4 (Q4) — deterministic
+        // candidate ordering. `LifecycleSnapshot.processes` is a
+        // HashMap; iteration is non-deterministic. When the rate
+        // limiter's per-window budget forces a subset (N < total
+        // kill-candidates), WHICH PIDs get the kill decision must
+        // not depend on HashMap iteration order — that would make
+        // identical inputs produce different `state.decisions`
+        // across runs, breaking auditability and burying
+        // reproduction bugs.
+        //
+        // Q4 STOPGAP: sort ascending by PID. Cheap, correct,
+        // auditable. The lowest-numbered PID wins the budget when
+        // there's contention. This is intentionally NOT the long-
+        // term tiebreaker — Q4 v-next will land least-recent-
+        // activity ordering once `LiveTelemetry::last_active_at`
+        // exists (per DISPATCH 59 M5). Lowest-PID is a workable
+        // proxy today: long-lived AI workloads tend to have lower
+        // PIDs than short-lived noise, and a deterministic
+        // wrong-ish answer is strictly better than a
+        // non-deterministic right-ish one.
+        //
+        // AUTHORITY: this is ORDERING ONLY. The set of decisions
+        // a given snapshot produces is unchanged — only the
+        // rate-limit truncation becomes stable. No kill is wired;
+        // `send_sigterm` production-caller count unchanged. The
+        // 3 phantom-kill scar layers and 4 firewalls stay intact.
+        let mut sorted_pids: Vec<u32> =
+            lifecycle_snapshot.processes.keys().copied().collect();
+        sorted_pids.sort_unstable();
+        let mut decisions = Vec::with_capacity(sorted_pids.len());
+        for pid in sorted_pids {
+            // The lifecycle lookup is O(1) on the HashMap; the
+            // sort cost is O(N log N) on N ≤ few-hundred AI
+            // processes — negligible on the 1 Hz tick budget.
+            let Some(lifecycle) = lifecycle_snapshot.processes.get(&pid) else {
+                // Defensive: can't happen because we sourced the
+                // key set from this same HashMap. If a future
+                // refactor mutates the snapshot mid-evaluate,
+                // we'd rather skip than panic.
+                continue;
+            };
             // Per-PID breach lookup; O(N·M) overall but N and M are
             // both bounded by the few-dozen-AI-process headcount on
             // realistic hosts, so a HashMap pre-index would be
             // premature. If a future profile shows it matters, swap
             // to a HashMap built once at evaluate() entry.
-            let breach = breaches.iter().find(|b| b.pid == *pid);
-            let (action, reason) = self.evaluate_process(*pid, lifecycle, breach);
+            let breach = breaches.iter().find(|b| b.pid == pid);
+            let (action, reason) = self.evaluate_process(pid, lifecycle, breach);
             // Record enforced kills against the window so subsequent
             // candidates in the same tick see the budget drop.
             //
@@ -78,7 +117,7 @@ impl GovernorExecutor {
             if matches!(action, KillAction::SignalTermSent) {
                 self.recent_kills.push_back(Utc::now());
             }
-            decisions.push((*pid, action, reason));
+            decisions.push((pid, action, reason));
         }
         decisions
     }
@@ -990,6 +1029,193 @@ mod tests {
         let mut executor = GovernorExecutor::new(policy);
         let snapshot = crate::lifecycle::LifecycleSnapshot::new();
         let _ = executor.evaluate(&snapshot, &[]);
+    }
+
+    // ── v1.3.2 / DISPATCH 79 / step-4 — deterministic ordering ────
+
+    /// The dispatch's core invariant: under a rate-limit budget
+    /// smaller than the candidate count, the N PIDs selected for
+    /// `SignalTermSent` are deterministically the N LOWEST PIDs —
+    /// not whatever the HashMap iteration happened to surface.
+    /// Pinned by repeating the SAME snapshot through evaluate()
+    /// multiple times and asserting the selected set is invariant.
+    #[test]
+    fn rate_limit_subset_is_lowest_pids_deterministically() {
+        let mut policy = GovernorPolicy::safe_default();
+        policy.default_ai_action = PolicyAction::Kill;
+        policy.rate_limit_max_kills = 3;
+        policy.rate_limit_window_secs = 60;
+
+        // 10 kill-eligible candidates all breaching the threshold.
+        // With budget=3, only 3 land SignalTermSent; the other 7
+        // are RateLimited. Q4 stopgap: the 3 selected MUST be
+        // PIDs 500, 501, 502 (the lowest), not some HashMap
+        // permutation.
+        let pids: Vec<u32> = (500..510).collect();
+        let breaches: Vec<ThresholdBreach> = pids
+            .iter()
+            .map(|p| ThresholdBreach {
+                pid: *p,
+                vram_pct: Some(99.0),
+                vram_breached: true,
+            })
+            .collect();
+
+        // Repeat the evaluate() call from a fresh executor 16
+        // times. HashMap iteration is randomised per-process via
+        // SipHash with a per-process key, so within ONE process
+        // we may see consistent (but arbitrary) order. The N
+        // repetitions guard against the case where the test
+        // accidentally pinned an arbitrary order — with the sort
+        // in place, all 16 selections must be identical, AND must
+        // be the lowest 3.
+        let expected: Vec<u32> = pids[..3].to_vec();
+        for run in 0..16 {
+            let mut snapshot = crate::lifecycle::LifecycleSnapshot::new();
+            for pid in &pids {
+                snapshot.processes.insert(
+                    *pid,
+                    make_lifecycle(
+                        *pid,
+                        &format!("ai{pid}"),
+                        Some(AICategory::Inference),
+                        false,
+                    ),
+                );
+            }
+            let mut executor = GovernorExecutor::new(policy.clone());
+            let decisions = executor.evaluate(&snapshot, &breaches);
+            let selected: Vec<u32> = decisions
+                .iter()
+                .filter(|(_, a, _)| *a == KillAction::SignalTermSent)
+                .map(|(p, _, _)| *p)
+                .collect();
+            assert_eq!(
+                selected, expected,
+                "run {run}: rate-limit subset MUST be lowest-PID \
+                 deterministically; got {selected:?}",
+            );
+        }
+    }
+
+    /// The decisions Vec itself is sorted ascending by PID under
+    /// the new ordering — a downstream consumer that relies on
+    /// "earlier decisions = lower PIDs" has a stable contract.
+    /// Pinned because the existing rate-limit semantics ALREADY
+    /// depended on iteration order implicitly; with deterministic
+    /// ordering the contract becomes explicit.
+    #[test]
+    fn decisions_vec_is_sorted_ascending_by_pid() {
+        let mut policy = GovernorPolicy::safe_default();
+        policy.default_ai_action = PolicyAction::Kill;
+        let mut executor = GovernorExecutor::new(policy);
+
+        // Insert PIDs in scrambled order to defeat any
+        // accidentally-sorted HashMap. The output should still
+        // be ascending.
+        let scramble: Vec<u32> = vec![9000, 100, 5000, 2, 42, 17, 999, 30];
+        let mut snapshot = crate::lifecycle::LifecycleSnapshot::new();
+        for pid in &scramble {
+            snapshot.processes.insert(
+                *pid,
+                make_lifecycle(*pid, "ai", Some(AICategory::Inference), false),
+            );
+        }
+        let breaches: Vec<ThresholdBreach> = scramble
+            .iter()
+            .map(|p| ThresholdBreach {
+                pid: *p,
+                vram_pct: Some(99.0),
+                vram_breached: true,
+            })
+            .collect();
+        let decisions = executor.evaluate(&snapshot, &breaches);
+        let observed_pids: Vec<u32> = decisions.iter().map(|(p, _, _)| *p).collect();
+        let mut expected = scramble.clone();
+        expected.sort_unstable();
+        assert_eq!(
+            observed_pids, expected,
+            "decisions Vec MUST be sorted ascending by PID",
+        );
+    }
+
+    /// Ordering does NOT change the action-per-PID. A whitelisted
+    /// process stays Whitelisted, a non-breaching process stays
+    /// Skipped, etc. The sort changes WHICH PIDs survive the
+    /// rate-limit cap, not WHAT verdict each PID receives.
+    #[test]
+    fn sort_does_not_change_action_per_pid() {
+        let mut policy = GovernorPolicy::safe_default();
+        policy.default_ai_action = PolicyAction::Kill;
+        // No rate limit pressure — every Kill-eligible PID gets
+        // SignalTermSent, every non-breaching one gets Skipped,
+        // every allowlisted gets Whitelisted.
+        policy.rate_limit_max_kills = 100;
+        let mut executor = GovernorExecutor::new(policy);
+
+        let mut snapshot = crate::lifecycle::LifecycleSnapshot::new();
+        // PID 100: allowlisted shell
+        snapshot.processes.insert(
+            100,
+            make_lifecycle(100, "bash", None, false),
+        );
+        // PID 200: breaching AI workload
+        snapshot.processes.insert(
+            200,
+            make_lifecycle(200, "ai-greedy", Some(AICategory::Inference), false),
+        );
+        // PID 300: AI workload that is NOT breaching
+        snapshot.processes.insert(
+            300,
+            make_lifecycle(300, "ai-quiet", Some(AICategory::Inference), false),
+        );
+        let breaches = vec![
+            ThresholdBreach { pid: 200, vram_pct: Some(99.0), vram_breached: true },
+            ThresholdBreach { pid: 300, vram_pct: Some(30.0), vram_breached: false },
+        ];
+        let decisions = executor.evaluate(&snapshot, &breaches);
+        let by_pid: std::collections::HashMap<u32, KillAction> = decisions
+            .iter()
+            .map(|(p, a, _)| (*p, *a))
+            .collect();
+        assert_eq!(by_pid[&100], KillAction::Whitelisted);
+        assert_eq!(by_pid[&200], KillAction::SignalTermSent);
+        assert_eq!(by_pid[&300], KillAction::Skipped);
+    }
+
+    /// Phantom-kill scar (layer 2) survives ordering: with default
+    /// Allow policy, ZERO SignalTermSent decisions are emitted
+    /// regardless of how many breached candidates exist or what
+    /// order they're considered in. Pinned as a regression hedge
+    /// against any future refactor that accidentally reorders the
+    /// policy / breach / rate-limit gates.
+    #[test]
+    fn default_allow_policy_emits_no_signaltermsent_even_with_breaches() {
+        let policy = GovernorPolicy::safe_default();
+        // safe_default() ⇒ default_ai_action = PolicyAction::Allow.
+        let mut executor = GovernorExecutor::new(policy);
+
+        let mut snapshot = crate::lifecycle::LifecycleSnapshot::new();
+        let breaches: Vec<ThresholdBreach> = (1..=20)
+            .map(|pid| {
+                snapshot.processes.insert(
+                    pid,
+                    make_lifecycle(pid, "ai", Some(AICategory::Inference), false),
+                );
+                ThresholdBreach { pid, vram_pct: Some(99.0), vram_breached: true }
+            })
+            .collect();
+        let decisions = executor.evaluate(&snapshot, &breaches);
+        let killed = decisions
+            .iter()
+            .filter(|(_, a, _)| *a == KillAction::SignalTermSent)
+            .count();
+        assert_eq!(
+            killed, 0,
+            "v1.0.1 scar layer 2: default Allow MUST suppress ALL \
+             SignalTermSent decisions, regardless of breach count \
+             or ordering. Got {killed}.",
+        );
     }
 
     /// Authority-lock tripwire: `send_sigterm` must still have ZERO

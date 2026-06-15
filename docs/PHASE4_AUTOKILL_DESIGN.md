@@ -49,7 +49,7 @@ Steps **1–2 are observe-only-safe and fire now** (DISPATCH 60). Steps **3+ are
 | 3 | Widen `evaluate()` to accept a **threshold-breach projection** (M4 option b), **VRAM%-only** | `governor/`, runtime projection | no |
 | 4 | Deterministic **lowest-PID** sort in the candidate ordering | `governor/` | no |
 | 5 | ✅ DISPATCH 80 — **Tick-loop actuation site** lives at `runtime::Runtime::record_governor_audit`; walks `state.decisions`, calls `send_sigterm` only if `governor.auto_actuate`, mirrors `state.audit` with `KillSource::Automated`, populates `governor_killed_pids` for exit attribution. Workspace-wide tripwire (`send_sigterm_actuation_site_is_auto_actuate_gated`) pins **exactly one** runtime caller AND its `auto_actuate` proximity. Default-OFF guard `default_off_emits_zero_kills` pins layer 2 of the v1.0.1 scar. | `runtime.rs` | **yes (gated, default-off)** |
-| 6 | `execute_after_grace` SIGKILL escalation in the same loop, gated identically | `runtime.rs` | yes (gated) |
+| 6 | ✅ DISPATCH 81 — **`execute_after_grace` SIGKILL escalation** in the same gated loop. After the SIGTERM pass, `record_governor_audit` calls `governor.execute_after_grace()` (PID-reuse guard engages via `send_sigkill`); each result audits with `KillSource::Automated` (success: `SendSigkill`; refused: `PidReusedAborted`; OS error: `SendSigkill` failure). Activates `policy.sigterm_grace_secs` (was dead config). `pending_kills` entries cleared on PID exit at the lifecycle drain. Tripwire `send_sigkill_callers_are_gated` pins one internal caller (`execute_after_grace`'s loop) + one runtime orchestrator (`execute_after_grace` itself), both auto_actuate-gated. Headline guard `default_off_emits_no_sigterm_and_no_sigkill` extends D80's default-OFF invariant to cover SIGKILL too. **Manual-k force-SIGKILL UX (C4) deferred — see HARD-BLOCKING FOLLOW-UP below.** | `runtime.rs`, `executor.rs` (test-only `insert_pending_kill_for_test`) | **yes (gated, default-off)** |
 | 7 | ✅ DISPATCH 80 (landed with step-5) — `governor.kill_sustain_secs` (default 10 s), validated ≥ `thresholds.alert_sustain_secs` at config load; actuation site reads per-PID `breach_since` (refreshed in `tick()`) and holds for the window. Q3 sustain gate is live behind `auto_actuate`. | config, `runtime.rs` | yes (gated) |
 | 8 | (follow-up) thermal + RAM triggers (Q6) | projection, `governor/` | yes (gated) |
 | 9 | (v-next) `LiveTelemetry::last_active_at` + least-recent-activity tiebreaker (Q4) | runtime, `governor/` | yes (gated) |
@@ -59,6 +59,39 @@ Tester validation before tagging the actuation release: real OOM-pressure scenar
 ## Web's role (explicitly bounded)
 
 Web becomes a **policy editor** — thresholds, sustain, the `auto_actuate` toggle (written to TOML, read by the tick loop). Web **never** drives a kill. The mutation endpoint + auth (Phase 4 settings work) carries *config*, not *actuation verbs*. Current web surface confirmed read-only/unauthenticated (routes enumerated `web/mod.rs:77-84`; "NO AUTH, trusted LAN only" `main.rs:278-284`).
+
+## HARD-BLOCKING follow-up — DISPATCH 81 / C4 (manual-k force-SIGKILL UX)
+
+DISPATCH 81's design called for the manual-k path to share the SAME escalation
+machinery (D72 Position A): first `k` sends SIGTERM (as today); the
+`kill_confirm` card flips to a "waiting {grace}s for graceful shutdown…
+[Enter to force-SIGKILL]" state; if the PID is still alive after grace, the
+operator's Enter triggers `send_sigkill` (consent-gated, not auto_actuate).
+That was deferred. Why it's HARD-BLOCKING:
+
+1. **Contract amendment required.** The new operator-facing strings
+   ("waiting Ns…", "[Enter to force-SIGKILL]", a cancellation cue) live in
+   `~/ux_contract` and Agent A owns that crate. CLAUDE.md forbids editing
+   it from this repo without an Amendment Request.
+2. **Card state-machine extension.** `KillConfirmCard` today is a fixed
+   "Enter = confirm SIGTERM" snapshot; adding a post-SIGTERM "waiting →
+   force" sub-state means a state enum on the card (Confirm → Waiting →
+   ForceConfirm) and corresponding `apply_action` Enter/Esc dispatch
+   updates in `src/ui/mod.rs`.
+3. **Manual-kill must populate `pending_kills`.** Today `manual_kill` calls
+   `ManualKiller::kill_sigterm` which uses `libc::kill` directly, NOT
+   `governor.send_sigterm`. The shared machinery requires routing manual
+   kills through `send_sigterm` (or a parallel pidfd-capture path) so the
+   PID-reuse guard's identity tokens are available at force-SIGKILL time.
+4. **Force-SIGKILL caller adds a new entry to the `send_sigkill_callers_are_gated`
+   tripwire** — and the proximity check must be extended to pin "operator
+   consent (an Enter dispatch from a `Waiting` card state)" instead of
+   `auto_actuate`.
+
+Until C4 lands, operators who `k` a SIGTERM-ignoring process (ollama is the
+live test case — see "k didn't kill ollama" finding) get a stuck SIGTERM
+with no force-kill follow-through in the TUI. Workaround today: a second
+manual kill resends SIGTERM (still ignored) or `kill -9` from a shell.
 
 ## Out of scope here
 - GPU thermal-protection trigger (Q6 follow-up)

@@ -1233,6 +1233,17 @@ impl Runtime {
             // starts fresh in the Loading state instead of inheriting
             // the prior process's age.
             self.pid_first_seen_at.remove(&summary.pid);
+            // DISPATCH 81 — pending_kills cleanup. Pre-D80 this map
+            // had no production callers so leakage was impossible;
+            // post-D80/D81 it's populated by the auto_actuate
+            // SIGTERM path and SHOULD shrink when the PID actually
+            // exits. Without this, a recycled PID later would see
+            // the stale `pending_kills` entry → `AlreadyPending`
+            // short-circuit → never get evaluated, and the entry
+            // would persist forever. Mirrors the
+            // `governor_killed_pids` / `pid_to_model_path` /
+            // `pid_first_seen_at` cleanup discipline.
+            self.governor.clear_pending(summary.pid);
         }
 
         // v1.3.2 / DISPATCH 78 / step-3 — build the per-tick
@@ -1718,6 +1729,167 @@ impl Runtime {
             // process's exit as a governor kill (DISPATCH 70).
             if entry.success {
                 self.governor_killed_pids.insert(pid, reason.clone());
+            }
+
+            self.state.audit.push_back(entry);
+            while self.state.audit.len() > audit_history {
+                self.state.audit.pop_front();
+            }
+        }
+
+        // DISPATCH 81 / step-6 — SIGTERM → SIGKILL escalation.
+        //
+        // Pending kills from THIS tick (just-emitted SIGTERMs above)
+        // and prior ticks (PIDs still alive past grace) are surfaced
+        // by `execute_after_grace`: it walks `pending_kills`, filters
+        // to entries whose `sigterm_time` is older than
+        // `policy.sigterm_grace_period_secs`, and calls
+        // `send_sigkill` on each. The activation here is what makes
+        // `sigterm_grace_secs` a live config field (pre-D81 it had no
+        // reader in production).
+        //
+        // GATING: same `auto_actuate` early-return above already
+        // protects this branch — the default-off invariant extends to
+        // SIGKILL escalation. `default_off_emits_no_sigterm_and_no_sigkill`
+        // pins it.
+        //
+        // PID-REUSE GUARD: `send_sigkill` checks the captured pidfd
+        // (preferred, kernel-race-free) or `/proc/<pid>/stat`
+        // starttime against the value captured at SIGTERM time. If
+        // the process exited (or was reaped + PID reassigned) during
+        // grace, the SIGKILL is REFUSED with `PidReusedAborted`. The
+        // v1.0.1 hazard — SIGKILLing a recycled PID — is structurally
+        // impossible because this escalation goes THROUGH
+        // `send_sigkill`, not around it.
+        //
+        // AUDITING: each result becomes its own AuditLogEntry with
+        // `KillSource::Automated`. SignalKillSent → SendSigkill
+        // success. PidReusedAborted → PidReusedAborted action,
+        // `success=false` so the trail records the abort but the
+        // entry is not counted as a "delivered kill" (mirrors
+        // AuditLog::successful_kills which excludes Cancelled).
+        // OS errors → SendSigkill failure with the OS error message.
+        //
+        // `pending_kills` cleanup happens at the exit drain
+        // (`recent_exits` loop above near runtime.rs ~1230) — the
+        // PID's eventual exit clears its `pending_kills` entry via
+        // `clear_pending`, mirroring the existing
+        // `governor_killed_pids` / `pid_to_model_path` cleanup. That
+        // way a recycled PID later can re-enter
+        // `pending_kills` clean.
+        let escalation_results = self.governor.execute_after_grace();
+        for (pid, result) in escalation_results {
+            // Resolve identity. After SIGKILL, the PID may already be
+            // gone from `state.annotated` (next tick's lifecycle pass
+            // hasn't run yet though, so usually still present). Fall
+            // back to the pending-kill record — that's the
+            // authoritative name+category captured at SIGTERM time.
+            let (name, category) = self
+                .state
+                .annotated
+                .iter()
+                .find(|a| a.pid == pid)
+                .map(|a| (a.name.clone(), Some(a.category)))
+                .or_else(|| {
+                    self.governor
+                        .get_pending_kills()
+                        .iter()
+                        .find(|p| p.pid == pid)
+                        .map(|p| (p.name.clone(), Some(p.category)))
+                })
+                .unwrap_or_else(|| ("<unknown>".to_string(), None));
+
+            let entry = match &result {
+                Ok(KillAction::SignalKillSent) => {
+                    tracing::warn!(
+                        pid,
+                        name = %name,
+                        "auto_actuate: SIGKILL escalation succeeded \
+                         (SIGTERM grace expired)"
+                    );
+                    AuditLogEntry::automated_success(
+                        ManualKillAction::SendSigkill,
+                        pid,
+                        name.clone(),
+                        category,
+                        "SIGTERM grace expired; escalated to SIGKILL".to_string(),
+                    )
+                }
+                Ok(KillAction::PidReusedAborted) => {
+                    tracing::warn!(
+                        pid,
+                        name = %name,
+                        "auto_actuate: SIGKILL escalation REFUSED \
+                         (PID-reuse guard fired — process exited \
+                         during grace or PID reassigned)"
+                    );
+                    AuditLogEntry::automated_failure(
+                        ManualKillAction::PidReusedAborted,
+                        pid,
+                        name.clone(),
+                        category,
+                        "SIGTERM grace expired; SIGKILL refused by PID-reuse guard".to_string(),
+                        "process exited during grace OR PID reassigned to an \
+                         unrelated process — captured identity tokens (pidfd / \
+                         starttime) no longer match the live PID"
+                            .to_string(),
+                    )
+                }
+                Ok(other) => {
+                    // Defensive — send_sigkill returns either
+                    // SignalKillSent or PidReusedAborted today. Any
+                    // other variant is a future-self bug; audit it
+                    // loudly so the gap is visible.
+                    tracing::error!(
+                        pid,
+                        action = ?other,
+                        "auto_actuate: unexpected KillAction from execute_after_grace"
+                    );
+                    AuditLogEntry::automated_failure(
+                        ManualKillAction::SendSigkill,
+                        pid,
+                        name.clone(),
+                        category,
+                        "SIGTERM grace expired; unexpected escalation outcome".to_string(),
+                        format!("unexpected KillAction: {other:?}"),
+                    )
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        pid,
+                        name = %name,
+                        error = %e,
+                        "auto_actuate: SIGKILL escalation failed (OS error)"
+                    );
+                    AuditLogEntry::automated_failure(
+                        ManualKillAction::SendSigkill,
+                        pid,
+                        name.clone(),
+                        category,
+                        "SIGTERM grace expired; SIGKILL OS call failed".to_string(),
+                        e.to_string(),
+                    )
+                }
+            };
+
+            if let Some(w) = &self.audit_writer
+                && let Err(e) = w.append(&entry)
+            {
+                tracing::warn!(error = %e, "failed to persist escalation audit entry");
+            }
+
+            // governor_killed_pids: only refresh on a confirmed
+            // SignalKillSent. The PidReusedAborted case explicitly
+            // means the OS already disposed of the process (or
+            // reassigned the PID) — pre-tagging here could
+            // mis-attribute a future, unrelated exit. The existing
+            // SIGTERM-side governor_killed_pids entry (written by
+            // the SIGTERM loop above, on the success path) stays
+            // intact regardless: the SIGTERM was real, the exit was
+            // still governor-caused, the attribution holds.
+            if matches!(result, Ok(KillAction::SignalKillSent)) {
+                self.governor_killed_pids
+                    .insert(pid, "SIGKILL after SIGTERM grace".to_string());
             }
 
             self.state.audit.push_back(entry);
@@ -2451,6 +2623,258 @@ mod tests {
 
         cfg.governor.kill_sustain_secs = 600;
         cfg.validate().expect("kill at upper bound must validate");
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // DISPATCH 81 — SIGTERM → SIGKILL escalation (step-6) test
+    // suite. Builds on the D80 actuation-site harness above; reuses
+    // the auto_actuate gate. The headline guard
+    // `default_off_emits_no_sigterm_and_no_sigkill` is the EXTENDED
+    // form of D80's `default_off_emits_zero_kills` — same scar
+    // discipline, broader coverage (now includes the SIGKILL path).
+    // ─────────────────────────────────────────────────────────────
+
+    /// Seed an expired pending-kill on the governor with arbitrary
+    /// identity tokens. Test-only path — production callers MUST go
+    /// through `send_sigterm` so the PID-reuse guard's identity
+    /// tokens are captured BEFORE the signal (the v1.0.1
+    /// protection). See `GovernorExecutor::insert_pending_kill_for_test`.
+    fn seed_expired_pending_kill(
+        rt: &mut Runtime,
+        pid: u32,
+        name: &str,
+        starttime_ticks: Option<u64>,
+        secs_since_sigterm: i64,
+    ) {
+        use crate::governor::PendingKill;
+        use chrono::Duration as ChronoDuration;
+        let mut pk = PendingKill::new(pid, name.to_string(), crate::model::AICategory::Inference);
+        pk.sigterm_time = chrono::Utc::now() - ChronoDuration::seconds(secs_since_sigterm);
+        pk.starttime_ticks = starttime_ticks;
+        pk.pidfd = None;
+        rt.governor.insert_pending_kill_for_test(pk);
+    }
+
+    /// THE HEADLINE (EXTENDED form of D80's
+    /// `default_off_emits_zero_kills`). When `auto_actuate` defaults
+    /// to false, NEITHER a SIGTERM (D80) NOR a SIGKILL escalation
+    /// (D81) fires. Seeds an expired pending-kill so
+    /// `execute_after_grace` WOULD return entries — but the gate
+    /// short-circuits before that call. Tearing down this test
+    /// (i.e. silently making it pass when it shouldn't) means the
+    /// shipped binary can autonomously SIGKILL out-of-the-box; the
+    /// v1.0.1 phantom-kill scar layer 2 is fully reopened.
+    #[test]
+    fn default_off_emits_no_sigterm_and_no_sigkill() {
+        let cfg = Config::default();
+        assert!(
+            !cfg.governor.auto_actuate,
+            "default must stay false — flipping it ships autonomous \
+             kills (SIGTERM AND SIGKILL) on a fresh install."
+        );
+
+        let mut rt = Runtime::new(cfg).expect("Runtime::new");
+        // Seed an EXPIRED pending-kill: `execute_after_grace` would
+        // surface this if reached, but the auto_actuate gate must
+        // early-return before that call.
+        seed_expired_pending_kill(
+            &mut rt,
+            1_000_000_010,
+            "would-escalate",
+            None,
+            3600, // 1 hour past SIGTERM, well beyond default grace
+        );
+
+        let audit_before = rt.state.audit.len();
+        let pending_before = rt.governor.pending_kills_count();
+        rt.record_governor_audit();
+        let audit_after = rt.state.audit.len();
+        let pending_after = rt.governor.pending_kills_count();
+
+        assert_eq!(
+            audit_after, audit_before,
+            "default-off MUST add ZERO audit entries — that covers \
+             both SIGTERM (D80) and SIGKILL escalation (D81). The \
+             single auto_actuate gate funnels both branches.",
+        );
+        assert_eq!(
+            pending_after, pending_before,
+            "default-off MUST leave pending_kills untouched (no \
+             `send_sigkill` was called, so no `sigkill_time` should \
+             have been set). Seeded={pending_before}, after={pending_after}.",
+        );
+    }
+
+    /// GRACE RESPECTED. With `auto_actuate=true` and a pending-kill
+    /// whose SIGTERM was sent JUST NOW (sustain not yet elapsed),
+    /// `execute_after_grace` MUST NOT escalate. The
+    /// `policy.sigterm_grace_secs` config field — dead code pre-D81
+    /// — is now live; this test pins that activation.
+    #[test]
+    fn grace_period_blocks_premature_escalation() {
+        let mut cfg = Config::default();
+        cfg.governor.auto_actuate = true;
+        // policy.sigterm_grace_secs default is 5 s.
+        let mut rt = Runtime::new(cfg).expect("Runtime::new");
+        seed_expired_pending_kill(
+            &mut rt,
+            1_000_000_011,
+            "fresh-sigterm",
+            None,
+            0, // SIGTERM sent NOW; grace not elapsed
+        );
+
+        let audit_before = rt.state.audit.len();
+        rt.record_governor_audit();
+        assert_eq!(
+            rt.state.audit.len(),
+            audit_before,
+            "grace period (default 5 s) MUST suppress escalation when \
+             sigterm_time is now. `policy.sigterm_grace_secs` is the \
+             gate; activating it without enforcement would mean \
+             SIGKILL fires every tick.",
+        );
+    }
+
+    /// IDENTITY GUARD via the escalation path. A pending-kill with
+    /// NO captured identity tokens (no pidfd, no starttime — the
+    /// "captured-nothing" failure mode for `send_sigterm`) MUST
+    /// surface as `PidReusedAborted` from `send_sigkill`, audited
+    /// with `KillSource::Automated`, `ManualKillAction::
+    /// PidReusedAborted`, `success=false`. This is the v1.0.1
+    /// recycled-PID hazard — non-negotiable.
+    #[test]
+    fn identity_guard_refuses_escalation_without_captured_tokens() {
+        let mut cfg = Config::default();
+        cfg.governor.auto_actuate = true;
+        cfg.policy.sigterm_grace_secs = 1; // tight grace for the test
+
+        let mut rt = Runtime::new(cfg).expect("Runtime::new");
+        // No pidfd, no starttime; grace expired (10s past SIGTERM).
+        let target_pid = 1_000_000_012u32;
+        seed_expired_pending_kill(&mut rt, target_pid, "no-id-tokens", None, 10);
+
+        let audit_before = rt.state.audit.len();
+        rt.record_governor_audit();
+
+        let new_entries: Vec<_> = rt
+            .state
+            .audit
+            .iter()
+            .skip(audit_before)
+            .filter(|e| e.pid == target_pid)
+            .collect();
+        assert_eq!(
+            new_entries.len(),
+            1,
+            "exactly ONE escalation audit entry expected; got {}",
+            new_entries.len(),
+        );
+        let entry = new_entries[0];
+        assert_eq!(
+            entry.action,
+            crate::governor::manual::ManualKillAction::PidReusedAborted,
+            "expected PidReusedAborted on a pending-kill with no \
+             captured identity tokens; got {:?}",
+            entry.action,
+        );
+        assert_eq!(
+            entry.source,
+            crate::governor::manual::KillSource::Automated,
+        );
+        assert!(
+            !entry.success,
+            "PidReusedAborted is a REFUSAL, not a successful kill — \
+             must record success=false so AuditLog::successful_kills \
+             doesn't count it.",
+        );
+        assert!(
+            !rt.governor_killed_pids.contains_key(&target_pid),
+            "a REFUSED SIGKILL MUST NOT populate governor_killed_pids \
+             — the OS already disposed of the process (or PID was \
+             reassigned); pre-tagging risks mis-attribution.",
+        );
+    }
+
+    /// AUTO ESCALATION (the success path). Spawns a long-lived child
+    /// that traps SIGTERM (so it survives the SIGTERM stage), seeds
+    /// a pending-kill with the child's real starttime so the
+    /// PID-reuse guard's identity check PASSES, sets grace=0, and
+    /// drives `record_governor_audit`. The escalation must fire,
+    /// kill the child via SIGKILL, and audit success.
+    ///
+    /// This is the end-to-end wiring proof: tick-loop → auto_actuate
+    /// gate → execute_after_grace → send_sigkill → audit. Anything
+    /// that breaks the chain (gate moved, escalation call dropped,
+    /// audit constructor regressed) fires this test.
+    #[test]
+    fn auto_actuate_escalation_kills_surviving_child() {
+        use std::process::Command;
+        use std::time::Duration as StdDuration;
+
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg("trap '' TERM; while :; do sleep 1; done")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn child");
+        let pid = child.id();
+        // Capture the real starttime BEFORE we mess with anything.
+        let starttime = crate::governor::pid_reuse::read_starttime(pid);
+
+        let mut cfg = Config::default();
+        cfg.governor.auto_actuate = true;
+        cfg.policy.sigterm_grace_secs = 0; // immediate escalation
+
+        let mut rt = Runtime::new(cfg).expect("Runtime::new");
+        seed_expired_pending_kill(&mut rt, pid, "trap-sigterm-child", starttime, 1);
+
+        rt.record_governor_audit();
+
+        // Find the escalation entry.
+        let entry = rt
+            .state
+            .audit
+            .iter()
+            .find(|e| e.pid == pid)
+            .cloned();
+        let entry = match entry {
+            Some(e) => e,
+            None => {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("expected an escalation audit entry for PID {pid}; got none");
+            }
+        };
+
+        assert_eq!(
+            entry.action,
+            crate::governor::manual::ManualKillAction::SendSigkill,
+            "expected SendSigkill action; got {:?}",
+            entry.action,
+        );
+        assert_eq!(
+            entry.source,
+            crate::governor::manual::KillSource::Automated,
+        );
+        assert!(
+            entry.success,
+            "expected successful SIGKILL (identity check passed via \
+             real starttime); got success=false, error_msg={:?}",
+            entry.error_msg,
+        );
+        assert!(
+            rt.governor_killed_pids.contains_key(&pid),
+            "successful SIGKILL MUST populate governor_killed_pids so \
+             the lifecycle drain attributes the exit as \
+             ExitReason::GovernorKill (D70 bridge).",
+        );
+
+        // Reap the dead child to avoid a zombie. SIGKILL has by now
+        // delivered; brief settle wait gives the kernel time to reap.
+        std::thread::sleep(StdDuration::from_millis(50));
+        let _ = child.wait();
     }
 
     /// Default config validates without operator intervention — a

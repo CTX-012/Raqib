@@ -473,6 +473,26 @@ impl GovernorExecutor {
         self.pending_kills.remove(&pid);
     }
 
+    /// DISPATCH 81 — test-only seeder for `pending_kills`.
+    ///
+    /// Runtime-layer tests need to verify that the auto-escalation
+    /// path (`record_governor_audit` calling `execute_after_grace`)
+    /// is gated on `auto_actuate` WITHOUT having to spawn a real
+    /// child and run `send_sigterm` against it. This accessor lets
+    /// the test seed a `PendingKill` with an arbitrary `sigterm_time`
+    /// (e.g. far in the past, to immediately exceed `grace_period`).
+    ///
+    /// Production callers MUST go through `send_sigterm` so the
+    /// PID-reuse guard's identity tokens (pidfd + starttime) are
+    /// captured BEFORE the kill — the v1.0.1 protection. This
+    /// helper deliberately exposes a way to skip that capture, so
+    /// it's `#[cfg(test)]`-only and never compiles into the shipped
+    /// binary.
+    #[cfg(test)]
+    pub fn insert_pending_kill_for_test(&mut self, pending: PendingKill) {
+        self.pending_kills.insert(pending.pid, pending);
+    }
+
     /// Get policy reference.
     pub fn policy(&self) -> &GovernorPolicy {
         &self.policy
@@ -1255,6 +1275,101 @@ mod tests {
              (the `request_kill` wrapper). D80's actuation caller \
              belongs in `runtime.rs`, NOT here. Found {call_sites} \
              sites in the production region of executor.rs.",
+        );
+    }
+
+    /// DISPATCH 81 — workspace-wide guard on `send_sigkill` callers.
+    /// `send_sigkill` is the FORCED termination path; every caller
+    /// must be either (a) auto_actuate-gated (autonomous path) OR
+    /// (b) operator-consent-gated (manual force-kill). Today there
+    /// is exactly ONE production caller: `execute_after_grace`, the
+    /// thin wrapper that loops over expired pending-kills and calls
+    /// `send_sigkill` on each. The wrapper itself is then called
+    /// from EXACTLY ONE production site:
+    /// `runtime.rs::record_governor_audit` under the auto_actuate
+    /// gate. The combined invariant — "every SIGKILL goes through
+    /// `send_sigkill` which sits behind the same `auto_actuate`
+    /// gate as the SIGTERM path" — is what makes
+    /// `default_off_emits_no_sigterm_and_no_sigkill` pinnable.
+    ///
+    /// When the manual force-kill UX lands (D81 follow-up C4), it
+    /// adds a SECOND `execute_after_grace`-or-`send_sigkill` caller
+    /// — gated on the operator's Enter consent. This test will need
+    /// to bump the expected total to 2 at that time, and the proximity
+    /// check should be extended to also pin the consent gate.
+    #[test]
+    fn send_sigkill_callers_are_gated() {
+        use std::fs;
+        use std::path::PathBuf;
+
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let test_marker = "#[cfg(test)]";
+
+        let read_production = |rel: &str| -> String {
+            let path = root.join(rel);
+            let src = fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+            match src.find(test_marker) {
+                Some(idx) => src[..idx].to_string(),
+                None => src,
+            }
+        };
+
+        let executor = read_production("src/governor/executor.rs");
+        let runtime = read_production("src/runtime.rs");
+
+        // executor.rs internal callers: `execute_after_grace`'s inner
+        // loop (`let result = self.send_sigkill(...);`). That's the
+        // single internal caller; the function itself is a definition
+        // (`pub fn send_sigkill`) and doesn't count.
+        let executor_calls = executor.matches(".send_sigkill(").count();
+        assert_eq!(
+            executor_calls, 1,
+            "executor.rs must contain EXACTLY ONE call to \
+             .send_sigkill( — the internal `execute_after_grace` \
+             loop. A SECOND caller inside executor.rs is almost \
+             certainly a refactor that bypasses execute_after_grace, \
+             which would lose the grace-period gate. Found {executor_calls}.",
+        );
+
+        // runtime.rs callers: today, NONE direct — runtime calls
+        // `execute_after_grace`, which is the orchestrator that owns
+        // the SIGKILL invocation. Pinning runtime.rs send_sigkill
+        // callers = 0 prevents a future refactor from inlining
+        // `execute_after_grace`'s loop into runtime.rs, which would
+        // bypass the central send_sigkill-with-identity-check.
+        let runtime_direct_calls = runtime.matches(".send_sigkill(").count();
+        assert_eq!(
+            runtime_direct_calls, 0,
+            "runtime.rs must NOT call .send_sigkill( directly — the \
+             escalation path goes through `governor.execute_after_grace()` \
+             so every SIGKILL flows through the SAME identity-checking \
+             function. Found {runtime_direct_calls} direct calls.",
+        );
+
+        // Pin the orchestrator caller: `execute_after_grace()` is
+        // called exactly once in runtime.rs production, and it's
+        // lexically preceded within a small window by an
+        // `auto_actuate` reference (the same gate the D80 SIGTERM
+        // path uses — both branches sit behind ONE gate).
+        let execute_after_grace_calls = runtime.matches(".execute_after_grace(").count();
+        assert_eq!(
+            execute_after_grace_calls, 1,
+            "runtime.rs must call execute_after_grace EXACTLY ONCE \
+             (the single auto-escalation site). Found {execute_after_grace_calls}.",
+        );
+        let call_idx = runtime
+            .find(".execute_after_grace(")
+            .expect("execute_after_grace call must be present");
+        let window_start = call_idx.saturating_sub(2048);
+        let window = &runtime[window_start..call_idx];
+        assert!(
+            window.contains("auto_actuate"),
+            "the runtime.rs execute_after_grace call must be lexically \
+             preceded by an `auto_actuate` reference within 2048 chars. \
+             Without that, the SIGKILL escalation path is unguarded — \
+             default-off would no longer hold for the escalation \
+             branch."
         );
     }
 

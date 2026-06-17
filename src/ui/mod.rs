@@ -152,6 +152,11 @@ fn run_loop(
                 tracing::error!("tick failed: {}", e);
             }
             runtime.record_governor_audit();
+            // DISPATCH 83 / C2 — once per tick, check whether a
+            // Waiting-state kill_confirm card's targeted PID has
+            // exited; if so, dismiss the card so the next render
+            // doesn't paint a stale "waiting Ns…" overlay.
+            auto_dismiss_waiting_card_if_target_exited(runtime, &mut app);
             let now = Instant::now();
             // Exit-driven alerts (L8 / §4) are fired by Runtime::tick
             // itself now; this drain is preserved so other consumers
@@ -339,8 +344,29 @@ fn apply_action(
             // Steps 2/3 land in `handle_open_detail`, which detects
             // an already-open card and treats Enter as dismiss.
             // Steps 4/5 also land in the same handler.
+            // DISPATCH 83 / C3 — Enter dispatch on a kill_confirm
+            // card is now stage-dependent:
+            //
+            //   * Confirm  → SIGTERM (today's path) then transition
+            //                to Waiting (card stays open).
+            //   * Waiting  → SIGKILL via the consent-gated path
+            //                (`Runtime::manual_force_kill`) then
+            //                dismiss.
+            //
+            // The non-card cascade (activity browse / live_detail /
+            // post_mortem) is unaffected — only a kill_confirm-open
+            // path peels off here.
             if let Some(card) = app.take_kill_confirm() {
-                confirm_kill_from_card(runtime, app, card);
+                // Take-then-route. The card carries its own stage,
+                // so the peek-first-take dance the pre-D83 code
+                // didn't need either. Confirm-path re-opens a
+                // Waiting card via `app.open_kill_confirm(...)`;
+                // Waiting-path consumes and dismisses.
+                if card.is_waiting() {
+                    force_kill_from_card(runtime, app, card);
+                } else {
+                    confirm_kill_from_card(runtime, app, card);
+                }
             } else if app.is_activity_browsing() {
                 // v1.3.2 / CAR-D75 / DISPATCH 76 — Enter in browse
                 // mode toggles expand on the selected entry, but
@@ -419,23 +445,117 @@ fn apply_action(
     }
 }
 
-/// CAR-17 — Enter-confirm dispatch for the kill_confirm card.
+/// CAR-17 — first-Enter dispatch for the kill_confirm card (Confirm
+/// state). Sends SIGTERM through the manual-kill path (now routed
+/// via `governor.send_sigterm` post-D83/C1 — pending_kills carries
+/// identity tokens).
 ///
-/// Receives the card by value (already taken out of `App` by
-/// `take_kill_confirm`) so the slot is guaranteed cleared by the
-/// time this function runs. Calls `runtime.manual_kill(card.pid, …)`
-/// on the PINNED PID: even if `selected_pid(state)` has drifted to
-/// a different workload between card-open and confirm, the kill
-/// fires on the operator-chosen target.
+/// DISPATCH 83 / C2 — on successful SIGTERM, the card is RE-OPENED
+/// in `Waiting` state so the operator can monitor for the
+/// cooperative exit OR press Enter again to force-SIGKILL through
+/// the consent-gated path. On failure (PID gone, EPERM), the card
+/// is dropped — the SIGTERM never actually went out, so there's
+/// nothing to escalate from.
 ///
-/// Kill is always real post-CAR-17 — no dry-run mode means no
-/// "would have sent" status footer; the manual_kill call either
-/// succeeds (audit entry tells the rest of the story) or logs an
-/// error.
-fn confirm_kill_from_card(runtime: &mut Runtime, _app: &mut App, card: KillConfirmCard) {
-    let reason = "manual kill via TUI (kill_confirm Enter)".to_string();
-    if let Err(e) = runtime.manual_kill(card.pid, reason) {
-        tracing::warn!(pid = card.pid, error = %e, "manual kill failed");
+/// The PID is PINNED at card-open time: even if `selected_pid(state)`
+/// has drifted to a different workload between card-open and confirm,
+/// the kill fires on the operator-chosen target. Same invariant the
+/// v0.3.x ARMED banner enforced via `ArmedKill::pid`.
+fn confirm_kill_from_card(runtime: &mut Runtime, app: &mut App, card: KillConfirmCard) {
+    let reason = "manual kill via TUI (kill_confirm Enter — SIGTERM)".to_string();
+    let pid = card.pid;
+    let name = card.display_name.clone();
+    match runtime.manual_kill(pid, reason) {
+        Ok(()) => {
+            // DISPATCH 83 / C2 — transition the card into Waiting
+            // so the operator can either watch the PID exit (the
+            // SIGTERM-honoring case — most processes) OR force a
+            // SIGKILL via a second Enter (the SIGTERM-ignoring
+            // case — ollama, teleop). The grace window is the
+            // operator's configured `policy.sigterm_grace_secs`.
+            let grace_secs = runtime.config().policy.sigterm_grace_secs;
+            let waiting_card = card.into_waiting(grace_secs);
+            app.open_kill_confirm(waiting_card);
+            // Status footer surfaces the SIGTERM that just fired —
+            // operator sees confirmation of WHICH signal went out
+            // (matches the WAITING_PROMPT's "SIGTERM sent" phrasing).
+            let footer = ux_contract::status::KILL_SENT
+                .replace("{name}", &name)
+                .replace("{pid}", &pid.to_string());
+            app.set_status(footer);
+        }
+        Err(e) => {
+            tracing::warn!(pid, error = %e, "manual kill (SIGTERM) failed");
+            // Card consumed; no Waiting transition. The error path
+            // already failed at SIGTERM, so there's nothing in
+            // pending_kills for the operator to escalate against.
+        }
+    }
+}
+
+/// DISPATCH 83 / C3 — second-Enter dispatch for the kill_confirm
+/// card (Waiting state). The operator has consented to force the
+/// uncatchable SIGKILL on a PID that survived the cooperative
+/// SIGTERM. Routes through `Runtime::manual_force_kill`, which
+/// goes through `governor.send_sigkill` (PID-reuse guard ALWAYS
+/// engages — identity tokens captured at `manual_kill` SIGTERM
+/// time are re-verified here).
+///
+/// The card is taken by value before this is called, so the
+/// overlay drops on the next frame regardless of outcome — the
+/// operator should not see the Waiting prompt linger after their
+/// Enter press.
+///
+/// Status footer:
+///   * Success → `KILL_FORCE_SENT` (operator sees confirmation
+///     that SIGKILL was delivered — distinct from `KILL_SENT`
+///     which names SIGTERM).
+///   * Failure → log only (operator can read the audit panel for
+///     the PidReusedAborted or OS error message).
+fn force_kill_from_card(runtime: &mut Runtime, app: &mut App, card: KillConfirmCard) {
+    let pid = card.pid;
+    let name = card.display_name.clone();
+    match runtime.manual_force_kill(pid) {
+        Ok(()) => {
+            let footer = ux_contract::status::KILL_FORCE_SENT
+                .replace("{name}", &name)
+                .replace("{pid}", &pid.to_string());
+            app.set_status(footer);
+        }
+        Err(e) => {
+            tracing::warn!(pid, error = %e, "manual force-kill (SIGKILL) failed");
+        }
+    }
+}
+
+/// DISPATCH 83 / C2 — auto-dismiss a Waiting-state kill_confirm
+/// card whose targeted PID has exited (the SIGTERM-honoring case).
+/// Called once per tick after `runtime.tick()` so the next render
+/// frame drops the overlay; without this, a card opened on a
+/// cooperative process would render its "waiting Ns…" prompt for
+/// the full grace window even though there's nothing to wait for.
+///
+/// Confirm-state cards are NOT auto-dismissed: an operator who
+/// opened the card on a process that died before they pressed
+/// Enter still gets to see the prompt (and the SIGTERM dispatch
+/// will surface `manual_kill`'s own error, which is louder than
+/// silently dropping the card).
+fn auto_dismiss_waiting_card_if_target_exited(runtime: &Runtime, app: &mut App) {
+    let Some(card) = app.kill_confirm() else {
+        return;
+    };
+    if !card.is_waiting() {
+        return;
+    }
+    let pid = card.pid;
+    let still_present = runtime
+        .state()
+        .last_lifecycle
+        .as_ref()
+        .map(|lc| lc.processes.contains_key(&pid))
+        .unwrap_or(false);
+    if !still_present {
+        app.dismiss_kill_confirm();
     }
 }
 

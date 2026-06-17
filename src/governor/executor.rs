@@ -1278,25 +1278,33 @@ mod tests {
         );
     }
 
-    /// DISPATCH 81 — workspace-wide guard on `send_sigkill` callers.
-    /// `send_sigkill` is the FORCED termination path; every caller
-    /// must be either (a) auto_actuate-gated (autonomous path) OR
-    /// (b) operator-consent-gated (manual force-kill). Today there
-    /// is exactly ONE production caller: `execute_after_grace`, the
-    /// thin wrapper that loops over expired pending-kills and calls
-    /// `send_sigkill` on each. The wrapper itself is then called
-    /// from EXACTLY ONE production site:
-    /// `runtime.rs::record_governor_audit` under the auto_actuate
-    /// gate. The combined invariant — "every SIGKILL goes through
-    /// `send_sigkill` which sits behind the same `auto_actuate`
-    /// gate as the SIGTERM path" — is what makes
-    /// `default_off_emits_no_sigterm_and_no_sigkill` pinnable.
+    /// DISPATCH 83 — workspace-wide guard on `send_sigkill` callers,
+    /// updated from D81 to admit the manual operator-consent path.
     ///
-    /// When the manual force-kill UX lands (D81 follow-up C4), it
-    /// adds a SECOND `execute_after_grace`-or-`send_sigkill` caller
-    /// — gated on the operator's Enter consent. This test will need
-    /// to bump the expected total to 2 at that time, and the proximity
-    /// check should be extended to also pin the consent gate.
+    /// Two production callers post-D83, each behind its own gate:
+    ///
+    ///   * AUTO: `record_governor_audit` calls
+    ///     `governor.execute_after_grace()` (which loops calling
+    ///     `send_sigkill` internally). Gated on `auto_actuate`.
+    ///   * MANUAL: `manual_force_kill` calls `governor.send_sigkill`
+    ///     directly. Gated by being reachable only from the TUI's
+    ///     `force_kill_from_card` (operator pressed Enter on a
+    ///     Waiting-state `KillConfirmCard`). The function name
+    ///     itself signals the gate; the dispatcher is the only
+    ///     consumer of the runtime API method.
+    ///
+    /// The test pins both gates structurally:
+    ///   1. Exactly ONE internal `.send_sigkill(` inside executor.rs
+    ///      (the `execute_after_grace` loop).
+    ///   2. Exactly ONE runtime `.send_sigkill(` — and it MUST be
+    ///      inside `fn manual_force_kill`, not in
+    ///      `record_governor_audit` or anywhere else.
+    ///   3. Exactly ONE runtime `.execute_after_grace(` call, and
+    ///      that call is `auto_actuate`-gated by proximity.
+    ///
+    /// An unrouted direct `send_sigkill` (one that doesn't sit
+    /// inside `manual_force_kill`) fails this test — that's the
+    /// drift this guard catches.
     #[test]
     fn send_sigkill_callers_are_gated() {
         use std::fs;
@@ -1318,83 +1326,105 @@ mod tests {
         let executor = read_production("src/governor/executor.rs");
         let runtime = read_production("src/runtime.rs");
 
-        // executor.rs internal callers: `execute_after_grace`'s inner
-        // loop (`let result = self.send_sigkill(...);`). That's the
-        // single internal caller; the function itself is a definition
-        // (`pub fn send_sigkill`) and doesn't count.
+        // (1) executor.rs internal callers: `execute_after_grace`'s
+        // inner loop. Unchanged from D81.
         let executor_calls = executor.matches(".send_sigkill(").count();
         assert_eq!(
             executor_calls, 1,
             "executor.rs must contain EXACTLY ONE call to \
              .send_sigkill( — the internal `execute_after_grace` \
-             loop. A SECOND caller inside executor.rs is almost \
-             certainly a refactor that bypasses execute_after_grace, \
-             which would lose the grace-period gate. Found {executor_calls}.",
+             loop. Found {executor_calls}.",
         );
 
-        // runtime.rs callers: today, NONE direct — runtime calls
-        // `execute_after_grace`, which is the orchestrator that owns
-        // the SIGKILL invocation. Pinning runtime.rs send_sigkill
-        // callers = 0 prevents a future refactor from inlining
-        // `execute_after_grace`'s loop into runtime.rs, which would
-        // bypass the central send_sigkill-with-identity-check.
+        // (2) runtime.rs direct callers: exactly ONE — the
+        // `manual_force_kill` operator-consent path. Pre-D83 this
+        // was 0 (auto path went through `execute_after_grace`); D83
+        // adds the manual direct caller, which MUST be inside
+        // `fn manual_force_kill`.
         let runtime_direct_calls = runtime.matches(".send_sigkill(").count();
         assert_eq!(
-            runtime_direct_calls, 0,
-            "runtime.rs must NOT call .send_sigkill( directly — the \
-             escalation path goes through `governor.execute_after_grace()` \
-             so every SIGKILL flows through the SAME identity-checking \
-             function. Found {runtime_direct_calls} direct calls.",
+            runtime_direct_calls, 1,
+            "runtime.rs must contain EXACTLY ONE direct call to \
+             .send_sigkill( — the operator-consent-gated \
+             `manual_force_kill`. A SECOND direct caller anywhere \
+             would mean an UNgated SIGKILL path landed; that's the \
+             drift this guard catches. Found {runtime_direct_calls}.",
         );
 
-        // Pin the orchestrator caller: `execute_after_grace()` is
-        // called exactly once in runtime.rs production, and it's
-        // lexically preceded within a small window by an
-        // `auto_actuate` reference (the same gate the D80 SIGTERM
-        // path uses — both branches sit behind ONE gate).
+        // (2a) Pin that the direct `send_sigkill` call lives inside
+        // `fn manual_force_kill`. We locate `fn manual_force_kill`
+        // and check that exactly ONE `.send_sigkill(` call appears
+        // between it and the next `pub fn` boundary. Refactoring the
+        // call out of this function would strip the consent gate.
+        let mf_start = runtime
+            .find("fn manual_force_kill")
+            .unwrap_or_else(|| panic!("runtime.rs must define fn manual_force_kill"));
+        let after = &runtime[mf_start..];
+        let body_end = after.find("\n    pub fn ").unwrap_or(after.len());
+        let body = &after[..body_end];
+        assert_eq!(
+            body.matches(".send_sigkill(").count(),
+            1,
+            "fn manual_force_kill MUST contain exactly ONE \
+             .send_sigkill( call. If 0, the direct caller lives \
+             somewhere else (drift); if ≥2, the function shape is \
+             unexpected.",
+        );
+
+        // (3) Auto path: `execute_after_grace` is called exactly
+        // once and that call is `auto_actuate`-gated by proximity.
+        // Unchanged from D81 — the auto SIGKILL path still flows
+        // through the wrapper.
         let execute_after_grace_calls = runtime.matches(".execute_after_grace(").count();
         assert_eq!(
             execute_after_grace_calls, 1,
             "runtime.rs must call execute_after_grace EXACTLY ONCE \
-             (the single auto-escalation site). Found {execute_after_grace_calls}.",
+             (the auto-escalation site). Found {execute_after_grace_calls}.",
         );
         let call_idx = runtime
             .find(".execute_after_grace(")
-            .expect("execute_after_grace call must be present");
+            .unwrap_or_else(|| panic!("execute_after_grace call must be present"));
         let window_start = call_idx.saturating_sub(2048);
         let window = &runtime[window_start..call_idx];
         assert!(
             window.contains("auto_actuate"),
             "the runtime.rs execute_after_grace call must be lexically \
              preceded by an `auto_actuate` reference within 2048 chars. \
-             Without that, the SIGKILL escalation path is unguarded — \
-             default-off would no longer hold for the escalation \
-             branch."
+             Without that, the auto SIGKILL escalation is unguarded."
         );
     }
 
-    /// DISPATCH 80 — workspace-wide actuation guard. Reads BOTH
-    /// `executor.rs` and `runtime.rs` (the only production files
-    /// where a caller could live) and pins:
+    /// DISPATCH 83 — workspace-wide guard on `send_sigterm` callers,
+    /// updated from D80 to admit the manual operator-initiated path.
     ///
-    ///   1. Total production callers = exactly 2.
-    ///      - `executor.rs::request_kill` (internal wrapper).
-    ///      - `runtime.rs::record_governor_audit` (the new gated
-    ///        actuation site).
-    ///   2. The `runtime.rs` caller is lexically preceded within
-    ///      2048 chars by an `auto_actuate` reference — the
-    ///      opt-in gate. If a future refactor accidentally moves
-    ///      the gate too far above the call, OR removes it
-    ///      entirely, this fires before the default-off invariant
-    ///      breaks in production.
+    /// Three production callers post-D83, each behind its own gate:
     ///
-    /// This is the CONVERTED form of the pre-D80 tripwire
-    /// `send_sigterm_has_no_new_production_callers`. The pre-D80
-    /// version asserted ZERO non-wrapper callers; D80 deliberately
-    /// adds ONE gated caller, so the test was updated rather than
-    /// deleted (per the dispatch's explicit instruction). The
-    /// guarantee shifts from "no production callers" to "exactly
-    /// one production caller, and it is auto_actuate-gated."
+    ///   * `executor.rs::request_kill` (internal alias wrapper, used
+    ///     by `tests/governor_pid_reuse.rs`).
+    ///   * `runtime.rs::record_governor_audit` (AUTO path —
+    ///     auto_actuate-gated, default false).
+    ///   * `runtime.rs::manual_kill` (MANUAL path — operator-initiated
+    ///     by the TUI's `k` keybinding; NOT auto_actuate-gated, but
+    ///     reachable only via deliberate operator action).
+    ///
+    /// Pre-D83 the manual SIGTERM called `libc::kill` directly via
+    /// `ManualKiller::kill_sigterm`, so `pending_kills` never tracked
+    /// it and the D81 force-SIGKILL escalation had nothing to
+    /// verify identity against. D83/C1 routes it through
+    /// `send_sigterm` so the v1.0.1 PID-reuse guard's identity
+    /// tokens are captured at SIGTERM time, ready for force-SIGKILL.
+    ///
+    /// The test pins both gates structurally:
+    ///   1. Exactly THREE total production callers.
+    ///   2. Exactly TWO runtime.rs callers (auto + manual).
+    ///   3. The auto-site call lives inside `fn record_governor_audit`
+    ///      AND is `auto_actuate`-proximity-gated.
+    ///   4. The manual-site call lives inside `fn manual_kill` (no
+    ///      auto_actuate proximity — manual is operator-initiated).
+    ///
+    /// A new runtime caller that doesn't sit in one of these two
+    /// functions fails this test — that's the drift this guard
+    /// catches.
     #[test]
     fn send_sigterm_actuation_site_is_auto_actuate_gated() {
         use std::fs;
@@ -1413,54 +1443,79 @@ mod tests {
             }
         };
 
+        // Helper: substring from a `fn <name>` declaration up to the
+        // next `pub fn` boundary. Used to pin each runtime caller to
+        // its expected function body.
+        let fn_body = |src: &str, name: &str| -> String {
+            let needle = format!("fn {name}");
+            let start = src.find(&needle).unwrap_or_else(|| {
+                panic!("runtime.rs must define fn {name} (D83 requires it)")
+            });
+            let after = &src[start..];
+            let end = after.find("\n    pub fn ").unwrap_or(after.len());
+            after[..end].to_string()
+        };
+
         let executor = read_production("src/governor/executor.rs");
         let runtime = read_production("src/runtime.rs");
         let executor_calls = executor.matches(".send_sigterm(").count();
         let runtime_calls = runtime.matches(".send_sigterm(").count();
         let total = executor_calls + runtime_calls;
 
+        // (1) Exactly THREE total callers post-D83.
         assert_eq!(
-            total, 2,
-            "expected exactly TWO production callers of send_sigterm \
-             post-D80: (1) the internal `request_kill` wrapper in \
-             executor.rs (re-entry for tests/governor_pid_reuse.rs) \
-             and (2) the auto_actuate-gated tick-loop actuation site \
-             in runtime.rs::record_governor_audit. Found total={total} \
+            total, 3,
+            "expected exactly THREE production callers of send_sigterm \
+             post-D83: (1) the internal `request_kill` wrapper in \
+             executor.rs, (2) the auto_actuate-gated tick-loop \
+             actuation site in runtime.rs::record_governor_audit, \
+             and (3) the manual operator-initiated path in \
+             runtime.rs::manual_kill. Found total={total} \
              (executor={executor_calls}, runtime={runtime_calls}). \
-             A NEW caller anywhere is suspicious — actuation must \
-             stay funnelled through the gated site.",
+             A NEW caller anywhere else is suspicious — actuation \
+             must stay funnelled through these three known sites.",
         );
         assert_eq!(
-            runtime_calls, 1,
-            "runtime.rs must contain EXACTLY ONE call to \
-             .send_sigterm( — the auto_actuate-gated actuation \
-             site. Found {runtime_calls}.",
+            runtime_calls, 2,
+            "runtime.rs must contain EXACTLY TWO calls to \
+             .send_sigterm( — the auto path (in record_governor_audit) \
+             and the manual path (in manual_kill). Found {runtime_calls}.",
         );
 
-        // Pin the gate proximity. The runtime.rs caller MUST be
-        // lexically preceded by an `auto_actuate` reference within
-        // a small window. We look BACKWARDS from the call site
-        // because the function shape is `if !auto_actuate { return; }
-        // ... .send_sigterm(...)` — the gate is the early-return
-        // above the call, anywhere within the same function body.
-        // 2048 chars is comfortably more than this function's
-        // current body but tight enough to catch a refactor that
-        // moves the gate out into a caller (which would leave the
-        // actuation site itself textually ungated).
-        let call_idx = runtime
-            .find(".send_sigterm(")
-            .expect("runtime.rs send_sigterm call must be findable");
-        let window_start = call_idx.saturating_sub(2048);
-        let window = &runtime[window_start..call_idx];
-        assert!(
-            window.contains("auto_actuate"),
-            "the runtime.rs send_sigterm call must be lexically \
-             preceded by an `auto_actuate` reference within 2048 \
-             chars (the opt-in gate). Without that, the default-OFF \
-             invariant is unenforceable by inspection. The gate \
-             pattern is `if !self.config.governor.auto_actuate {{ \
-             return; }}` at the top of the actuation function — \
-             if it has moved or been removed, this fires."
+        // (2) Auto-site: inside `fn record_governor_audit`, exactly
+        // ONE call, lexically gated on `auto_actuate`.
+        let auto_body = fn_body(&runtime, "record_governor_audit");
+        assert_eq!(
+            auto_body.matches(".send_sigterm(").count(),
+            1,
+            "fn record_governor_audit must contain exactly ONE \
+             .send_sigterm( call (the auto path). If 0, the call \
+             moved out (drift); if ≥2, structural surprise.",
         );
+        assert!(
+            auto_body.contains("auto_actuate"),
+            "fn record_governor_audit must reference `auto_actuate` \
+             (the gate). Without that reference the default-OFF \
+             invariant is unenforceable by inspection.",
+        );
+
+        // (3) Manual-site: inside `fn manual_kill`, exactly ONE
+        // call. NOT auto_actuate-gated (this is the operator path,
+        // reached only when the operator presses `k` + Enter on the
+        // kill_confirm card).
+        let manual_body = fn_body(&runtime, "manual_kill");
+        assert_eq!(
+            manual_body.matches(".send_sigterm(").count(),
+            1,
+            "fn manual_kill must contain exactly ONE .send_sigterm( \
+             call (the operator-initiated path). If 0, the call \
+             moved out of the operator gate (drift); if ≥2, \
+             structural surprise.",
+        );
+        // (4) Default-off invariant pin: the manual path must not
+        // create an `auto_actuate`-relevant caller. The auto path's
+        // gate is the early-return in `record_governor_audit`; the
+        // manual path uses operator consent at the TUI dispatcher
+        // and is allowed to be auto_actuate-free.
     }
 }

@@ -32,6 +32,42 @@ use ux_contract::kill_confirm_card as kcc;
 use crate::ui::panels::postmortem::{CARD_MAX_HEIGHT, CARD_MIN_HEIGHT, CARD_WIDTH, format_megabytes};
 use crate::ui::theme::UiTheme;
 
+/// DISPATCH 83 / C2 — kill_confirm card sub-state.
+///
+/// The card flows: `Confirm` (operator pressed `k` — about to send
+/// SIGTERM) → `Waiting` (SIGTERM sent, holding open for the grace
+/// window; operator can force-SIGKILL via a second Enter, or Esc
+/// to dismiss the card while leaving the SIGTERM in effect). The
+/// pre-D83 single-state card maps to `Confirm`; the `Waiting`
+/// state is the new escalation surface.
+#[derive(Debug, Clone)]
+pub enum KillConfirmStage {
+    /// The initial state: the operator has pressed `k` and the card
+    /// is asking for SIGTERM confirmation. Enter sends SIGTERM and
+    /// transitions to `Waiting`; Esc dismisses.
+    Confirm,
+    /// Post-SIGTERM holding state. SIGTERM is already in flight;
+    /// the card stays open so the operator can either watch the PID
+    /// exit (auto-dismiss on lifecycle exit) or escalate via a
+    /// second Enter (force-SIGKILL through the D81 identity-guard
+    /// path). Esc dismisses the card without escalation; the SIGTERM
+    /// remains in effect (`pending_kills` entry survives until the
+    /// PID actually exits).
+    Waiting {
+        /// Wall-clock instant at which the SIGTERM was sent. Drives
+        /// the `{secs}` countdown substitution in
+        /// `KILL_CONFIRM_WAITING_PROMPT` rendering and gates whether
+        /// the lifecycle "this PID hasn't exited yet" check is
+        /// meaningful (a Waiting card pre-`sigterm_grace_secs` is
+        /// still in the cooperative-shutdown window).
+        sigterm_at: Instant,
+        /// `policy.sigterm_grace_secs` snapshotted at the moment of
+        /// transition so a config change mid-prompt can't shift the
+        /// rendered countdown.
+        grace_secs: u64,
+    },
+}
+
 /// Snapshot of the workload the kill_confirm card targets. Owned by
 /// `App` and replaced wholesale when the operator presses `k` (a fresh
 /// snapshot is built from the current `RuntimeState`). Cheap to clone.
@@ -66,6 +102,11 @@ pub struct KillConfirmCard {
     /// for non-allowlisted workloads.
     pub allowlisted: bool,
     pub shown_at: Instant,
+    /// DISPATCH 83 / C2 — escalation sub-state. Defaults to
+    /// `Confirm` for fresh cards built via `KillConfirmCard::new`;
+    /// transitions to `Waiting` via `into_waiting` after the
+    /// operator's first Enter confirms the SIGTERM.
+    pub stage: KillConfirmStage,
 }
 
 impl KillConfirmCard {
@@ -97,14 +138,56 @@ impl KillConfirmCard {
             vram_mb,
             allowlisted,
             shown_at: Instant::now(),
+            stage: KillConfirmStage::Confirm,
         }
     }
 
     /// How long the card has been open. Pure read; the card has no
     /// auto-dismiss window — the operator's explicit Enter / Esc is
-    /// the only exit path.
+    /// the only exit path. Post-D83: a `Waiting`-state card can
+    /// also auto-dismiss when the lifecycle reports the targeted
+    /// PID has exited (the SIGTERM succeeded; no escalation needed).
     pub fn elapsed(&self) -> Duration {
         self.shown_at.elapsed()
+    }
+
+    /// DISPATCH 83 / C2 — transition a Confirm-state card into the
+    /// post-SIGTERM Waiting state. Snapshots `grace_secs` from the
+    /// caller (`policy.sigterm_grace_secs`) so the rendered
+    /// countdown can't shift if the config mutates while the prompt
+    /// is open. Idempotent on a Waiting card (the existing stage is
+    /// preserved — re-transitioning would reset the countdown which
+    /// would mis-represent the actual SIGTERM timestamp).
+    pub fn into_waiting(self, grace_secs: u64) -> Self {
+        let stage = match self.stage {
+            KillConfirmStage::Confirm => KillConfirmStage::Waiting {
+                sigterm_at: Instant::now(),
+                grace_secs,
+            },
+            KillConfirmStage::Waiting { .. } => self.stage,
+        };
+        Self { stage, ..self }
+    }
+
+    /// `true` when the card is in the post-SIGTERM Waiting state.
+    /// Used by the apply_action dispatcher to route the operator's
+    /// Enter press: Confirm → SIGTERM; Waiting → force-SIGKILL.
+    pub fn is_waiting(&self) -> bool {
+        matches!(self.stage, KillConfirmStage::Waiting { .. })
+    }
+
+    /// Whole-second count of how much grace remains before the
+    /// rendered prompt reaches `0s`. Returns 0 in the Confirm state
+    /// (no SIGTERM has been sent) and `saturating_sub` so a slow
+    /// render past grace just reads `0s` rather than wrapping.
+    pub fn grace_secs_remaining(&self) -> u64 {
+        match &self.stage {
+            KillConfirmStage::Waiting {
+                sigterm_at,
+                grace_secs,
+            } => grace_secs.saturating_sub(sigterm_at.elapsed().as_secs()),
+            KillConfirmStage::Confirm => 0,
+        }
     }
 }
 
@@ -198,18 +281,33 @@ pub fn build_lines(card: &KillConfirmCard, theme: &UiTheme) -> Vec<Line<'static>
     // 7. blank
     lines.push(Line::from(""));
 
-    // 8. Prompt — bold attention color so the question reads above the
-    //    field list.
+    // 8. Prompt — bold attention color so the question reads above
+    //    the field list. DISPATCH 83 / C2 — the Waiting state
+    //    substitutes the SIGTERM-in-flight prompt + countdown
+    //    (`KILL_CONFIRM_WAITING_PROMPT` with `{secs}` filled). The
+    //    Confirm state keeps the pre-D83 SIGTERM confirmation
+    //    prompt unchanged.
+    let prompt = match &card.stage {
+        KillConfirmStage::Confirm => kcc::KILL_CONFIRM_PROMPT.to_string(),
+        KillConfirmStage::Waiting { .. } => kcc::KILL_CONFIRM_WAITING_PROMPT
+            .replace("{secs}", &card.grace_secs_remaining().to_string()),
+    };
     lines.push(Line::from(Span::styled(
-        kcc::KILL_CONFIRM_PROMPT,
+        prompt,
         Style::default()
             .fg(theme.attention)
             .add_modifier(Modifier::BOLD),
     )));
 
     // 9. Footer hint — muted so it reads as an exit-route legend.
+    //    Waiting state surfaces the [Enter] force-kill / [Esc] cancel
+    //    legend; Confirm state keeps the pre-D83 legend.
+    let hint = match &card.stage {
+        KillConfirmStage::Confirm => kcc::KILL_CONFIRM_HINT,
+        KillConfirmStage::Waiting { .. } => kcc::KILL_CONFIRM_WAITING_HINT,
+    };
     lines.push(Line::from(Span::styled(
-        kcc::KILL_CONFIRM_HINT,
+        hint,
         Style::default().fg(theme.muted),
     )));
 
@@ -401,5 +499,108 @@ mod tests {
         assert_eq!(format_runtime(5), "5s");
         assert_eq!(format_runtime(65), "1m 5s");
         assert_eq!(format_runtime(3_725), "1h 2m 5s");
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // DISPATCH 83 / C2 — Waiting-state rendering and stage helpers.
+    // ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn new_card_starts_in_confirm_stage() {
+        let card = fixture();
+        assert!(
+            matches!(card.stage, KillConfirmStage::Confirm),
+            "fresh KillConfirmCard::new() MUST default to Confirm stage; \
+             the Waiting transition only happens after manual_kill succeeds"
+        );
+        assert!(!card.is_waiting());
+        assert_eq!(card.grace_secs_remaining(), 0);
+    }
+
+    #[test]
+    fn into_waiting_transitions_only_from_confirm() {
+        let card = fixture();
+        let waiting = card.into_waiting(7);
+        assert!(waiting.is_waiting());
+        assert!(matches!(
+            waiting.stage,
+            KillConfirmStage::Waiting { grace_secs: 7, .. }
+        ));
+        // Idempotent: re-transitioning a Waiting card MUST preserve
+        // the original sigterm_at so the rendered countdown reflects
+        // the actual SIGTERM time, not a reset.
+        let pre = match &waiting.stage {
+            KillConfirmStage::Waiting { sigterm_at, .. } => *sigterm_at,
+            _ => unreachable!(),
+        };
+        let again = waiting.into_waiting(99);
+        let post = match &again.stage {
+            KillConfirmStage::Waiting {
+                sigterm_at,
+                grace_secs,
+            } => (*sigterm_at, *grace_secs),
+            _ => unreachable!(),
+        };
+        assert_eq!(
+            post.0, pre,
+            "re-transitioning Waiting must not reset sigterm_at"
+        );
+        assert_eq!(
+            post.1, 7,
+            "re-transitioning Waiting must preserve original grace_secs (not 99)"
+        );
+    }
+
+    #[test]
+    fn waiting_card_renders_v0_3_19_waiting_strings() {
+        // DISPATCH 83 / C2 — pin that the Waiting state renders the
+        // v0.3.19 contract strings (`KILL_CONFIRM_WAITING_PROMPT`
+        // with `{secs}` substituted + `KILL_CONFIRM_WAITING_HINT`),
+        // NOT the Confirm-state strings.
+        let card = fixture().into_waiting(5);
+        let rendered = render_string(&card);
+        // Waiting prompt with the literal "{secs}" replaced by a
+        // small number (the test runs near-instantly so the
+        // countdown reads 5).
+        assert!(
+            rendered.contains("SIGTERM sent") && rendered.contains("graceful shutdown"),
+            "Waiting card must render KILL_CONFIRM_WAITING_PROMPT:\n{rendered}",
+        );
+        assert!(
+            !rendered.contains("{secs}"),
+            "Waiting prompt MUST have {{secs}} substituted (not the \
+             literal placeholder):\n{rendered}",
+        );
+        assert!(
+            rendered.contains(kcc::KILL_CONFIRM_WAITING_HINT),
+            "Waiting card must render KILL_CONFIRM_WAITING_HINT:\n{rendered}",
+        );
+        // Pre-D83 Confirm-state strings MUST NOT appear (otherwise
+        // both prompts/hints render on top of each other).
+        assert!(
+            !rendered.contains(kcc::KILL_CONFIRM_PROMPT),
+            "Confirm prompt MUST NOT render in Waiting state:\n{rendered}",
+        );
+        assert!(
+            !rendered.contains(kcc::KILL_CONFIRM_HINT),
+            "Confirm hint MUST NOT render in Waiting state:\n{rendered}",
+        );
+    }
+
+    #[test]
+    fn grace_secs_remaining_saturates_at_zero() {
+        // Build a Waiting card with an in-the-past sigterm_at so
+        // the elapsed time exceeds grace_secs immediately. The
+        // saturating_sub MUST return 0, not wrap.
+        let mut card = fixture();
+        card.stage = KillConfirmStage::Waiting {
+            sigterm_at: Instant::now() - std::time::Duration::from_secs(999),
+            grace_secs: 5,
+        };
+        assert_eq!(
+            card.grace_secs_remaining(),
+            0,
+            "elapsed > grace_secs MUST saturate to 0, not wrap"
+        );
     }
 }

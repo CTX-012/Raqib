@@ -1460,9 +1460,43 @@ impl Runtime {
         d.publish_metrics(snap);
     }
 
-    /// Manual-kill entry point used by the TUI keybinding. Returns Err if
-    /// the PID is gone or the kill failed; success is logged to the audit
-    /// trail and surfaced in the UI's audit panel.
+    /// Manual-kill entry point used by the TUI keybinding (operator
+    /// presses `k` then Enter on the Confirm-state `KillConfirmCard`).
+    /// Returns Err if the PID is gone or the kill failed; success is
+    /// logged to the audit trail and surfaced in the UI's audit panel.
+    ///
+    /// ## DISPATCH 83 / C1 — routed through `send_sigterm`
+    ///
+    /// Pre-D83 this called `ManualKiller::kill_sigterm` directly,
+    /// which called `libc::kill(pid, SIGTERM)` raw — so the PID never
+    /// landed in `pending_kills`, and the D81 escalation machinery
+    /// had nothing to escalate. After D83 the SIGTERM goes through
+    /// `governor.send_sigterm`, which:
+    ///
+    ///   1. Captures pidfd + `/proc/<pid>/stat` starttime BEFORE the
+    ///      signal (the v1.0.1 PID-reuse guard).
+    ///   2. Populates `pending_kills` with the identity tokens so
+    ///      `send_sigkill` can verify them later.
+    ///   3. Inserts the PID into the rate-limit window (counted as a
+    ///      kill against the per-minute budget, even though it was
+    ///      operator-initiated).
+    ///
+    /// The audit entry is built in-place here with `KillSource::Manual`;
+    /// it is NOT routed through `ManualKiller::kill_sigterm`'s
+    /// internal audit log (`KillSource::Manual` source is enforced
+    /// by the constructors we call, and the audit-trail bridge into
+    /// `state.audit` + `audit_writer` + `governor_killed_pids` was
+    /// the only reason that path existed).
+    ///
+    /// ## NOT auto_actuate-gated
+    ///
+    /// Auto kills require `governor.auto_actuate = true`. This path
+    /// does NOT consult that gate — manual kills are operator-driven
+    /// and always available (the operator's `k` + Enter IS the
+    /// consent surface). The `default_off_emits_zero_kills` and
+    /// `default_off_emits_no_sigterm_and_no_sigkill` invariants
+    /// remain unaffected because they assert no AUTONOMOUS kill
+    /// fires; this path requires deliberate operator action.
     pub fn manual_kill(&mut self, pid: u32, reason: String) -> Result<(), String> {
         let lifecycle = self
             .state
@@ -1477,57 +1511,187 @@ impl Runtime {
         // confirms; the UI is responsible for the confirm prompt.
         let _is_allowlisted = ManualKiller::is_allowlisted(&name, &self.governor);
 
+        // DISPATCH 83 / C1 — manual SIGTERM via the same path as
+        // auto-kill, so `pending_kills` carries the identity tokens
+        // for any later force-SIGKILL. `send_sigterm` requires a
+        // non-optional `AICategory`; when the classifier didn't tag
+        // the workload (operator killing a non-AI process), default
+        // to `NotAi`, the honest "we didn't classify this" value.
+        let send_category = category.unwrap_or(AICategory::NotAi);
         let result = self
-            .manual_killer
-            .kill_sigterm(pid, name.clone(), category, reason)
+            .governor
+            .send_sigterm(pid, name.clone(), send_category)
             .map_err(|e| e.to_string());
 
-        // Mirror the audit entry into the bounded UI buffer and, when
-        // configured, the persistent JSONL trail.
-        if let Some(entry) = self.manual_killer.audit_log().entries().last() {
-            if let Some(w) = &self.audit_writer
-                && let Err(e) = w.append(entry)
-            {
-                tracing::warn!(error = %e, "failed to persist manual-kill audit entry");
-            }
-            // v1.3.2 / DISPATCH 70 (P1#1) — bridge the manual-kill
-            // path into the exit-classifier's `killed_by_governor`
-            // signal. Pre-v1.3.2 this HashMap had ZERO writers:
-            // automated kills were unwired since v1.0.1 and the
-            // manual path never populated it, so every manual-k
-            // → SIGTERM exit fell through to
-            // `ExitReason::from_summary` and recorded
-            // `exit_kind="unknown"` even though we KNEW the
-            // reason. Writing the audit entry's reason here means
-            // the next lifecycle drain's `classify_exit` (called
-            // at `runtime.rs:1032-1056`) sees
-            // `killed_by_governor = true` and produces
-            // `ExitReason::GovernorKill { reason }`.
-            //
-            // Gated on `entry.success`: only insert when the
-            // SIGTERM actually went out. A failed kill (process
-            // already gone, permission denied) MUST NOT pre-tag
-            // the PID — if the OS later assigns the PID to an
-            // unrelated process before the lifecycle reaper
-            // notices, the stale entry would mis-attribute the
-            // new process's exit as a governor kill.
-            //
-            // Reap point: the entry is `remove()`d at the lifecycle
-            // exit-drain (`runtime.rs:1032`); the HashMap therefore
-            // grows by at most one entry per outstanding manual
-            // kill and shrinks back to zero on the next tick that
-            // surfaces the exit. No unbounded growth path exists.
-            if entry.success {
-                self.governor_killed_pids
-                    .insert(pid, entry.reason.clone());
-            }
-            self.state.audit.push_back(entry.clone());
-            while self.state.audit.len() > self.config.runtime.audit_history {
-                self.state.audit.pop_front();
-            }
+        let entry = match &result {
+            Ok(()) => AuditLogEntry::success(
+                ManualKillAction::SendSigterm,
+                pid,
+                name.clone(),
+                category,
+                reason.clone(),
+            ),
+            Err(e) => AuditLogEntry::failure(
+                ManualKillAction::SendSigterm,
+                pid,
+                name.clone(),
+                category,
+                reason.clone(),
+                e.clone(),
+            ),
+        };
+
+        // Persist the entry to the JSONL trail (when configured)
+        // before pushing into the in-memory ring, so a crash between
+        // the two leaves the durable trail intact.
+        if let Some(w) = &self.audit_writer
+            && let Err(e) = w.append(&entry)
+        {
+            tracing::warn!(error = %e, "failed to persist manual-kill audit entry");
+        }
+
+        // v1.3.2 / DISPATCH 70 (P1#1) — bridge the manual-kill path
+        // into the exit-classifier's `killed_by_governor` signal so
+        // the eventual exit records `ExitReason::GovernorKill { reason }`.
+        // Gated on `entry.success`: a failed kill (process gone,
+        // permission denied) MUST NOT pre-tag the PID — if the OS
+        // later assigns the PID to an unrelated process before the
+        // lifecycle reaper notices, the stale entry would
+        // mis-attribute the new process's exit as a governor kill.
+        if entry.success {
+            self.governor_killed_pids
+                .insert(pid, entry.reason.clone());
+        }
+        self.state.audit.push_back(entry);
+        while self.state.audit.len() > self.config.runtime.audit_history {
+            self.state.audit.pop_front();
         }
 
         result
+    }
+
+    /// DISPATCH 83 / C3 — operator-consent-gated SIGKILL escalation.
+    /// Called from the TUI when the operator presses Enter on a
+    /// `KillConfirmCard` in `Waiting` state (i.e. a SIGTERM has been
+    /// sent and the operator is now consenting to force the
+    /// uncatchable kill).
+    ///
+    /// ## Consent, not auto_actuate
+    ///
+    /// Unlike the D81 auto-escalation (gated on `auto_actuate`),
+    /// this path is gated by the OPERATOR's Enter press at the
+    /// dispatch layer (`apply_action` in `src/ui/mod.rs`). Reaching
+    /// this method already implies operator consent — there is no
+    /// other caller. The `send_sigkill_callers_are_gated` tripwire
+    /// pins that invariant: this is the only runtime-direct
+    /// `send_sigkill` caller, and it lives inside a function whose
+    /// name distinguishes it from `record_governor_audit`.
+    ///
+    /// ## PID-reuse guard ALWAYS engages
+    ///
+    /// The SIGKILL goes through `governor.send_sigkill`, which
+    /// re-verifies the pidfd / starttime captured at SIGTERM time
+    /// (in `manual_kill` above, via `send_sigterm`). Mismatch →
+    /// `KillAction::PidReusedAborted`, NO signal sent. This is
+    /// CRITICAL for the manual path: the operator may take seconds
+    /// or minutes to press Enter, opening a long reuse window where
+    /// the kernel could reassign the PID to an unrelated process.
+    /// The v1.0.1 hazard is non-negotiable here.
+    ///
+    /// Returns `Ok(())` only when SIGKILL was actually delivered
+    /// (`KillAction::SignalKillSent`). Refusal (`PidReusedAborted`)
+    /// and OS errors return `Err` with an operator-actionable
+    /// message; the audit trail records both outcomes.
+    pub fn manual_force_kill(&mut self, pid: u32) -> Result<(), String> {
+        let lifecycle = self
+            .state
+            .last_lifecycle
+            .as_ref()
+            .ok_or_else(|| "no snapshot available yet".to_string())?;
+
+        // Identity for the audit entry. Prefer the live lifecycle row
+        // (the PID may still be alive — that's exactly why we're
+        // force-killing). Fall back to `pending_kills` (captured at
+        // manual SIGTERM time) when the lifecycle has already
+        // reaped the entry.
+        let (name, category) = lifecycle
+            .processes
+            .get(&pid)
+            .map(|lc| (lc.name.clone(), lc.category))
+            .unwrap_or_else(|| {
+                let pending = self.governor.get_pending_kills();
+                let from_pending = pending.iter().find(|p| p.pid == pid);
+                let n = from_pending
+                    .map(|p| p.name.clone())
+                    .unwrap_or_else(|| "<unknown>".to_string());
+                let c = from_pending.map(|p| p.category);
+                (n, c)
+            });
+
+        let reason = "operator force-kill via TUI (kill_confirm Waiting → Enter)".to_string();
+        let kill_result = self.governor.send_sigkill(pid, &name);
+
+        let entry = match &kill_result {
+            Ok(KillAction::SignalKillSent) => AuditLogEntry::success(
+                ManualKillAction::SendSigkill,
+                pid,
+                name.clone(),
+                category,
+                reason.clone(),
+            ),
+            Ok(KillAction::PidReusedAborted) => AuditLogEntry::failure(
+                ManualKillAction::PidReusedAborted,
+                pid,
+                name.clone(),
+                category,
+                reason.clone(),
+                "PID-reuse guard refused SIGKILL: process exited during grace OR \
+                 PID reassigned to an unrelated process — captured identity \
+                 tokens (pidfd / starttime) no longer match the live PID"
+                    .to_string(),
+            ),
+            Ok(other) => AuditLogEntry::failure(
+                ManualKillAction::SendSigkill,
+                pid,
+                name.clone(),
+                category,
+                reason.clone(),
+                format!("unexpected SIGKILL outcome: {other:?}"),
+            ),
+            Err(e) => AuditLogEntry::failure(
+                ManualKillAction::SendSigkill,
+                pid,
+                name.clone(),
+                category,
+                reason.clone(),
+                e.to_string(),
+            ),
+        };
+
+        if let Some(w) = &self.audit_writer
+            && let Err(e) = w.append(&entry)
+        {
+            tracing::warn!(error = %e, "failed to persist force-kill audit entry");
+        }
+
+        let success = entry.success;
+        if success {
+            self.governor_killed_pids
+                .insert(pid, "force-kill via SIGKILL".to_string());
+        }
+        self.state.audit.push_back(entry);
+        while self.state.audit.len() > self.config.runtime.audit_history {
+            self.state.audit.pop_front();
+        }
+
+        match kill_result {
+            Ok(KillAction::SignalKillSent) => Ok(()),
+            Ok(KillAction::PidReusedAborted) => {
+                Err("SIGKILL refused by PID-reuse guard".to_string())
+            }
+            Ok(other) => Err(format!("unexpected SIGKILL outcome: {other:?}")),
+            Err(e) => Err(e.to_string()),
+        }
     }
 
     /// Walk per-tick governor decisions and — when the operator has
@@ -2875,6 +3039,317 @@ mod tests {
         // delivered; brief settle wait gives the kernel time to reap.
         std::thread::sleep(StdDuration::from_millis(50));
         let _ = child.wait();
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // DISPATCH 83 — manual SIGTERM → Waiting → force-SIGKILL path.
+    // Closes the live "k didn't kill ollama" symptom: pre-D83 the
+    // manual SIGTERM bypassed `pending_kills`, so the operator had
+    // no force-kill follow-through. Post-D83 the manual SIGTERM is
+    // routed through `governor.send_sigterm` (identity tokens
+    // captured) and a second Enter on the Waiting-state card calls
+    // `manual_force_kill` which goes through the same PID-reuse
+    // guard the D81 auto path uses.
+    // ─────────────────────────────────────────────────────────────
+
+    /// Seed a synthetic single-PID lifecycle snapshot onto
+    /// `Runtime.state.last_lifecycle` so `manual_kill` / `manual_force_kill`
+    /// can find the workload. The annotated row is also pushed so
+    /// the audit code path resolves a name.
+    fn seed_lifecycle_with_pid(rt: &mut Runtime, pid: u32, name: &str) {
+        use crate::lifecycle::{LifecycleSnapshot, ProcessLifecycle};
+        use crate::model::ProcessSample;
+        use std::collections::HashMap;
+
+        let sample = ProcessSample {
+            pid,
+            ppid: Some(1),
+            name: name.to_string(),
+            cmdline: vec![name.to_string()],
+            environ: HashMap::new(),
+            cwd: None,
+            ..Default::default()
+        };
+        let lc = ProcessLifecycle::new(&sample, Some(crate::model::AICategory::Inference));
+        let mut snap = LifecycleSnapshot::new();
+        snap.processes.insert(pid, lc);
+        rt.state.last_lifecycle = Some(snap);
+        rt.state.annotated.push(AnnotatedProcess {
+            pid,
+            name: name.into(),
+            category: crate::model::AICategory::Inference,
+            workload_category: crate::model::WorkloadCategory::Unknown,
+            evidence: String::new(),
+            model_name: None,
+            cpu_pct: 0.0,
+            rss_mb: 0,
+            vram_bytes: None,
+            first_observed_at: Instant::now(),
+        });
+    }
+
+    /// THE ENABLER PIN: post-D83 `Runtime::manual_kill` routes the
+    /// SIGTERM through `governor.send_sigterm`, which means the
+    /// `pending_kills` entry is populated with the PID-reuse guard's
+    /// identity tokens (pidfd + `/proc/<pid>/stat` starttime). Pre-D83
+    /// this was 0 — manual SIGTERMs went through `libc::kill` directly
+    /// and the D81 force-SIGKILL escalation had nothing to verify
+    /// identity against.
+    #[test]
+    fn manual_kill_routes_through_send_sigterm_and_populates_pending_kills() {
+        use std::process::Command;
+
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg("trap '' TERM; while :; do sleep 1; done")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn child");
+        let pid = child.id();
+
+        let cfg = Config::default();
+        let mut rt = Runtime::new(cfg).expect("Runtime::new");
+        seed_lifecycle_with_pid(&mut rt, pid, "trap-sigterm-child");
+
+        let pending_before = rt.governor.pending_kills_count();
+        let result = rt.manual_kill(pid, "test SIGTERM routing".to_string());
+
+        // The SIGTERM is trapped by the child, so it returns success
+        // (kernel says delivered).
+        if result.is_err() {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("manual_kill failed: {:?}", result);
+        }
+        let pending_after = rt.governor.pending_kills_count();
+
+        assert_eq!(
+            pending_after,
+            pending_before + 1,
+            "manual_kill MUST populate pending_kills (route through \
+             send_sigterm). Pre-D83 the count would NOT have changed \
+             because the path went through libc::kill directly. \
+             before={pending_before}, after={pending_after}.",
+        );
+
+        // Identity tokens captured: starttime should be present
+        // (NVidia-grade systems may or may not give us a pidfd, but
+        // /proc/<pid>/stat starttime is universal on Linux).
+        let pending_entry = rt
+            .governor
+            .get_pending_kills()
+            .into_iter()
+            .find(|p| p.pid == pid)
+            .expect("pending kill entry must exist for the SIGTERM'd PID");
+        assert!(
+            pending_entry.starttime_ticks.is_some(),
+            "starttime MUST be captured at SIGTERM time so send_sigkill \
+             can verify identity later (the v1.0.1 PID-reuse guard). \
+             pidfd={:?}",
+            pending_entry.pidfd.is_some(),
+        );
+
+        // Manual source — NOT Automated. The auto-actuate audit
+        // entries use KillSource::Automated; this path is operator-
+        // initiated.
+        let entry = rt
+            .state
+            .audit
+            .iter()
+            .find(|e| e.pid == pid)
+            .expect("audit entry must exist for the manual SIGTERM");
+        assert_eq!(
+            entry.source,
+            crate::governor::manual::KillSource::Manual,
+            "manual_kill audit must record KillSource::Manual, not \
+             Automated (which is reserved for the auto_actuate path).",
+        );
+
+        // Force-kill the child to clean up.
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    /// THE IDENTITY GUARD PIN on the manual path. The dispatch
+    /// rationale calls this the v1.0.1 hazard's WORST case: the
+    /// operator may take seconds or minutes to press Enter between
+    /// the SIGTERM and the force-SIGKILL, opening a long reuse
+    /// window. `manual_force_kill` MUST refuse the SIGKILL when
+    /// identity tokens no longer match — and the audit trail must
+    /// record `PidReusedAborted` so the operator can correlate.
+    #[test]
+    fn manual_force_kill_refused_when_identity_tokens_missing() {
+        use crate::governor::PendingKill;
+
+        let cfg = Config::default();
+        let mut rt = Runtime::new(cfg).expect("Runtime::new");
+        let pid = 1_000_000_020u32;
+        seed_lifecycle_with_pid(&mut rt, pid, "no-id-tokens");
+
+        // Seed a pending_kill with NO identity (simulates "manual
+        // SIGTERM was sent ages ago and the captured tokens are now
+        // gone" OR "the PID has been reaped + reassigned"). The
+        // identity check in `send_sigkill` MUST refuse.
+        let mut pk = PendingKill::new(pid, "no-id-tokens".into(), crate::model::AICategory::NotAi);
+        pk.pidfd = None;
+        pk.starttime_ticks = None;
+        rt.governor.insert_pending_kill_for_test(pk);
+
+        let result = rt.manual_force_kill(pid);
+        assert!(
+            result.is_err(),
+            "manual_force_kill MUST return Err on identity mismatch — \
+             returning Ok would mean the audit shows success but no \
+             signal landed (a phantom-kill on the manual path)."
+        );
+        let err_msg = result.err().unwrap();
+        assert!(
+            err_msg.contains("PID-reuse guard") || err_msg.contains("refused"),
+            "error message must name the PID-reuse guard so the \
+             operator can correlate; got: {err_msg}",
+        );
+
+        // Audit entry records the refusal.
+        let entry = rt
+            .state
+            .audit
+            .iter()
+            .find(|e| e.pid == pid)
+            .expect("audit entry must exist for the refused force-kill");
+        assert_eq!(
+            entry.action,
+            crate::governor::manual::ManualKillAction::PidReusedAborted,
+            "expected PidReusedAborted action on identity mismatch; got {:?}",
+            entry.action,
+        );
+        assert_eq!(
+            entry.source,
+            crate::governor::manual::KillSource::Manual,
+        );
+        assert!(
+            !entry.success,
+            "PidReusedAborted is a REFUSAL — audit success MUST be false",
+        );
+        assert!(
+            !rt.governor_killed_pids.contains_key(&pid),
+            "a REFUSED SIGKILL MUST NOT populate governor_killed_pids",
+        );
+    }
+
+    /// THE END-TO-END HAPPY PATH on the manual force-kill: spawn a
+    /// SIGTERM-ignoring child, call `manual_kill` (now routes through
+    /// `send_sigterm` — pending_kills + identity captured), then call
+    /// `manual_force_kill` (routes through `send_sigkill` — identity
+    /// re-verified). Child dies; audit records SendSigkill success
+    /// with `KillSource::Manual`.
+    ///
+    /// This is the operator's "k ollama → wait → Enter" scenario
+    /// from the dispatch verification list. Without C1's routing the
+    /// `send_sigkill` would refuse with PidReusedAborted (no identity
+    /// captured); without C3's wiring the operator would have no
+    /// surface to trigger it.
+    #[test]
+    fn manual_force_kill_kills_surviving_child_end_to_end() {
+        use std::process::Command;
+
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg("trap '' TERM; while :; do sleep 1; done")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn child");
+        let pid = child.id();
+
+        let cfg = Config::default();
+        let mut rt = Runtime::new(cfg).expect("Runtime::new");
+        seed_lifecycle_with_pid(&mut rt, pid, "trap-sigterm-child");
+
+        // Step 1: manual_kill → SIGTERM via send_sigterm.
+        rt.manual_kill(pid, "test step 1".to_string())
+            .expect("manual_kill must succeed");
+
+        // Step 2: manual_force_kill → SIGKILL via send_sigkill.
+        // Identity captured at step 1 should pass the guard.
+        let force_result = rt.manual_force_kill(pid);
+        if force_result.is_err() {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("manual_force_kill failed: {:?}", force_result);
+        }
+
+        // Audit: TWO entries for this PID — the SIGTERM (success) and
+        // the SIGKILL (success). Both KillSource::Manual.
+        let entries: Vec<_> = rt.state.audit.iter().filter(|e| e.pid == pid).collect();
+        assert_eq!(entries.len(), 2, "expected SIGTERM + SIGKILL entries");
+        for e in &entries {
+            assert_eq!(
+                e.source,
+                crate::governor::manual::KillSource::Manual,
+                "both manual-path entries must record KillSource::Manual",
+            );
+            assert!(e.success, "both entries must succeed; got {:?}", e);
+        }
+        let actions: Vec<_> = entries.iter().map(|e| e.action).collect();
+        assert!(
+            actions.contains(&crate::governor::manual::ManualKillAction::SendSigterm),
+            "must have SendSigterm entry; got {:?}",
+            actions,
+        );
+        assert!(
+            actions.contains(&crate::governor::manual::ManualKillAction::SendSigkill),
+            "must have SendSigkill entry; got {:?}",
+            actions,
+        );
+        assert!(
+            rt.governor_killed_pids.contains_key(&pid),
+            "successful force-kill MUST populate governor_killed_pids so \
+             the lifecycle drain classifies the exit as GovernorKill.",
+        );
+
+        // Reap the dead child.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let _ = child.wait();
+    }
+
+    /// THE AUTO INVARIANT PRESERVATION pin. C1's routing change
+    /// (manual SIGTERM now uses `send_sigterm`) MUST NOT perturb the
+    /// auto path's default-OFF invariant. A `manual_kill` from the
+    /// operator populates `pending_kills` — but the auto path
+    /// (`record_governor_audit` calling `execute_after_grace`) is
+    /// still gated on `auto_actuate=false`, so no autonomous SIGKILL
+    /// fires even with pending entries present.
+    #[test]
+    fn manual_kill_does_not_perturb_auto_default_off_invariant() {
+        use crate::governor::PendingKill;
+
+        let cfg = Config::default();
+        assert!(
+            !cfg.governor.auto_actuate,
+            "default must stay false (the invariant under test)"
+        );
+        let mut rt = Runtime::new(cfg).expect("Runtime::new");
+
+        // Simulate a prior manual SIGTERM by seeding pending_kills
+        // with the entry shape `manual_kill` would produce (identity
+        // tokens captured, grace already exceeded).
+        let pid = 1_000_000_021u32;
+        let mut pk = PendingKill::new(pid, "manual-sigterm".into(), crate::model::AICategory::Inference);
+        pk.sigterm_time = chrono::Utc::now() - chrono::Duration::seconds(3600);
+        rt.governor.insert_pending_kill_for_test(pk);
+
+        let audit_before = rt.state.audit.len();
+        rt.record_governor_audit();
+        let audit_after = rt.state.audit.len();
+
+        assert_eq!(
+            audit_after, audit_before,
+            "auto path MUST stay default-off even when pending_kills \
+             carries entries from the manual path. The auto_actuate \
+             gate is the single funnel — manual SIGTERM populating \
+             pending_kills MUST NOT cause the auto escalation to fire.",
+        );
     }
 
     /// Default config validates without operator intervention — a

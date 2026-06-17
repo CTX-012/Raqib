@@ -30,9 +30,27 @@ async fn spawn_server() -> (SocketAddr, watch::Sender<WireSnapshot>) {
 async fn spawn_server_with_token(
     token: Option<&str>,
 ) -> (SocketAddr, watch::Sender<WireSnapshot>) {
+    spawn_server_with(token, None).await
+}
+
+/// v1.3.2 / DISPATCH 86 — variant that also accepts an optional
+/// shared-tunables cell so the new /api/settings tests can exercise
+/// the GET/POST roundtrip. Most legacy tests pass `None` and run
+/// without the settings surface.
+async fn spawn_server_with(
+    token: Option<&str>,
+    tunables: Option<edge_monitor::web::tunables::SharedTunables>,
+) -> (SocketAddr, watch::Sender<WireSnapshot>) {
     let (tx, rx) = watch::channel(WireSnapshot::empty());
     let auth_token = token.map(std::sync::Arc::from);
-    let state = WebState { rx, auth_token };
+    let state = WebState {
+        rx,
+        auth_token,
+        tunables,
+        config_path: None,
+        auto_actuate_at_load: false,
+        default_ai_action_at_load: "Allow".into(),
+    };
     // Bind on port 0 so the OS picks an ephemeral; we then read it
     // back from the listener for the test client to connect.
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -359,5 +377,248 @@ async fn health_endpoint_is_gated_when_token_configured() {
         "/api/health is gated when a token is configured. Operators \
          using bare-token monitoring MUST send Authorization on the \
          probe, or flip allow_no_auth=true for open access.",
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// DISPATCH 86 — settings GET/POST: the web tunes thresholds; the
+// boundary holds — auto_actuate / policy verbs are NOT writable.
+// ─────────────────────────────────────────────────────────────────────
+
+use edge_monitor::web::tunables::{SharedTunables, shared_from_config};
+
+fn fresh_shared_tunables() -> SharedTunables {
+    let cfg = edge_monitor::config::Config::default();
+    shared_from_config(&cfg)
+}
+
+#[tokio::test]
+async fn settings_get_returns_current_tunables_and_readonly_fields() {
+    let tunables = fresh_shared_tunables();
+    let (addr, _tx) = spawn_server_with(Some("hunter2"), Some(tunables)).await;
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("http://{addr}/api/settings"))
+        .header("Authorization", "Bearer hunter2")
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success(), "GET /api/settings: {}", resp.status());
+    let v: serde_json::Value = resp.json().await.unwrap();
+    assert!(v.get("thresholds").is_some(), "missing thresholds: {v}");
+    assert!(v.get("kill_sustain_secs").is_some(), "missing kill_sustain_secs: {v}");
+    assert!(
+        v.get("auto_actuate_readonly").is_some(),
+        "missing auto_actuate_readonly (must be present as informational): {v}"
+    );
+    assert!(
+        v.get("default_ai_action_readonly").is_some(),
+        "missing default_ai_action_readonly (must be present as informational): {v}"
+    );
+}
+
+#[tokio::test]
+async fn settings_get_unauthed_returns_401() {
+    let tunables = fresh_shared_tunables();
+    let (addr, _tx) = spawn_server_with(Some("hunter2"), Some(tunables)).await;
+    let resp = reqwest::get(format!("http://{addr}/api/settings"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn settings_post_updates_thresholds_and_takes_effect_in_shared_cell() {
+    let tunables = fresh_shared_tunables();
+    let (addr, _tx) = spawn_server_with(Some("hunter2"), Some(tunables.clone())).await;
+    let client = reqwest::Client::new();
+    // Use vram_critical_pct = 90.0 (still above the default
+    // vram_attention_pct of 85.0). A single-field POST below the
+    // attention default would fail validation; lower the attention
+    // alongside in that case.
+    let body = serde_json::json!({
+        "thresholds": { "vram_critical_pct": 90.0 },
+    });
+    let resp = client
+        .post(format!("http://{addr}/api/settings"))
+        .header("Authorization", "Bearer hunter2")
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status();
+    let body_text = resp.text().await.unwrap();
+    assert!(
+        status.is_success(),
+        "POST must succeed; got {} body={}",
+        status,
+        body_text,
+    );
+    // The shared tunables cell now reflects the change — pin it.
+    let guard = tunables.read().unwrap();
+    assert!(
+        (guard.thresholds.vram_critical_pct - 90.0).abs() < 0.01,
+        "shared tunables MUST reflect the web POST; got vram_critical_pct={}",
+        guard.thresholds.vram_critical_pct,
+    );
+}
+
+/// THE HEADLINE BOUNDARY TEST. A crafted POST containing
+/// `auto_actuate: true` MUST be rejected by serde
+/// (`deny_unknown_fields`) — the handler never runs, the shared
+/// cell never sees the field, and the read-only display on a
+/// subsequent GET still reports `auto_actuate_readonly: false`.
+#[tokio::test]
+async fn settings_post_with_auto_actuate_is_rejected_by_deny_unknown_fields() {
+    let tunables = fresh_shared_tunables();
+    let (addr, _tx) = spawn_server_with(Some("hunter2"), Some(tunables)).await;
+    let client = reqwest::Client::new();
+    let body = serde_json::json!({
+        "thresholds": {},
+        "auto_actuate": true,
+    });
+    let resp = client
+        .post(format!("http://{addr}/api/settings"))
+        .header("Authorization", "Bearer hunter2")
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        resp.status().is_client_error(),
+        "POST with auto_actuate MUST be rejected with 4xx; got {}",
+        resp.status(),
+    );
+    // Confirm a follow-up GET still reports auto_actuate=false.
+    let resp = client
+        .get(format!("http://{addr}/api/settings"))
+        .header("Authorization", "Bearer hunter2")
+        .send()
+        .await
+        .unwrap();
+    let v: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(
+        v["auto_actuate_readonly"].as_bool(),
+        Some(false),
+        "auto_actuate MUST remain false even after a crafted POST; got: {v}",
+    );
+}
+
+#[tokio::test]
+async fn settings_post_with_default_ai_action_is_rejected() {
+    let tunables = fresh_shared_tunables();
+    let (addr, _tx) = spawn_server_with(Some("hunter2"), Some(tunables)).await;
+    let client = reqwest::Client::new();
+    let body = serde_json::json!({
+        "thresholds": {},
+        "default_ai_action": "Kill",
+    });
+    let resp = client
+        .post(format!("http://{addr}/api/settings"))
+        .header("Authorization", "Bearer hunter2")
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        resp.status().is_client_error(),
+        "POST with default_ai_action MUST be rejected; got {}",
+        resp.status(),
+    );
+}
+
+#[tokio::test]
+async fn settings_post_unauthed_returns_401() {
+    let tunables = fresh_shared_tunables();
+    let (addr, _tx) = spawn_server_with(Some("hunter2"), Some(tunables)).await;
+    let client = reqwest::Client::new();
+    let body = serde_json::json!({ "thresholds": {} });
+    let resp = client
+        .post(format!("http://{addr}/api/settings"))
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::UNAUTHORIZED,
+        "unauthed POST inherits D85 401; got {}",
+        resp.status(),
+    );
+}
+
+/// kill_sustain_secs < alert_sustain_secs MUST be rejected on the
+/// web-write path — the same invariant the config loader enforces
+/// (D80 C3). A web POST cannot bypass the safety validation by
+/// taking a side path.
+#[tokio::test]
+async fn settings_post_with_kill_sustain_below_alert_sustain_is_rejected() {
+    // Use a fresh tunables cell with a known alert_sustain.
+    let mut cfg = edge_monitor::config::Config::default();
+    cfg.thresholds.alert_sustain_secs = Some(30);
+    let tunables = shared_from_config(&cfg);
+    let (addr, _tx) = spawn_server_with(Some("hunter2"), Some(tunables.clone())).await;
+    let client = reqwest::Client::new();
+    let body = serde_json::json!({
+        "thresholds": { "alert_sustain_secs": 30 },
+        "kill_sustain_secs": 5,
+    });
+    let resp = client
+        .post(format!("http://{addr}/api/settings"))
+        .header("Authorization", "Bearer hunter2")
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::BAD_REQUEST,
+        "kill_sustain (5) < alert_sustain (30) MUST be rejected; got {}",
+        resp.status(),
+    );
+    let body_text = resp.text().await.unwrap();
+    assert!(
+        body_text.contains("kill_sustain_secs") && body_text.contains("alert_sustain_secs"),
+        "rejection must name both fields so the operator can act on it; got: {body_text}",
+    );
+    // Shared cell must NOT have absorbed the bad value.
+    let guard = tunables.read().unwrap();
+    assert_ne!(
+        guard.kill_sustain_secs, 5,
+        "rejected POST MUST NOT mutate the shared tunables cell",
+    );
+}
+
+#[tokio::test]
+async fn settings_post_unknown_field_in_thresholds_is_silently_dropped() {
+    // `ThresholdsConfig` does NOT carry `deny_unknown_fields`
+    // (forward-compat: future numeric thresholds can be POSTed by
+    // an old server without breaking). But the TOP-LEVEL
+    // SettingsUpdate uses deny_unknown_fields so the auto_actuate
+    // attack vector is structurally closed. This test pins both
+    // properties: an unknown threshold key is dropped (no 400),
+    // but an unknown top-level key (auto_actuate) is rejected.
+    let tunables = fresh_shared_tunables();
+    let (addr, _tx) = spawn_server_with(Some("hunter2"), Some(tunables)).await;
+    let client = reqwest::Client::new();
+    let body = serde_json::json!({
+        "thresholds": {
+            "vram_critical_pct": 90.0,
+            "future_field_we_dont_know": 42
+        },
+    });
+    let resp = client
+        .post(format!("http://{addr}/api/settings"))
+        .header("Authorization", "Bearer hunter2")
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        resp.status().is_success(),
+        "unknown threshold key should not 400 — forward-compat shape. \
+         got {}: {}",
+        resp.status(),
+        resp.text().await.unwrap(),
     );
 }

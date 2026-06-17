@@ -31,7 +31,7 @@ uuid = { version = "1", features = ["v4", "serde"] }
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "time", "macros", "sync", "io-util", "process", "net"] }
 async-trait = "0.1"
 regex = "1"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "http2"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "http2", "json"] }
 sha2 = "0.10"
 
 # Sprint-6 web UI — axum router on tokio, WebSocket via tokio-tungstenite-

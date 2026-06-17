@@ -199,8 +199,15 @@ fn main() -> anyhow::Result<()> {
     // phantom-kill lesson). A bad TOML fails to start with the
     // resolver's error verbatim — the operator sees exactly which
     // field is wrong and what the constraint is.
-    let runtime = Runtime::new(config)
+    // v1.3.2 / DISPATCH 86 — build the SharedTunables BEFORE Runtime
+    // takes the config so both sides share the same Arc<RwLock>.
+    // Web POST handlers mutate it; runtime tick reads from it via
+    // `Runtime::apply_pending_tunables` each iteration.
+    let shared_tunables = edge_monitor::web::tunables::shared_from_config(&config);
+    let config_path = cli.config.as_deref().map(std::path::Path::to_path_buf);
+    let mut runtime = Runtime::new(config)
         .with_context(|| "invalid configuration; aborting startup")?;
+    runtime.attach_shared_tunables(shared_tunables.clone());
 
     // Sprint-6 — spawn the web companion on a background thread
     // BEFORE the TUI / headless loop takes the main thread. The TUI
@@ -223,7 +230,9 @@ fn main() -> anyhow::Result<()> {
             cli.bind,
             cli.port,
             shutdown.clone(),
-            runtime.config().web.clone(),
+            runtime.config(),
+            config_path,
+            shared_tunables.clone(),
         ) {
             Ok(tx) => Some(tx),
             Err(e) => {
@@ -279,10 +288,13 @@ fn spawn_web_server(
     bind: std::net::IpAddr,
     port: u16,
     shutdown: Arc<AtomicBool>,
-    web_cfg: edge_monitor::config::WebConfig,
+    full_cfg: &edge_monitor::config::Config,
+    config_path: Option<std::path::PathBuf>,
+    tunables: edge_monitor::web::tunables::SharedTunables,
 ) -> anyhow::Result<tokio::sync::watch::Sender<edge_monitor::web::WireSnapshot>> {
     use edge_monitor::web::{WebState, WireSnapshot, serve};
 
+    let web_cfg = &full_cfg.web;
     let (tx, rx) = tokio::sync::watch::channel(WireSnapshot::empty());
     // v1.3.2 / DISPATCH 85 — convert the config token to the Arc<str>
     // the middleware reads. `None` ⇒ open access (operator flipped
@@ -293,7 +305,18 @@ fn spawn_web_server(
     } else {
         Some(std::sync::Arc::from(web_cfg.auth_token.as_str()))
     };
-    let state = WebState { rx, auth_token: auth_token.clone() };
+    // v1.3.2 / DISPATCH 86 — snapshot the read-only boundary fields
+    // at server-launch time for honest display via GET /api/settings.
+    // These mirrors are NEVER readable into a web write path; they
+    // exist only so the operator can see whether auto-kill is armed.
+    let state = WebState {
+        rx,
+        auth_token: auth_token.clone(),
+        tunables: Some(tunables),
+        config_path: config_path.clone(),
+        auto_actuate_at_load: full_cfg.governor.auto_actuate,
+        default_ai_action_at_load: format!("{:?}", full_cfg.policy.default_ai_action),
+    };
     let addr: std::net::SocketAddr = (bind, port).into();
 
     // v1.3.2 / DISPATCH 85 — surface the auth posture loudly so the

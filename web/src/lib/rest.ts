@@ -269,3 +269,103 @@ export function disconnect(): void {
     // kick fetch.
     firstFetchSent = false;
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// v1.3.2 / DISPATCH 86 — settings GET/POST wrappers.
+//
+// THE BOUNDARY (the most important property of this surface):
+// the SettingsUpdate type in this file mirrors the Rust handler's
+// allowlist EXACTLY. `auto_actuate` and `default_ai_action` are
+// READ-ONLY DISPLAY fields ONLY — there is no field in
+// `SettingsUpdate` that could be sent in a POST to flip them. Even
+// if a future component author added a control by accident, the
+// type system would reject the field at compile time.
+//
+// (Server-side enforcement is the ACTUAL guard — `deny_unknown_fields`
+// rejects any extra key including auto_actuate — but the client
+// type pin removes the temptation in the first place.)
+// ─────────────────────────────────────────────────────────────────────
+
+export interface ThresholdValues {
+    thermal_amber_c?: number;
+    thermal_red_c?: number;
+    vram_attention_pct?: number;
+    vram_critical_pct?: number;
+    ram_attention_pct?: number;
+    ram_critical_pct?: number;
+    kv_attention_pct?: number;
+    kv_critical_pct?: number;
+    alert_sustain_secs?: number;
+}
+
+export interface SettingsView {
+    thresholds: Required<ThresholdValues>;
+    kill_sustain_secs: number;
+    auto_actuate_readonly: boolean;
+    default_ai_action_readonly: string;
+    config_path: string | null;
+}
+
+export interface SettingsUpdate {
+    thresholds: ThresholdValues;
+    kill_sustain_secs?: number;
+}
+
+export interface SettingsPostResponse {
+    settings: SettingsView;
+    persisted: boolean;
+}
+
+const SETTINGS_PATH = '/api/settings';
+
+async function fetchWithAuth(input: RequestInfo, init: RequestInit = {}): Promise<Response> {
+    const headers = new Headers(init.headers ?? {});
+    const token = currentToken();
+    if (token) {
+        headers.set('Authorization', `Bearer ${token}`);
+    }
+    let resp = await fetch(input, { ...init, headers });
+    if (resp.status === 401) {
+        clearToken();
+        const newToken = promptForToken();
+        if (newToken === null) {
+            return resp;
+        }
+        const retryHeaders = new Headers(init.headers ?? {});
+        retryHeaders.set('Authorization', `Bearer ${newToken}`);
+        resp = await fetch(input, { ...init, headers: retryHeaders });
+    }
+    return resp;
+}
+
+/**
+ * GET /api/settings — fetch the current tunables + read-only
+ * boundary fields. Throws on non-2xx.
+ */
+export async function fetchSettings(): Promise<SettingsView> {
+    const resp = await fetchWithAuth(SETTINGS_PATH);
+    if (!resp.ok) {
+        throw new Error(`fetchSettings: HTTP ${resp.status}`);
+    }
+    return (await resp.json()) as SettingsView;
+}
+
+/**
+ * POST /api/settings — write the allowlisted tunables. The handler
+ * validates and re-runs the sustain invariant; 400 responses carry
+ * the operator-actionable message in the body.
+ */
+export async function postSettings(
+    update: SettingsUpdate,
+): Promise<SettingsPostResponse> {
+    const resp = await fetchWithAuth(SETTINGS_PATH, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(update),
+    });
+    if (!resp.ok) {
+        const text = await resp.text();
+        throw new Error(`postSettings: HTTP ${resp.status} — ${text}`);
+    }
+    return (await resp.json()) as SettingsPostResponse;
+}

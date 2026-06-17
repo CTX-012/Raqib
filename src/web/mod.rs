@@ -44,7 +44,9 @@
 pub mod assets;
 pub mod auth;
 pub mod handlers;
+pub mod settings;
 pub mod stream;
+pub mod tunables;
 pub mod wire;
 
 use std::net::SocketAddr;
@@ -69,10 +71,30 @@ pub use wire::WireSnapshot;
 /// and must NEVER be serialized into a response body or log line.
 /// `None` ⇒ open access (the operator explicitly set
 /// `web.allow_no_auth = true`).
+///
+/// v1.3.2 / DISPATCH 86 — `tunables` carries the structural
+/// allowlist of web-writable settings (see [`tunables::RuntimeTunables`]).
+/// `None` ⇒ the settings endpoints return 503; legacy callers
+/// that never plumbed the shared tunables don't surface settings.
+/// The read-only-boundary fields (`auto_actuate_at_load`,
+/// `default_ai_action_at_load`) are snapshotted at server start
+/// for display in the GET response — they're informational, NEVER
+/// readable into a web write path.
 #[derive(Clone)]
 pub struct WebState {
     pub rx: watch::Receiver<WireSnapshot>,
     pub auth_token: Option<Arc<str>>,
+    pub tunables: Option<tunables::SharedTunables>,
+    pub config_path: Option<std::path::PathBuf>,
+    /// Read-only mirror of `config.governor.auto_actuate` at the
+    /// moment the web server was launched. The settings GET shows
+    /// this to the operator as "Auto-actuate: ON/OFF — set in
+    /// config file to change." Display honesty: the operator sees
+    /// the state, the web offers no toggle.
+    pub auto_actuate_at_load: bool,
+    /// Read-only mirror of `config.policy.default_ai_action` at
+    /// load time. Same display-honesty rationale.
+    pub default_ai_action_at_load: String,
 }
 
 /// Construct the axum router. Exposed so integration tests can
@@ -116,6 +138,15 @@ pub fn router(state: WebState) -> Router {
         // so the regression surface stays visible if the handler
         // bit-rots while still mounted.
         .route("/stream", any(stream::websocket))
+        // v1.3.2 / DISPATCH 86 — settings surface. GET returns the
+        // current tunables + read-only view of the boundary fields;
+        // POST mutates only the structurally-allowlisted fields
+        // (see `settings::SettingsUpdate`). Both are auth-gated by
+        // the D85 middleware applied below.
+        .route(
+            "/settings",
+            get(settings::get_settings).post(settings::update_settings),
+        )
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             auth::require_token,
@@ -158,6 +189,13 @@ mod tests {
         // cleanly. A future axum version that tightens type
         // bounds would surface here before any real request runs.
         let (_tx, rx) = watch::channel(WireSnapshot::empty());
-        let _r = router(WebState { rx, auth_token: None });
+        let _r = router(WebState {
+            rx,
+            auth_token: None,
+            tunables: None,
+            config_path: None,
+            auto_actuate_at_load: false,
+            default_ai_action_at_load: "Allow".into(),
+        });
     }
 }

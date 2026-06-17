@@ -11,6 +11,7 @@
     import ActivityFeed from './components/ActivityFeed.svelte';
     import ConnectionPill from './components/ConnectionPill.svelte';
     import AlertsPanel from './components/AlertsPanel.svelte';
+    import SettingsPanel from './components/SettingsPanel.svelte';
 
     onMount(() => {
         connect();
@@ -66,6 +67,14 @@
             <ActivityFeed activity={$snapshot.activity} />
         </section>
     </main>
+
+    <!-- v1.3.2 / DISPATCH 86 — settings panel. Collapsed by default.
+         Tunes thresholds + sustain windows; auto_actuate stays
+         TOML+restart only and is shown as a read-only status badge
+         inside the panel. -->
+    <div class="px-6 pb-4">
+        <SettingsPanel />
+    </div>
 
     <footer class="px-6 py-2 text-sm text-fg-muted border-t border-fg-muted/20">
         Tick #{$snapshot.tick} · {$snapshot.workloads.length} workloads ·

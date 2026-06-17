@@ -435,6 +435,15 @@ pub struct Runtime {
     /// "absence is not breach" discipline the projection layer
     /// enforces.
     breach_since: HashMap<u32, Instant>,
+    /// v1.3.2 / DISPATCH 86 — optional shared cell holding the
+    /// web-tunable settings (thresholds + `kill_sustain_secs`).
+    /// `None` when the binary was launched without a web companion
+    /// (e.g. `--no-web`); the runtime then uses the static config
+    /// values it was constructed with. `Some(_)` ⇒ at the top of
+    /// each tick the runtime mirrors the latest tunables into
+    /// `state.thresholds` and `config.governor.kill_sustain_secs`
+    /// so a web POST takes effect on the very next tick.
+    shared_tunables: Option<crate::web::tunables::SharedTunables>,
     /// Previous tick's cumulative CPU ticks, per PID, plus the wall-clock
     /// timestamp that reading was taken at. Used to compute cpu_pct as
     /// delta_ticks / CLK_TCK / elapsed_secs × 100.
@@ -569,6 +578,7 @@ impl Runtime {
             pid_first_seen_at: HashMap::new(),
             governor_killed_pids: HashMap::new(),
             breach_since: HashMap::new(),
+            shared_tunables: None,
             prev_cpu: HashMap::new(),
             pid_stderr: HashMap::new(),
             clk_tck: read_clk_tck(),
@@ -579,6 +589,47 @@ impl Runtime {
 
     pub fn config(&self) -> &Config {
         &self.config
+    }
+
+    /// v1.3.2 / DISPATCH 86 — wire the shared web-tunables cell.
+    /// Called from `main.rs` after `Runtime::new` so the runtime
+    /// can mirror the latest web POST values into its own state at
+    /// the top of each tick.
+    pub fn attach_shared_tunables(
+        &mut self,
+        tunables: crate::web::tunables::SharedTunables,
+    ) {
+        self.shared_tunables = Some(tunables);
+    }
+
+    /// v1.3.2 / DISPATCH 86 — copy the latest shared tunables into
+    /// the runtime's authoritative slots so a web POST that landed
+    /// between ticks takes effect on the upcoming one. No-op when
+    /// no shared cell is attached (e.g. `--no-web`).
+    ///
+    /// THE BOUNDARY (echoes [`crate::web::tunables::RuntimeTunables`]):
+    /// this method ONLY copies thresholds + `kill_sustain_secs`. It
+    /// MUST NOT touch `auto_actuate`, `default_ai_action`, or any
+    /// other "whether to kill" knob. If it did, the structural
+    /// allowlist on the web write surface would be a lie.
+    fn apply_pending_tunables(&mut self) {
+        let Some(tunables) = &self.shared_tunables else {
+            return;
+        };
+        let guard = match tunables.read() {
+            Ok(g) => g,
+            // The web handler panicked while holding the write
+            // lock — recover the inner value rather than crashing
+            // the tick loop. The corrupted-state case is the same
+            // as a fresh boot from the operator's perspective.
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        self.state.thresholds = guard.thresholds;
+        self.config.governor.kill_sustain_secs = guard.kill_sustain_secs;
+        // NOTE the omissions: `auto_actuate`, `default_ai_action`,
+        // policy lists, audit history, etc. are NEVER written here.
+        // The structural allowlist on `RuntimeTunables` is the
+        // single point of truth for what the web can change.
     }
 
     /// v1.1.11 / DISPATCH 36 — mutable access to RuntimeState for
@@ -849,6 +900,11 @@ impl Runtime {
     /// Updates `state` and returns it. Errors here are fatal — the loop
     /// owner must decide whether to retry or exit.
     pub fn tick(&mut self) -> Result<&RuntimeState, RuntimeError> {
+        // v1.3.2 / DISPATCH 86 — pull the latest web-tunable values
+        // BEFORE this tick reads thresholds. A web POST that landed
+        // between the previous tick and now takes effect HERE.
+        self.apply_pending_tunables();
+
         let snapshot = platform::collect_snapshot(&mut self.sys_for_metrics)?;
         let now = Instant::now();
         let vram_by_pid = vram_bytes_by_pid(&snapshot.gpu);

@@ -58,6 +58,66 @@ pub struct Config {
     /// alert is un-suppressable (see [`Self::resolve_workload_rules`]
     /// and `runtime::observe_alerts`'s `OomDetected` carve-out).
     pub workloads: Vec<WorkloadRule>,
+    /// v1.3.2 / DISPATCH 85 — web-companion auth + open-access
+    /// opt-out. Default: empty token + `allow_no_auth = false` →
+    /// the binary REFUSES TO START with an operator-actionable
+    /// message. Pre-D85 the web UI was unconditionally open ("NO
+    /// AUTH, trusted LAN only"); D85 makes "no auth" a CONSCIOUS
+    /// choice (set `web.allow_no_auth = true` to keep the legacy
+    /// behavior), not a silent default. See [`WebConfig`].
+    pub web: WebConfig,
+}
+
+/// v1.3.2 / DISPATCH 85 — shared-bearer-token auth for the web
+/// companion. A single secret string, required on every `/api/*`
+/// request as `Authorization: Bearer <token>`. No login page, no
+/// sessions, no per-user. This is "you need the shared secret to
+/// hit the API at all" — casual same-LAN lockout, NOT remote-
+/// hardening (no TLS, no session expiry, no rate-limit by user).
+///
+/// ## Default behavior
+///
+/// Empty `auth_token` + `allow_no_auth = false` ⇒ `Config::validate`
+/// REJECTS. The binary refuses to start with an operator-actionable
+/// message naming both fields. This forces the operator to make a
+/// CONSCIOUS choice: either set the token, or explicitly opt into
+/// open access. Pre-D85 the web UI was unconditionally open with
+/// only a `tracing::warn!` line — easy to miss in production logs.
+///
+/// ## SCHEMA-firewall posture
+///
+/// `auth_token` is a SECRET STRING, NOT an action verb. The schema
+/// firewall (`config_schema_has_no_action_verb_fields`) scans for
+/// action-verb tokens like `kill_when`, `enforce_kill`,
+/// `auto_kill` — neither `auth_token` nor `allow_no_auth` matches
+/// those patterns. The web stays a policy editor / dashboard, not
+/// a kill driver: this auth gate protects the EXISTING surface; it
+/// does NOT add any kill-triggering route. The D80/D81 invariant
+/// "web stays OUT of the kill path" is unchanged by D85.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WebConfig {
+    /// Shared bearer token. Required on every `/api/*` request as
+    /// `Authorization: Bearer <token>`. Compared with the operator-
+    /// supplied header via `subtle::ConstantTimeEq` (constant-time
+    /// — avoids the timing oracle a naive `==` would leak).
+    ///
+    /// Empty by default (`String::default()` ⇒ `""`) — the operator
+    /// MUST either set a token or flip `allow_no_auth = true`. The
+    /// token is NEVER logged, echoed in error responses, or
+    /// persisted to the audit trail.
+    pub auth_token: String,
+    /// Explicit opt-out for the auth gate. Set to `true` to
+    /// preserve the pre-D85 "NO AUTH, trusted LAN only" posture
+    /// (existing deployments). Logged as a loud `warn!` at server
+    /// startup so the operator can't accidentally lose track of
+    /// the choice.
+    ///
+    /// Default `false` (`bool::default()`) — combined with an empty
+    /// `auth_token`, this means a fresh install REFUSES TO START
+    /// until the operator makes the call. The legacy silent-open
+    /// path is gone.
+    pub allow_no_auth: bool,
 }
 
 /// v1.3.1 / DISPATCH 60 step 2 — names the opt-in actuation gate.
@@ -575,6 +635,37 @@ impl Config {
         Ok(())
     }
 
+    /// v1.3.2 / DISPATCH 85 — web auth-posture validation. SEPARATE
+    /// from [`Self::validate`] because the auth check only matters
+    /// when the web server is going to start: `--no-web` runs MUST
+    /// pass without an auth_token, and the auth gate is a runtime
+    /// concern (does the server bind with credentials?), not a
+    /// config-internal-consistency concern.
+    ///
+    /// Called from `main.rs` IMMEDIATELY BEFORE `spawn_web_server`
+    /// when the operator hasn't passed `--no-web`. An empty token +
+    /// `allow_no_auth = false` ⇒ refuse to start. This makes "no
+    /// auth" a CONSCIOUS choice; pre-D85 the web was silently open
+    /// with only a `tracing::warn!` line that an operator could
+    /// easily miss in production logs.
+    ///
+    /// The token VALUE is NEVER echoed in this error message — we
+    /// name the field, not its content.
+    pub fn validate_web_auth(&self) -> Result<(), ConfigError> {
+        if self.web.auth_token.is_empty() && !self.web.allow_no_auth {
+            return Err(ConfigError::Invalid(
+                "web.auth_token is empty AND web.allow_no_auth is false. \
+                 The web companion will not start without a deliberate \
+                 choice: set `web.auth_token = \"<your-secret>\"` to lock \
+                 the API, OR set `web.allow_no_auth = true` to explicitly \
+                 opt into the pre-D85 unauthenticated posture. The token \
+                 itself is NEVER echoed in logs or error messages. (To \
+                 run without the web companion at all, pass `--no-web`.)".into(),
+            ));
+        }
+        Ok(())
+    }
+
     /// Materialize the in-memory `GovernorPolicy` from this config.
     pub fn build_policy(&self) -> GovernorPolicy {
         GovernorPolicy {
@@ -690,12 +781,15 @@ mod tests {
 
     #[test]
     fn default_validates() {
-        Config::default().validate().expect("default must validate");
+        let mut cfg = Config::default();
+        cfg.web.allow_no_auth = true;
+        cfg.validate().expect("default + allow_no_auth must validate");
     }
 
     #[test]
     fn zero_tick_rejected() {
         let mut cfg = Config::default();
+        cfg.web.allow_no_auth = true;
         cfg.runtime.tick_interval_ms = 0;
         assert!(cfg.validate().is_err());
     }
@@ -703,6 +797,7 @@ mod tests {
     #[test]
     fn zero_grace_rejected() {
         let mut cfg = Config::default();
+        cfg.web.allow_no_auth = true;
         cfg.policy.sigterm_grace_secs = 0;
         assert!(cfg.validate().is_err());
     }
@@ -710,6 +805,7 @@ mod tests {
     #[test]
     fn build_policy_roundtrips_allowlist() {
         let mut cfg = Config::default();
+        cfg.web.allow_no_auth = true;
         cfg.policy.allowlist.insert("my_app".into());
         let pol = cfg.build_policy();
         assert!(pol.whitelist_names.contains("my_app"));
@@ -718,8 +814,12 @@ mod tests {
     #[test]
     fn from_file_loads_minimal_toml() {
         let mut f = tempfile::NamedTempFile::new().unwrap();
-        // Empty TOML — every field falls back to default.
-        writeln!(f, "[runtime]\ntick_interval_ms = 500").unwrap();
+        // v1.3.2 / DISPATCH 85 — `Config::from_file` validates, and
+        // the default `[web]` section without an auth_token/opt-out
+        // rejects. Adding `allow_no_auth = true` here exercises the
+        // toml loader on a minimal-but-valid config; the auth gate
+        // has dedicated tests.
+        writeln!(f, "[runtime]\ntick_interval_ms = 500\n\n[web]\nallow_no_auth = true").unwrap();
         let cfg = Config::from_file(f.path()).unwrap();
         assert_eq!(cfg.runtime.tick_interval_ms, 500);
     }
@@ -741,6 +841,7 @@ mod tests {
     #[test]
     fn storage_run_store_returns_none_when_empty() {
         let mut cfg = Config::default();
+        cfg.web.allow_no_auth = true;
         cfg.storage.run_store_path.clear();
         assert!(cfg.storage.run_store().is_none());
     }
@@ -748,6 +849,7 @@ mod tests {
     #[test]
     fn storage_keep_zero_rejected() {
         let mut cfg = Config::default();
+        cfg.web.allow_no_auth = true;
         cfg.storage.keep_runs_per_model = 0;
         assert!(cfg.validate().is_err());
     }
@@ -755,6 +857,7 @@ mod tests {
     #[test]
     fn regression_critical_below_warn_rejected() {
         let mut cfg = Config::default();
+        cfg.web.allow_no_auth = true;
         cfg.regression.warn_pct = 25.0;
         cfg.regression.critical_pct = 10.0;
         assert!(cfg.validate().is_err());
@@ -763,6 +866,7 @@ mod tests {
     #[test]
     fn regression_negative_threshold_rejected() {
         let mut cfg = Config::default();
+        cfg.web.allow_no_auth = true;
         cfg.regression.warn_pct = -1.0;
         assert!(cfg.validate().is_err());
     }
@@ -770,6 +874,7 @@ mod tests {
     #[test]
     fn regression_zero_window_rejected() {
         let mut cfg = Config::default();
+        cfg.web.allow_no_auth = true;
         cfg.regression.baseline_window = 0;
         assert!(cfg.validate().is_err());
     }
@@ -788,6 +893,7 @@ mod tests {
     #[test]
     fn regression_baseline_strategy_median_resolves() {
         let mut cfg = Config::default();
+        cfg.web.allow_no_auth = true;
         cfg.regression.baseline_strategy = "median".to_string();
         cfg.validate().expect("median is a valid strategy");
         assert_eq!(
@@ -799,6 +905,7 @@ mod tests {
     #[test]
     fn regression_baseline_strategy_is_case_insensitive() {
         let mut cfg = Config::default();
+        cfg.web.allow_no_auth = true;
         cfg.regression.baseline_strategy = "MEDIAN".to_string();
         cfg.validate().expect("MEDIAN normalises to median");
         cfg.regression.baseline_strategy = "Mean".to_string();
@@ -808,6 +915,7 @@ mod tests {
     #[test]
     fn regression_unknown_strategy_rejected() {
         let mut cfg = Config::default();
+        cfg.web.allow_no_auth = true;
         cfg.regression.baseline_strategy = "harmonic".to_string();
         let err = cfg.validate().expect_err("unknown strategy must error");
         assert!(format!("{err}").contains("baseline_strategy"));
@@ -837,6 +945,7 @@ mod tests {
     #[test]
     fn governor_auto_actuate_both_values_validate() {
         let mut cfg = Config::default();
+        cfg.web.allow_no_auth = true;
         cfg.governor.auto_actuate = false;
         cfg.validate().expect("auto_actuate=false must validate");
         cfg.governor.auto_actuate = true;
@@ -903,6 +1012,7 @@ mod tests {
     #[test]
     fn workload_rules_resolve_to_name_indexed_map() {
         let mut cfg = Config::default();
+        cfg.web.allow_no_auth = true;
         cfg.workloads.push(WorkloadRule {
             name: "vllm".into(),
             suppress_alerts: false,
@@ -930,6 +1040,7 @@ mod tests {
     #[test]
     fn workload_rules_empty_name_rejected() {
         let mut cfg = Config::default();
+        cfg.web.allow_no_auth = true;
         cfg.workloads.push(WorkloadRule {
             name: "".into(),
             suppress_alerts: true,
@@ -946,6 +1057,7 @@ mod tests {
     #[test]
     fn workload_rules_duplicate_name_rejected() {
         let mut cfg = Config::default();
+        cfg.web.allow_no_auth = true;
         cfg.workloads.push(WorkloadRule {
             name: "vllm".into(),
             suppress_alerts: true,
@@ -971,6 +1083,7 @@ mod tests {
     #[test]
     fn workload_rules_long_name_accepted_warn_only() {
         let mut cfg = Config::default();
+        cfg.web.allow_no_auth = true;
         cfg.workloads.push(WorkloadRule {
             name: "a_long_workload_binary_name".into(),
             suppress_alerts: true,
@@ -987,6 +1100,7 @@ mod tests {
     #[test]
     fn workload_rules_unknown_workload_accepted_silently() {
         let mut cfg = Config::default();
+        cfg.web.allow_no_auth = true;
         cfg.workloads.push(WorkloadRule {
             name: "future_workload".into(),
             suppress_alerts: true,
@@ -1002,6 +1116,7 @@ mod tests {
     #[test]
     fn workload_rules_round_trip_through_toml() {
         let mut cfg = Config::default();
+        cfg.web.allow_no_auth = true;
         cfg.workloads.push(WorkloadRule {
             name: "phi3".into(),
             suppress_alerts: false,
@@ -1060,6 +1175,78 @@ mod tests {
             baseline.policy.rate_limit_window_secs,
             flipped.policy.rate_limit_window_secs,
             "flipping auto_actuate must not change rate_limit_window_secs",
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // DISPATCH 85 — web auth posture (validate_web_auth).
+    // ─────────────────────────────────────────────────────────────
+
+    /// THE HEADLINE: Config::default() now has an empty auth_token
+    /// AND allow_no_auth=false, so validate_web_auth REJECTS. This
+    /// is the pin against the pre-D85 silent-open regression: an
+    /// out-of-the-box install MUST make a deliberate choice (set
+    /// the token, OR flip allow_no_auth=true, OR run --no-web).
+    #[test]
+    fn default_web_config_rejects_validate_web_auth() {
+        let cfg = Config::default();
+        let err = cfg
+            .validate_web_auth()
+            .expect_err("empty token + !allow_no_auth MUST reject");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("web.auth_token") && msg.contains("web.allow_no_auth"),
+            "error must name BOTH fields so the operator can act on \
+             it; got: {msg}",
+        );
+        // Schema-firewall + dispatch C1: the token VALUE is never
+        // echoed. The error message lists the FIELD NAMES, never a
+        // secret. (Default token is empty so nothing to echo, but
+        // pin the discipline.)
+        assert!(
+            !msg.contains("hunter2") && !msg.contains("secret-value"),
+            "validate_web_auth error MUST NOT echo any token value; got: {msg}",
+        );
+    }
+
+    /// Operator's explicit opt-out — `allow_no_auth = true` with
+    /// empty `auth_token` PASSES validate_web_auth. This is the
+    /// pre-D85 posture, preserved behind a conscious config flip.
+    #[test]
+    fn allow_no_auth_opt_out_passes_validate_web_auth() {
+        let mut cfg = Config::default();
+        cfg.web.allow_no_auth = true;
+        cfg.validate_web_auth()
+            .expect("allow_no_auth=true MUST allow empty token");
+    }
+
+    /// Set token passes validate_web_auth regardless of
+    /// allow_no_auth — a configured token IS the lock; the opt-out
+    /// flag becomes redundant. Pin both combinations.
+    #[test]
+    fn set_token_passes_validate_web_auth_either_way() {
+        let mut cfg = Config::default();
+        cfg.web.auth_token = "hunter2".to_string();
+        cfg.web.allow_no_auth = false;
+        cfg.validate_web_auth()
+            .expect("token set + allow_no_auth=false MUST pass");
+        cfg.web.allow_no_auth = true;
+        cfg.validate_web_auth()
+            .expect("token set + allow_no_auth=true MUST pass");
+    }
+
+    /// `Config::validate` does NOT enforce the web auth posture —
+    /// that lives on `validate_web_auth` so `--no-web` runs work
+    /// without an auth_token. Pin the split: a default Config with
+    /// no auth_token but otherwise valid fields must pass the
+    /// general `validate` (auth gate is a separate, web-only check).
+    #[test]
+    fn validate_does_not_enforce_web_auth_posture() {
+        let cfg = Config::default();
+        cfg.validate().expect(
+            "Config::validate is config-internal-consistency only; \
+             the web auth check lives on validate_web_auth so \
+             --no-web bypasses it cleanly.",
         );
     }
 }

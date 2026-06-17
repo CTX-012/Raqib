@@ -44,6 +44,13 @@ tower-http = { version = "0.6", features = ["cors", "trace"] }
 futures-util = "0.3"
 rust-embed = { version = "8", features = ["mime-guess"] }
 mime_guess = "2"
+# v1.3.2 / DISPATCH 85 — constant-time byte-slice compare for the
+# web auth path. A naive `==` leaks length/content via timing; the
+# `subtle::ConstantTimeEq` trait provides a `ct_eq` method whose
+# branches consume the same number of CPU cycles regardless of the
+# secret. Tiny crate, no_std-friendly, the canonical Rust choice
+# for this primitive.
+subtle = "2"
 
 # UX_CONTRACT.md v0.3 source of truth — copy strings, alert IDs, thresholds,
 # action enum, themes, sizing. Sibling crate, owned by Agent A. Do not edit

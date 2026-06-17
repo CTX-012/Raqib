@@ -21,7 +21,9 @@ fn json_format_emits_one_json_object_per_stderr_line() {
     // 3 ticks at the default 1 s interval ≈ 3 s. A handful of lines is
     // enough to prove the schema; the manual smoke covers the 100+ case.
     let out = Command::new(binary())
-        .args(["--no-ui", "--ticks", "3", "--log-format", "json"])
+        // --no-web skips the DISPATCH 85 web-auth posture gate
+        // (these tests exercise log format, not the web companion).
+        .args(["--no-ui", "--no-web", "--ticks", "3", "--log-format", "json"])
         .output()
         .expect("spawn edge_monitor");
     assert!(
@@ -79,7 +81,7 @@ fn json_format_emits_one_json_object_per_stderr_line() {
 #[test]
 fn human_format_is_not_json_shaped() {
     let out = Command::new(binary())
-        .args(["--no-ui", "--ticks", "1", "--log-format", "human"])
+        .args(["--no-ui", "--no-web", "--ticks", "1", "--log-format", "human"])
         .output()
         .expect("spawn edge_monitor");
     assert!(out.status.success());

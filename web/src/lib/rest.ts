@@ -71,6 +71,97 @@ function snapshotUrl(): string {
     return SNAPSHOT_PATH;
 }
 
+/**
+ * v1.3.2 / DISPATCH 85 — bearer-token auth.
+ *
+ * The server's `/api/*` routes are gated by a shared bearer token
+ * (set in `web.auth_token` server-side). The client stores the
+ * token in `sessionStorage` so it survives reloads within the tab
+ * but is dropped when the tab closes (intentionally — no `localStorage`
+ * so a shared computer doesn't bleed the token across operators).
+ *
+ * Bootstrap (C3 option (a)): the static bundle loads UNGATED.
+ * The first poll attempt either succeeds (token already in
+ * sessionStorage from a prior load) OR receives 401, at which point
+ * `promptForToken()` opens a browser prompt for the operator. A
+ * naked 401 fails VISIBLY — the dashboard panels keep their last
+ * good data while the operator enters the token (or the pill flips
+ * to 'disconnected' if no prior data exists).
+ */
+const TOKEN_STORAGE_KEY = 'em_auth_token';
+
+function loadToken(): string | null {
+    try {
+        return sessionStorage.getItem(TOKEN_STORAGE_KEY);
+    } catch {
+        // sessionStorage can throw in some iframe / private-mode
+        // configurations. The dashboard can still poll without
+        // auth if the server's `allow_no_auth = true`.
+        return null;
+    }
+}
+
+function saveToken(token: string): void {
+    try {
+        sessionStorage.setItem(TOKEN_STORAGE_KEY, token);
+    } catch {
+        // Storage write failed (quota, private mode). The token
+        // is still held in memory below for this tab's lifetime.
+    }
+    inMemoryToken = token;
+}
+
+function clearToken(): void {
+    try {
+        sessionStorage.removeItem(TOKEN_STORAGE_KEY);
+    } catch {
+        // ignore
+    }
+    inMemoryToken = null;
+}
+
+let inMemoryToken: string | null = null;
+
+function currentToken(): string | null {
+    return inMemoryToken ?? loadToken();
+}
+
+/**
+ * Open a browser prompt for the bearer token and store it. Called
+ * on the first 401 response (token missing or wrong). Returns the
+ * entered token, or `null` if the operator cancelled.
+ *
+ * The naive `window.prompt()` is the SIMPLEST universally-visible
+ * surface — no Svelte component churn, no risk of the prompt
+ * itself being hidden by a render bug. A future row could replace
+ * this with a styled overlay; today's job is "401 fails visibly,
+ * not blankly" (the dispatch's C4 hard rule).
+ */
+function promptForToken(): string | null {
+    const entered = window.prompt(
+        'edge_monitor: enter the bearer token configured in `[web] auth_token`',
+        '',
+    );
+    if (entered === null || entered === '') {
+        return null;
+    }
+    saveToken(entered);
+    return entered;
+}
+
+/**
+ * Build the `Authorization` header. Returns an empty Headers
+ * object when no token is set (the request may still succeed if
+ * the server has `allow_no_auth = true`).
+ */
+function buildAuthHeaders(): HeadersInit {
+    const token = currentToken();
+    if (!token) {
+        return {};
+    }
+    return { Authorization: `Bearer ${token}` };
+}
+
 async function pollOnce(): Promise<void> {
     if (inFlight) {
         // A previous poll is still pending — skip this tick to
@@ -82,7 +173,33 @@ async function pollOnce(): Promise<void> {
     const controller = new AbortController();
     inFlight = controller;
     try {
-        const resp = await fetch(snapshotUrl(), { signal: controller.signal });
+        let resp = await fetch(snapshotUrl(), {
+            signal: controller.signal,
+            headers: buildAuthHeaders(),
+        });
+        // v1.3.2 / DISPATCH 85 — token missing or wrong. Fail
+        // VISIBLY (browser prompt), don't blank the dashboard.
+        // The current snapshot store stays untouched until the
+        // next successful poll, so the operator sees their last
+        // good data WHILE entering the new token.
+        if (resp.status === 401) {
+            clearToken();
+            const newToken = promptForToken();
+            if (newToken !== null) {
+                // Retry once with the freshly-entered token. A
+                // second 401 means the operator typed it wrong —
+                // they'll see it on the next interval and re-prompt.
+                resp = await fetch(snapshotUrl(), {
+                    signal: controller.signal,
+                    headers: buildAuthHeaders(),
+                });
+            } else {
+                // Operator cancelled the prompt; mark disconnected
+                // and let the next interval re-prompt.
+                connectionStatus.set('disconnected');
+                return;
+            }
+        }
         if (!resp.ok) {
             throw new Error(`HTTP ${resp.status}`);
         }

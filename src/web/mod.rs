@@ -42,14 +42,16 @@
 //! consumes the same JSON.
 
 pub mod assets;
+pub mod auth;
 pub mod handlers;
 pub mod stream;
 pub mod wire;
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use axum::{
-    Router,
+    Router, middleware,
     routing::{any, get},
 };
 use tokio::sync::watch;
@@ -60,13 +62,29 @@ pub use wire::WireSnapshot;
 /// Shared axum router state — every handler gets a clone of this.
 /// `watch::Receiver` is cheap to clone (it's just an Arc internally),
 /// so per-request clones are fine.
+///
+/// v1.3.2 / DISPATCH 85 — `auth_token` lives here so the middleware
+/// can grab it via `State<WebState>`. Wrapped in `Arc<str>` for
+/// cheap clones across request handlers; the token is a SECRET
+/// and must NEVER be serialized into a response body or log line.
+/// `None` ⇒ open access (the operator explicitly set
+/// `web.allow_no_auth = true`).
 #[derive(Clone)]
 pub struct WebState {
     pub rx: watch::Receiver<WireSnapshot>,
+    pub auth_token: Option<Arc<str>>,
 }
 
 /// Construct the axum router. Exposed so integration tests can
 /// drive the routes without binding a real socket.
+///
+/// v1.3.2 / DISPATCH 85 — the static-bundle routes (`/`, `/assets/*`)
+/// stay UNGATED so the browser can load the shell to render the
+/// token prompt (C3 bootstrap: option (a) — lock data, not the
+/// empty HTML shell). Every `/api/*` route — including `/api/health`
+/// — is gated by [`auth::require_token`]; when `state.auth_token`
+/// is `None`, the middleware passes every request through (the
+/// `web.allow_no_auth = true` opt-out).
 pub fn router(state: WebState) -> Router {
     // CORS: locked to "any origin" because the server binds to
     // localhost-only by default; CORS isn't a security boundary
@@ -74,11 +92,19 @@ pub fn router(state: WebState) -> Router {
     // row exposes the server on a real network interface, this
     // policy needs tightening.
     let cors = CorsLayer::new().allow_origin(Any).allow_methods(Any);
-    Router::new()
-        .route("/", get(handlers::index))
-        .route("/assets/*path", get(handlers::serve_asset))
-        .route("/api/health", get(handlers::health))
-        .route("/api/snapshot", get(handlers::snapshot))
+
+    // v1.3.2 / DISPATCH 85 — split into two sub-routers:
+    //   * `api_routes` carries everything under `/api/*` and runs
+    //     through the auth middleware before reaching the handler.
+    //   * The top-level router serves the static bundle (`/`,
+    //     `/assets/*`) unguarded so the browser can load the shell
+    //     to render the token prompt.
+    //
+    // The `api_routes` middleware is attached BEFORE `with_state`
+    // so axum infers the state type from the middleware itself.
+    let api_routes = Router::new()
+        .route("/health", get(handlers::health))
+        .route("/snapshot", get(handlers::snapshot))
         // v1.3.2 / DISPATCH 68 — the first-party web dashboard now
         // polls `/api/snapshot` on a 1 Hz interval (see
         // `web/src/lib/rest.ts`) instead of subscribing here. The
@@ -89,7 +115,16 @@ pub fn router(state: WebState) -> Router {
         // _then_updates` continues to exercise the route end-to-end
         // so the regression surface stays visible if the handler
         // bit-rots while still mounted.
-        .route("/api/stream", any(stream::websocket))
+        .route("/stream", any(stream::websocket))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth::require_token,
+        ));
+
+    Router::new()
+        .route("/", get(handlers::index))
+        .route("/assets/*path", get(handlers::serve_asset))
+        .nest("/api", api_routes)
         .layer(cors)
         .with_state(state)
 }
@@ -123,6 +158,6 @@ mod tests {
         // cleanly. A future axum version that tightens type
         // bounds would surface here before any real request runs.
         let (_tx, rx) = watch::channel(WireSnapshot::empty());
-        let _r = router(WebState { rx });
+        let _r = router(WebState { rx, auth_token: None });
     }
 }

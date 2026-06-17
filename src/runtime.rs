@@ -2591,6 +2591,7 @@ mod tests {
     #[test]
     fn two_gate_invariant_holds_when_policy_is_allow() {
         let mut cfg = Config::default();
+        cfg.web.allow_no_auth = true;
         cfg.governor.auto_actuate = true; // operator-opt-in
 
         // No SignalTermSent entries in state.decisions — this is
@@ -2645,6 +2646,7 @@ mod tests {
     #[test]
     fn sustain_gate_blocks_unsustained_breach() {
         let mut cfg = Config::default();
+        cfg.web.allow_no_auth = true;
         cfg.governor.auto_actuate = true;
         assert!(
             cfg.governor.kill_sustain_secs >= 5,
@@ -2683,6 +2685,7 @@ mod tests {
     #[test]
     fn missing_breach_since_blocks_actuation() {
         let mut cfg = Config::default();
+        cfg.web.allow_no_auth = true;
         cfg.governor.auto_actuate = true;
 
         let pid = 1_000_000_003u32;
@@ -2727,6 +2730,7 @@ mod tests {
     #[test]
     fn opt_in_actuation_reaches_send_sigterm_and_records_automated_audit() {
         let mut cfg = Config::default();
+        cfg.web.allow_no_auth = true;
         cfg.governor.auto_actuate = true;
 
         let pid = 1_000_000_004u32; // well above any real /proc PID
@@ -2784,6 +2788,7 @@ mod tests {
     #[test]
     fn kill_sustain_below_alert_sustain_is_rejected() {
         let mut cfg = Config::default();
+        cfg.web.allow_no_auth = true;
         cfg.thresholds.alert_sustain_secs = Some(30);
         cfg.governor.kill_sustain_secs = 10; // < 30, must reject
 
@@ -2808,6 +2813,7 @@ mod tests {
     #[test]
     fn kill_sustain_at_or_above_alert_sustain_validates() {
         let mut cfg = Config::default();
+        cfg.web.allow_no_auth = true;
         cfg.thresholds.alert_sustain_secs = Some(7);
         cfg.governor.kill_sustain_secs = 7;
         cfg.validate().expect("equal values must validate");
@@ -2907,6 +2913,7 @@ mod tests {
     #[test]
     fn grace_period_blocks_premature_escalation() {
         let mut cfg = Config::default();
+        cfg.web.allow_no_auth = true;
         cfg.governor.auto_actuate = true;
         // policy.sigterm_grace_secs default is 5 s.
         let mut rt = Runtime::new(cfg).expect("Runtime::new");
@@ -2940,6 +2947,7 @@ mod tests {
     #[test]
     fn identity_guard_refuses_escalation_without_captured_tokens() {
         let mut cfg = Config::default();
+        cfg.web.allow_no_auth = true;
         cfg.governor.auto_actuate = true;
         cfg.policy.sigterm_grace_secs = 1; // tight grace for the test
 
@@ -3018,6 +3026,8 @@ mod tests {
         let starttime = crate::governor::pid_reuse::read_starttime(pid);
 
         let mut cfg = Config::default();
+
+        cfg.web.allow_no_auth = true;
         cfg.governor.auto_actuate = true;
         cfg.policy.sigterm_grace_secs = 0; // immediate escalation
 
@@ -3391,10 +3401,17 @@ mod tests {
     /// lockstep — this test fires loudly when that drift happens.
     #[test]
     fn default_config_validates_with_default_sustains() {
-        let cfg = Config::default();
+        // v1.3.2 / DISPATCH 85 — Config::default() alone now FAILS
+        // validation (empty auth_token + allow_no_auth=false). Test
+        // the sustain pin against a default that has explicitly
+        // opted into open access — the auth gate is a separate
+        // invariant, pinned by its own tests.
+        let mut cfg = Config::default();
+        cfg.web.allow_no_auth = true;
         cfg.validate().expect(
-            "Config::default() must validate: kill_sustain_secs \
-             default (10) >= ALERT_SUSTAIN_SECS contract default (5)",
+            "Config::default() + allow_no_auth must validate: \
+             kill_sustain_secs default (10) >= ALERT_SUSTAIN_SECS \
+             contract default (5)",
         );
         assert!(
             cfg.governor.kill_sustain_secs >= ux_contract::thresholds::ALERT_SUSTAIN_SECS,
@@ -3454,6 +3471,7 @@ mod tests {
     #[test]
     fn alertstate_sustain_wires_from_threshold_config() {
         let mut cfg = Config::default();
+        cfg.web.allow_no_auth = true;
         cfg.thresholds.alert_sustain_secs = Some(17);
         let rt = Runtime::new(cfg)
             .expect("override 17 must validate (in 1..=600)");
@@ -3473,6 +3491,7 @@ mod tests {
     #[test]
     fn runtime_new_rejects_invalid_thresholds() {
         let mut cfg = Config::default();
+        cfg.web.allow_no_auth = true;
         cfg.thresholds.thermal_amber_c = Some(95.0);
         cfg.thresholds.thermal_red_c = Some(85.0); // < amber: invalid
         // Cannot use `.expect_err(...)` because `Runtime` doesn't
@@ -3709,6 +3728,7 @@ mod tests {
         use crate::config::WorkloadRule;
         use ux_contract::AlertId;
         let mut cfg = Config::default();
+        cfg.web.allow_no_auth = true;
         cfg.workloads.push(WorkloadRule {
             name: "phi3".into(),
             suppress_alerts: true,
@@ -3775,6 +3795,7 @@ mod tests {
         use crate::ui::alerts::WorkloadRef;
         use ux_contract::AlertId;
         let mut cfg = Config::default();
+        cfg.web.allow_no_auth = true;
         cfg.workloads.push(WorkloadRule {
             name: "phi3".into(),
             suppress_alerts: true,
@@ -3823,6 +3844,7 @@ mod tests {
         use ux_contract::AlertId;
         use ux_contract::host_vitals::{HostVitals, ThermalZone};
         let mut cfg = Config::default();
+        cfg.web.allow_no_auth = true;
         // Even with a wide rule that suppresses many workloads,
         // system-scope alerts must surface.
         cfg.workloads.push(WorkloadRule {

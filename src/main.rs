@@ -211,7 +211,20 @@ fn main() -> anyhow::Result<()> {
         tracing::info!("--no-web set; web UI disabled");
         None
     } else {
-        match spawn_web_server(cli.bind, cli.port, shutdown.clone()) {
+        // v1.3.2 / DISPATCH 85 — auth-posture gate. Empty token +
+        // !allow_no_auth ⇒ refuse to start the web server with a
+        // clear operator-actionable error. `--no-web` (above)
+        // bypasses this check entirely.
+        runtime
+            .config()
+            .validate_web_auth()
+            .with_context(|| "web auth posture rejected; refusing to start the web companion")?;
+        match spawn_web_server(
+            cli.bind,
+            cli.port,
+            shutdown.clone(),
+            runtime.config().web.clone(),
+        ) {
             Ok(tx) => Some(tx),
             Err(e) => {
                 // Don't fail the whole binary if the web companion
@@ -250,9 +263,13 @@ fn main() -> anyhow::Result<()> {
 ///
 /// Sprint-7 Item 4 — `bind` is the listen address. Defaults to
 /// `0.0.0.0` (any interface, accessible from the LAN); restrict
-/// with `--bind 127.0.0.1` for localhost-only. **There is no auth
-/// in v1.0** — the wider bind explicitly assumes a trusted LAN per
-/// the README "Web UI security" section.
+/// with `--bind 127.0.0.1` for localhost-only.
+///
+/// v1.3.2 / DISPATCH 85 — bearer-token auth on every `/api/*` route.
+/// `web.auth_token` from the config is plumbed onto `WebState`; the
+/// middleware in `src/web/auth.rs` enforces it. An empty token
+/// requires `web.allow_no_auth = true` (validated at config-load
+/// time, so reaching here means the choice is intentional).
 ///
 /// The `shutdown` flag plumbed in here is the same `Arc<AtomicBool>`
 /// the rest of the binary watches; a background task polls it and
@@ -262,25 +279,59 @@ fn spawn_web_server(
     bind: std::net::IpAddr,
     port: u16,
     shutdown: Arc<AtomicBool>,
+    web_cfg: edge_monitor::config::WebConfig,
 ) -> anyhow::Result<tokio::sync::watch::Sender<edge_monitor::web::WireSnapshot>> {
     use edge_monitor::web::{WebState, WireSnapshot, serve};
 
     let (tx, rx) = tokio::sync::watch::channel(WireSnapshot::empty());
-    let state = WebState { rx };
+    // v1.3.2 / DISPATCH 85 — convert the config token to the Arc<str>
+    // the middleware reads. `None` ⇒ open access (operator flipped
+    // `allow_no_auth = true`). The token VALUE itself never appears
+    // in a `tracing` field below — only its presence + length.
+    let auth_token = if web_cfg.auth_token.is_empty() {
+        None
+    } else {
+        Some(std::sync::Arc::from(web_cfg.auth_token.as_str()))
+    };
+    let state = WebState { rx, auth_token: auth_token.clone() };
     let addr: std::net::SocketAddr = (bind, port).into();
 
-    // Sprint-7 Item 4 — surface the no-auth + LAN-exposure tradeoff
-    // at startup so the operator can't claim they weren't warned.
-    // The warning fires unconditionally (whether bind is 0.0.0.0 or
-    // localhost) because even a localhost bind is auth-less; the
-    // line just helps the operator notice the wider-than-expected
-    // listener address when one is set.
-    if !bind.is_loopback() {
-        tracing::warn!(
-            addr = %addr,
-            "web UI on {addr} — NO AUTH, trusted LAN only. \
-             Restrict with --bind 127.0.0.1 on untrusted networks."
-        );
+    // v1.3.2 / DISPATCH 85 — surface the auth posture loudly so the
+    // operator can audit the running mode at startup. We log the
+    // token's PRESENCE + LENGTH, never the bytes. The legacy
+    // "no-auth + non-loopback" warning is preserved and extended.
+    match (&auth_token, web_cfg.allow_no_auth) {
+        (Some(t), _) => {
+            tracing::info!(
+                addr = %addr,
+                token_len = t.len(),
+                "web UI on {addr} — auth ENFORCED (Bearer token, {} chars). \
+                 Clients must send `Authorization: Bearer <token>` on every \
+                 /api/* request.",
+                t.len(),
+            );
+        }
+        (None, true) => {
+            tracing::warn!(
+                addr = %addr,
+                "web UI on {addr} — NO AUTH (web.allow_no_auth = true). \
+                 Every /api/* route is OPEN to anyone who can reach the \
+                 bind address. Restrict with --bind 127.0.0.1 on untrusted \
+                 networks, or set web.auth_token to lock the API."
+            );
+        }
+        (None, false) => {
+            // Config::validate rejects this combination at load time
+            // (DISPATCH 85 C1) — reaching here means validation was
+            // bypassed. Log a hard error and pass through; the
+            // middleware will run as if no-auth were set.
+            tracing::error!(
+                addr = %addr,
+                "web UI on {addr} — UNREACHABLE STATE: empty auth_token + \
+                 allow_no_auth=false made it past Config::validate. \
+                 Investigate the validate path; running open as a fallback."
+            );
+        }
     }
 
     // Dedicated tokio runtime on a background OS thread so the TUI

@@ -20,8 +20,19 @@ use tokio::sync::watch;
 /// test exits — `tokio::test` tears down the runtime which
 /// implicitly aborts.
 async fn spawn_server() -> (SocketAddr, watch::Sender<WireSnapshot>) {
+    spawn_server_with_token(None).await
+}
+
+/// v1.3.2 / DISPATCH 85 — spawn a test server with an optional
+/// bearer token. `None` ⇒ open access (pre-D85 behavior, what
+/// the legacy tests expected). `Some(token)` ⇒ middleware enforces
+/// `Authorization: Bearer <token>` on every `/api/*` request.
+async fn spawn_server_with_token(
+    token: Option<&str>,
+) -> (SocketAddr, watch::Sender<WireSnapshot>) {
     let (tx, rx) = watch::channel(WireSnapshot::empty());
-    let state = WebState { rx };
+    let auth_token = token.map(std::sync::Arc::from);
+    let state = WebState { rx, auth_token };
     // Bind on port 0 so the OS picks an ephemeral; we then read it
     // back from the listener for the test client to connect.
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -220,4 +231,133 @@ async fn websocket_initial_snapshot_then_updates() {
 
     // Send Close so the server's `pump` exits cleanly.
     let _ = ws.send(Message::Close(None)).await;
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// DISPATCH 85 — bearer-token auth: 401 on missing/wrong, 200 on right.
+// The router's /api/* sub-router runs through the auth middleware;
+// the static bundle (`/`) loads UNGATED (C3 option (a)) so the
+// browser can render the token prompt without a chicken-and-egg.
+// ─────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn snapshot_returns_401_when_no_authorization_header() {
+    let (addr, _tx) = spawn_server_with_token(Some("hunter2")).await;
+    let url = format!("http://{addr}/api/snapshot");
+    let resp = reqwest::get(&url).await.unwrap();
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::UNAUTHORIZED,
+        "missing Authorization header MUST yield 401",
+    );
+    let body = resp.text().await.unwrap();
+    assert!(
+        !body.contains("hunter2"),
+        "401 body MUST NOT echo the expected token; got: {body:?}",
+    );
+}
+
+#[tokio::test]
+async fn snapshot_returns_401_with_wrong_bearer_token() {
+    let (addr, _tx) = spawn_server_with_token(Some("hunter2")).await;
+    let url = format!("http://{addr}/api/snapshot");
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(&url)
+        .header("Authorization", "Bearer wrong-token-value")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::UNAUTHORIZED);
+    let body = resp.text().await.unwrap();
+    assert!(
+        !body.contains("hunter2") && !body.contains("expected"),
+        "401 body MUST NOT echo or hint at the expected token; got: {body:?}",
+    );
+}
+
+#[tokio::test]
+async fn snapshot_returns_200_with_correct_bearer_token() {
+    let (addr, _tx) = spawn_server_with_token(Some("hunter2")).await;
+    let url = format!("http://{addr}/api/snapshot");
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(&url)
+        .header("Authorization", "Bearer hunter2")
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        resp.status().is_success(),
+        "correct token MUST yield 2xx; got {}",
+        resp.status(),
+    );
+    let body = resp.text().await.unwrap();
+    let _v: serde_json::Value = serde_json::from_str(&body)
+        .expect("snapshot must serialise to JSON when authorized");
+}
+
+#[tokio::test]
+async fn snapshot_returns_401_with_malformed_authorization_header() {
+    let (addr, _tx) = spawn_server_with_token(Some("hunter2")).await;
+    let url = format!("http://{addr}/api/snapshot");
+    let client = reqwest::Client::new();
+    // No "Bearer " prefix — just the raw token.
+    let resp = client
+        .get(&url)
+        .header("Authorization", "hunter2")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::UNAUTHORIZED,
+        "Authorization MUST have the 'Bearer ' prefix; raw token without it is 401",
+    );
+}
+
+#[tokio::test]
+async fn static_bundle_loads_without_token_for_c3_bootstrap() {
+    // C3 option (a): the HTML shell loads UNGATED so the browser
+    // can render the token prompt. Only /api/* is gated.
+    let (addr, _tx) = spawn_server_with_token(Some("hunter2")).await;
+    let url = format!("http://{addr}/");
+    let resp = reqwest::get(&url).await.unwrap();
+    assert!(
+        resp.status().is_success(),
+        "GET / (the HTML shell) MUST succeed without auth — the \
+         browser needs the shell to render the token prompt. Got {}",
+        resp.status(),
+    );
+}
+
+#[tokio::test]
+async fn snapshot_open_access_works_when_no_token_configured() {
+    // `web.allow_no_auth = true` ⇒ no token configured ⇒ middleware
+    // passes through. Pin the explicit opt-out.
+    let (addr, _tx) = spawn_server_with_token(None).await;
+    let url = format!("http://{addr}/api/snapshot");
+    let resp = reqwest::get(&url).await.unwrap();
+    assert!(
+        resp.status().is_success(),
+        "no token configured (allow_no_auth=true) ⇒ /api/* OPEN; got {}",
+        resp.status(),
+    );
+}
+
+#[tokio::test]
+async fn health_endpoint_is_gated_when_token_configured() {
+    // Liveness probe is still under /api/, so it's gated like the
+    // rest. An operator who wants /api/health open for monitoring
+    // can set `allow_no_auth = true`.
+    let (addr, _tx) = spawn_server_with_token(Some("hunter2")).await;
+    let url = format!("http://{addr}/api/health");
+    let resp = reqwest::get(&url).await.unwrap();
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::UNAUTHORIZED,
+        "/api/health is gated when a token is configured. Operators \
+         using bare-token monitoring MUST send Authorization on the \
+         probe, or flip allow_no_auth=true for open access.",
+    );
 }

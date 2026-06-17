@@ -31,7 +31,17 @@ fn sigterm_drains_and_exits_zero() {
     // be slower; a tempfile config keeps the test self-contained.
     let cfg_dir = tempfile::tempdir().expect("tempdir");
     let cfg_path = cfg_dir.path().join("em.toml");
-    std::fs::write(&cfg_path, "[runtime]\ntick_interval_ms = 100\n").unwrap();
+    std::fs::write(
+        &cfg_path,
+        // v1.3.2 / DISPATCH 85 — web auth gate now refuses to start
+        // when both `auth_token` is empty AND `allow_no_auth` is
+        // false. This test exercises the SIGTERM-clean-shutdown
+        // path, not the web auth path; flipping the opt-out here
+        // keeps the test pinned on the signal-handling invariant
+        // without coupling it to the auth posture.
+        "[runtime]\ntick_interval_ms = 100\n\n[web]\nallow_no_auth = true\n",
+    )
+    .unwrap();
 
     let mut child = Command::new(binary())
         .args([

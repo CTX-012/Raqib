@@ -1,0 +1,22 @@
+{
+  "tick": 5678,
+  "server_time": "2026-06-17T20:01:00Z",
+  "mission": { "workloads": 0, "degraded": 0 },
+  "vitals": {
+    "memory_pct": 30.0,
+    "memory_used_mb": 6000,
+    "memory_total_mb": 20000,
+    "load_average": [0.5, 0.7, 0.6],
+    "cpu_count": 12,
+    "process_count": 180,
+    "gpu": null,
+    "thermal_zones": [
+      { "label": "acpitz", "temp_celsius": 47.5, "severity": "ok" },
+      { "label": "acpitz", "temp_celsius": 52.1, "severity": "ok" }
+    ]
+  },
+  "workloads": [],
+  "activity": [],
+  "alerts": [],
+  "recommendations": []
+}

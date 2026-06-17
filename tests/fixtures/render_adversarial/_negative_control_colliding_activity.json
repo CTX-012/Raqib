@@ -1,0 +1,23 @@
+{
+  "_README": "NEGATIVE CONTROL — DELIBERATELY BROKEN. Two activity entries share the EXACT same (kind, pid, timestamp) tuple. The composite-key uniqueness assertion MUST detect this and fail. If the test passes on this fixture, the assertion is theatre — it cannot fail when collisions exist.",
+  "tick": 99999,
+  "server_time": "2026-06-17T20:04:00Z",
+  "mission": { "workloads": 0, "degraded": 0 },
+  "vitals": {
+    "memory_pct": 0.0,
+    "memory_used_mb": 0,
+    "memory_total_mb": 20000,
+    "load_average": [0.0, 0.0, 0.0],
+    "cpu_count": 12,
+    "process_count": 100,
+    "gpu": null,
+    "thermal_zones": []
+  },
+  "workloads": [],
+  "activity": [
+    { "kind": "exit", "timestamp": "2026-06-17T20:03:50Z", "pid": 5555, "name": "duplicate", "summary": "ev #1", "severity": "warning" },
+    { "kind": "exit", "timestamp": "2026-06-17T20:03:50Z", "pid": 5555, "name": "duplicate", "summary": "ev #2 — IDENTICAL composite key (kind, pid, timestamp)", "severity": "warning" }
+  ],
+  "alerts": [],
+  "recommendations": []
+}

@@ -58,8 +58,10 @@ fn ai_process_with_model_path_is_tracked_and_killed_in_enforce_mode() {
         pid: 1000,
         vram_pct: Some(99.0),
         vram_breached: true,
+        ..edge_monitor::governor::threshold_breach::ThresholdBreach::default()
+
     }];
-    let decisions = governor.evaluate(&snapshot, &breaches);
+    let decisions = governor.evaluate(&snapshot, &breaches, &edge_monitor::governor::threshold_breach::HostBreach::default());
 
     let ai_action = decisions
         .iter()

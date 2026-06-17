@@ -1,5 +1,5 @@
 use crate::governor::pid_reuse;
-use crate::governor::threshold_breach::ThresholdBreach;
+use crate::governor::threshold_breach::{HostBreach, ThresholdBreach};
 use crate::governor::{GovernorError, GovernorPolicy, GovernorResult, KillAction, PendingKill};
 use crate::lifecycle::{LifecycleSnapshot, ProcessLifecycle};
 use crate::model::AICategory;
@@ -50,6 +50,7 @@ impl GovernorExecutor {
         &mut self,
         lifecycle_snapshot: &LifecycleSnapshot,
         breaches: &[ThresholdBreach],
+        host_breach: &HostBreach,
     ) -> Vec<(u32, KillAction, String)> {
         self.trim_rate_limit_window();
         // v1.3.2 / DISPATCH 79 / step-4 (Q4) — deterministic
@@ -99,7 +100,7 @@ impl GovernorExecutor {
             // premature. If a future profile shows it matters, swap
             // to a HashMap built once at evaluate() entry.
             let breach = breaches.iter().find(|b| b.pid == pid);
-            let (action, reason) = self.evaluate_process(pid, lifecycle, breach);
+            let (action, reason) = self.evaluate_process(pid, lifecycle, breach, host_breach);
             // Record enforced kills against the window so subsequent
             // candidates in the same tick see the budget drop.
             //
@@ -147,6 +148,7 @@ impl GovernorExecutor {
         pid: u32,
         lifecycle: &ProcessLifecycle,
         breach: Option<&ThresholdBreach>,
+        host_breach: &HostBreach,
     ) -> (KillAction, String) {
         // Already exited: nothing to do
         if lifecycle.is_exited() {
@@ -197,35 +199,44 @@ impl GovernorExecutor {
             ),
             crate::governor::policy::PolicyAction::Kill => {
                 // v1.3.2 / DISPATCH 78 / step-3 — breach gate.
-                // Even when the policy opts INTO Kill, we only
-                // emit a kill decision when the workload is
-                // actually breaching the VRAM% threshold. A PID
-                // with no breach (vram_pct below threshold OR
-                // unmeasured) stays as Skipped: the SIGNAL is
-                // present (policy says kill if needed); the
+                // DISPATCH 84 / step-8 — WIDENED from VRAM-only
+                // to (VRAM OR RAM OR host-thermal).
+                //
+                // A PID becomes a kill candidate when AT LEAST ONE
+                // breach signal fires:
+                //
+                //   * Per-PID VRAM critical (D78).
+                //   * Per-PID RAM critical (D84) — this PID's RSS
+                //     exceeds ram_critical_pct of host total RAM.
+                //   * Host-level thermal red (D84) — ANY zone
+                //     exceeds thermal_red_c. The host is shedding
+                //     load; AI workloads are the candidates.
+                //
+                // HONESTY (matches D74/D76 VRAM_UNMEASURED): when a
+                // metric is unmeasured (None), the breach builder
+                // sets the corresponding `*_breached = false`.
+                // Absence ≠ breach. The host-thermal case has no
+                // per-PID column to be absent; an empty thermal-
+                // zones list maps to `host_breach.thermal_breached
+                // = false` at the projection layer.
+                //
+                // When NO signal fires, fall through to Skipped:
+                // the policy SIGNAL is "kill if needed" but the
                 // workload is fine right now.
-                //
-                // Q6 / VRAM%-first: only `vram_breached` gates
-                // today. RAM + thermal breach fields land in step
-                // 8; their absence today is intentional, not an
-                // omission — the design doc lists them as a
-                // follow-up dispatch.
-                //
-                // HONESTY (matches D74/D76 VRAM_UNMEASURED): when
-                // `breach` is `None` (no projection row) OR
-                // `breach.vram_pct` is `None` (unmeasured), the
-                // breach builder sets `vram_breached = false` so
-                // this branch falls through to `Skipped`. NEVER
-                // treat absence-of-measurement as breach.
-                let is_breaching = breach.is_some_and(|b| b.vram_breached);
-                if !is_breaching {
+                let vram_breaching = breach.is_some_and(|b| b.vram_breached);
+                let ram_breaching = breach.is_some_and(|b| b.ram_breached);
+                let host_thermal = host_breach.thermal_breached;
+                let any_breach = vram_breaching || ram_breaching || host_thermal;
+                if !any_breach {
                     return (
                         KillAction::Skipped,
                         format!(
-                            "AI process not breaching VRAM threshold: {} \
-                             (vram_pct={:?})",
+                            "AI process not breaching VRAM/RAM/thermal: {} \
+                             (vram_pct={:?}, ram_pct={:?}, max_temp_c={:?})",
                             lifecycle.name,
                             breach.and_then(|b| b.vram_pct),
+                            breach.and_then(|b| b.ram_pct),
+                            host_breach.max_temp_c,
                         ),
                     );
                 }
@@ -240,13 +251,31 @@ impl GovernorExecutor {
                         ),
                     )
                 } else {
+                    // Reason string names the SPECIFIC signal(s)
+                    // that fired so the audit trail attributes
+                    // the kill correctly (operator can tell a
+                    // VRAM kill from a RAM kill from a thermal
+                    // kill at a glance).
+                    let triggers: Vec<&str> = [
+                        if vram_breaching { Some("vram") } else { None },
+                        if ram_breaching { Some("ram") } else { None },
+                        if host_thermal { Some("host-thermal") } else { None },
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .collect();
                     (
                         KillAction::SignalTermSent,
                         format!(
                             "AI process marked for kill: {:?} \
-                             (vram_breached, vram_pct={:?})",
+                             (triggers=[{}], vram_pct={:?}, ram_pct={:?}, \
+                             max_temp_c={:?}, hottest_zone={:?})",
                             category.unwrap_or(AICategory::NotAi),
+                            triggers.join(","),
                             breach.and_then(|b| b.vram_pct),
+                            breach.and_then(|b| b.ram_pct),
+                            host_breach.max_temp_c,
+                            host_breach.hottest_zone,
                         ),
                     )
                 }
@@ -550,7 +579,7 @@ mod tests {
             .processes
             .insert(100, make_lifecycle(100, "bash", None, false));
 
-        let decisions = executor.evaluate(&snapshot, &[]);
+        let decisions = executor.evaluate(&snapshot, &[], &crate::governor::threshold_breach::HostBreach::default());
         assert_eq!(decisions.len(), 1);
         assert_eq!(decisions[0].1, KillAction::Whitelisted);
     }
@@ -566,7 +595,7 @@ mod tests {
             make_lifecycle(101, "ai_proc", Some(AICategory::Inference), true),
         );
 
-        let decisions = executor.evaluate(&snapshot, &[]);
+        let decisions = executor.evaluate(&snapshot, &[], &crate::governor::threshold_breach::HostBreach::default());
         assert_eq!(decisions.len(), 1);
         assert_eq!(decisions[0].1, KillAction::AlreadyExited);
     }
@@ -616,10 +645,12 @@ mod tests {
                 pid,
                 vram_pct: Some(99.0),
                 vram_breached: true,
+                ..ThresholdBreach::default()
+
             });
         }
 
-        let decisions = executor.evaluate(&snapshot, &breaches);
+        let decisions = executor.evaluate(&snapshot, &breaches, &crate::governor::threshold_breach::HostBreach::default());
         let killed = decisions
             .iter()
             .filter(|(_, a, _)| *a == KillAction::SignalTermSent)
@@ -655,9 +686,11 @@ mod tests {
                 pid,
                 vram_pct: Some(99.0),
                 vram_breached: true,
+                ..ThresholdBreach::default()
+
             });
         }
-        let decisions = executor.evaluate(&snapshot, &breaches);
+        let decisions = executor.evaluate(&snapshot, &breaches, &crate::governor::threshold_breach::HostBreach::default());
         let killed = decisions
             .iter()
             .filter(|(_, a, _)| *a == KillAction::SignalTermSent)
@@ -709,7 +742,7 @@ mod tests {
             make_lifecycle(555, "stubborn", Some(AICategory::Inference), false),
         );
 
-        let decisions = executor.evaluate(&snapshot, &[]);
+        let decisions = executor.evaluate(&snapshot, &[], &crate::governor::threshold_breach::HostBreach::default());
         assert_eq!(decisions.len(), 1);
         assert_eq!(
             decisions[0].1,
@@ -751,7 +784,7 @@ mod tests {
         );
 
         for tick in 1..=3 {
-            let decisions = executor.evaluate(&snapshot, &[]);
+            let decisions = executor.evaluate(&snapshot, &[], &crate::governor::threshold_breach::HostBreach::default());
             assert_eq!(decisions.len(), 1, "tick {tick}: one PID in snapshot");
             assert_eq!(
                 decisions[0].1,
@@ -798,9 +831,11 @@ mod tests {
                 pid,
                 vram_pct: Some(99.0),
                 vram_breached: true,
+                ..ThresholdBreach::default()
+
             });
         }
-        let decisions = executor.evaluate(&snap2, &breaches2);
+        let decisions = executor.evaluate(&snap2, &breaches2, &crate::governor::threshold_breach::HostBreach::default());
         let killed = decisions
             .iter()
             .filter(|(_, a, _)| *a == KillAction::SignalTermSent)
@@ -844,7 +879,7 @@ mod tests {
             make_lifecycle(777, "ex-pending", Some(AICategory::Inference), true),
         );
 
-        let decisions = executor.evaluate(&snapshot, &[]);
+        let decisions = executor.evaluate(&snapshot, &[], &crate::governor::threshold_breach::HostBreach::default());
         assert_eq!(
             decisions[0].1,
             KillAction::AlreadyExited,
@@ -871,7 +906,7 @@ mod tests {
             make_lifecycle(101, "ai_proc", Some(AICategory::Inference), true),
         );
 
-        let decisions = executor.evaluate(&snapshot, &[]);
+        let decisions = executor.evaluate(&snapshot, &[], &crate::governor::threshold_breach::HostBreach::default());
         assert_eq!(decisions[0].1, KillAction::AlreadyExited);
     }
 
@@ -898,8 +933,9 @@ mod tests {
             pid: 42,
             vram_pct: Some(99.5),
             vram_breached: true,
+            ..ThresholdBreach::default()
         }];
-        let decisions = executor.evaluate(&snapshot, &breaches);
+        let decisions = executor.evaluate(&snapshot, &breaches, &crate::governor::threshold_breach::HostBreach::default());
         assert_eq!(decisions[0].1, KillAction::SignalTermSent);
     }
 
@@ -924,8 +960,9 @@ mod tests {
             pid: 42,
             vram_pct: Some(99.5),
             vram_breached: true,
+            ..ThresholdBreach::default()
         }];
-        let decisions = executor.evaluate(&snapshot, &breaches);
+        let decisions = executor.evaluate(&snapshot, &breaches, &crate::governor::threshold_breach::HostBreach::default());
         assert_eq!(
             decisions[0].1,
             KillAction::Whitelisted,
@@ -955,8 +992,9 @@ mod tests {
             pid: 43,
             vram_pct: Some(20.0),
             vram_breached: false,
+            ..ThresholdBreach::default()
         }];
-        let decisions = executor.evaluate(&snapshot, &breaches);
+        let decisions = executor.evaluate(&snapshot, &breaches, &crate::governor::threshold_breach::HostBreach::default());
         assert_eq!(
             decisions[0].1,
             KillAction::Skipped,
@@ -984,7 +1022,7 @@ mod tests {
         );
         // NO breach entry for PID 44 — simulates "GPU driver
         // unloaded, projection can't compute vram_pct."
-        let decisions = executor.evaluate(&snapshot, &[]);
+        let decisions = executor.evaluate(&snapshot, &[], &crate::governor::threshold_breach::HostBreach::default());
         assert_eq!(
             decisions[0].1,
             KillAction::Skipped,
@@ -1013,11 +1051,11 @@ mod tests {
             );
         }
         let breaches = vec![
-            ThresholdBreach { pid: 50, vram_pct: Some(99.0), vram_breached: true },
-            ThresholdBreach { pid: 51, vram_pct: Some(30.0), vram_breached: false },
+            ThresholdBreach { pid: 50, vram_pct: Some(99.0), vram_breached: true, ..ThresholdBreach::default() },
+            ThresholdBreach { pid: 51, vram_pct: Some(30.0), vram_breached: false, ..ThresholdBreach::default() },
             // pid 52: no entry — unmeasured.
         ];
-        let decisions = executor.evaluate(&snapshot, &breaches);
+        let decisions = executor.evaluate(&snapshot, &breaches, &crate::governor::threshold_breach::HostBreach::default());
         let by_pid: std::collections::HashMap<u32, KillAction> = decisions
             .iter()
             .map(|(p, a, _)| (*p, *a))
@@ -1028,11 +1066,17 @@ mod tests {
     }
 
     /// Compile-time signature pin: `evaluate` accepts the narrow
-    /// projection (`&[ThresholdBreach]`), NOT `&RuntimeState`. If
-    /// a future refactor accidentally widens the signature to
-    /// take state, this fn fails to compile. STOP #1 from the
-    /// dispatch: the narrow projection is part of the design,
-    /// not a coincidence.
+    /// projection (`&LifecycleSnapshot`, `&[ThresholdBreach]`, and
+    /// the DISPATCH 84 widening: `&HostBreach`). It does NOT take
+    /// `&RuntimeState`. If a future refactor accidentally widens
+    /// the signature to take state, this fn fails to compile.
+    /// STOP #1 from the dispatch: the narrow projection is part
+    /// of the design, not a coincidence.
+    ///
+    /// DISPATCH 84 / step-8 — the projection type grew (added
+    /// `HostBreach` for host-level thermal). That's an allowed
+    /// widening per the dispatch: "Widening the projection TYPE
+    /// is fine; widening to `&RuntimeState` is not."
     #[test]
     fn evaluate_signature_takes_narrow_projection_not_runtime_state() {
         // The function-pointer type assertion below cannot widen
@@ -1042,13 +1086,14 @@ mod tests {
             &mut GovernorExecutor,
             &LifecycleSnapshot,
             &[ThresholdBreach],
+            &HostBreach,
         ) -> Vec<(u32, KillAction, String)>;
         let _fn_type: EvaluateFn = GovernorExecutor::evaluate;
         // Runtime smoke: empty inputs are accepted.
         let policy = GovernorPolicy::safe_default();
         let mut executor = GovernorExecutor::new(policy);
         let snapshot = crate::lifecycle::LifecycleSnapshot::new();
-        let _ = executor.evaluate(&snapshot, &[]);
+        let _ = executor.evaluate(&snapshot, &[], &HostBreach::default());
     }
 
     // ── v1.3.2 / DISPATCH 79 / step-4 — deterministic ordering ────
@@ -1078,6 +1123,8 @@ mod tests {
                 pid: *p,
                 vram_pct: Some(99.0),
                 vram_breached: true,
+                ..ThresholdBreach::default()
+
             })
             .collect();
 
@@ -1104,7 +1151,7 @@ mod tests {
                 );
             }
             let mut executor = GovernorExecutor::new(policy.clone());
-            let decisions = executor.evaluate(&snapshot, &breaches);
+            let decisions = executor.evaluate(&snapshot, &breaches, &crate::governor::threshold_breach::HostBreach::default());
             let selected: Vec<u32> = decisions
                 .iter()
                 .filter(|(_, a, _)| *a == KillAction::SignalTermSent)
@@ -1147,9 +1194,11 @@ mod tests {
                 pid: *p,
                 vram_pct: Some(99.0),
                 vram_breached: true,
+                ..ThresholdBreach::default()
+
             })
             .collect();
-        let decisions = executor.evaluate(&snapshot, &breaches);
+        let decisions = executor.evaluate(&snapshot, &breaches, &crate::governor::threshold_breach::HostBreach::default());
         let observed_pids: Vec<u32> = decisions.iter().map(|(p, _, _)| *p).collect();
         let mut expected = scramble.clone();
         expected.sort_unstable();
@@ -1190,10 +1239,10 @@ mod tests {
             make_lifecycle(300, "ai-quiet", Some(AICategory::Inference), false),
         );
         let breaches = vec![
-            ThresholdBreach { pid: 200, vram_pct: Some(99.0), vram_breached: true },
-            ThresholdBreach { pid: 300, vram_pct: Some(30.0), vram_breached: false },
+            ThresholdBreach { pid: 200, vram_pct: Some(99.0), vram_breached: true, ..ThresholdBreach::default() },
+            ThresholdBreach { pid: 300, vram_pct: Some(30.0), vram_breached: false, ..ThresholdBreach::default() },
         ];
-        let decisions = executor.evaluate(&snapshot, &breaches);
+        let decisions = executor.evaluate(&snapshot, &breaches, &crate::governor::threshold_breach::HostBreach::default());
         let by_pid: std::collections::HashMap<u32, KillAction> = decisions
             .iter()
             .map(|(p, a, _)| (*p, *a))
@@ -1222,10 +1271,10 @@ mod tests {
                     pid,
                     make_lifecycle(pid, "ai", Some(AICategory::Inference), false),
                 );
-                ThresholdBreach { pid, vram_pct: Some(99.0), vram_breached: true }
+                ThresholdBreach { pid, vram_pct: Some(99.0), vram_breached: true, ..ThresholdBreach::default() }
             })
             .collect();
-        let decisions = executor.evaluate(&snapshot, &breaches);
+        let decisions = executor.evaluate(&snapshot, &breaches, &crate::governor::threshold_breach::HostBreach::default());
         let killed = decisions
             .iter()
             .filter(|(_, a, _)| *a == KillAction::SignalTermSent)
@@ -1517,5 +1566,180 @@ mod tests {
         // gate is the early-return in `record_governor_audit`; the
         // manual path uses operator consent at the TUI dispatcher
         // and is allowed to be auto_actuate-free.
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // DISPATCH 84 / step-8 — RAM + thermal candidate-eligibility.
+    // ─────────────────────────────────────────────────────────────
+
+    /// RAM-only breach + opted-in Kill policy ⇒ SignalTermSent.
+    /// The widened gate accepts (vram_breached OR ram_breached OR
+    /// host_thermal_breached). With only RAM tripping, a PID with
+    /// vram_pct=None and vram_breached=false MUST still be flagged
+    /// for kill (the policy permits, ram_breached fires).
+    #[test]
+    fn ram_only_breach_under_kill_policy_signals_kill() {
+        let mut policy = GovernorPolicy::safe_default();
+        policy.default_ai_action = PolicyAction::Kill;
+        let mut executor = GovernorExecutor::new(policy);
+
+        let mut snapshot = crate::lifecycle::LifecycleSnapshot::new();
+        snapshot
+            .processes
+            .insert(70, make_lifecycle(70, "ram-hog", Some(AICategory::Inference), false));
+
+        // RAM breach, no VRAM breach.
+        let breaches = vec![ThresholdBreach {
+            pid: 70,
+            vram_pct: None,
+            vram_breached: false,
+            ram_pct: Some(97.0),
+            ram_breached: true,
+        }];
+        let decisions = executor.evaluate(
+            &snapshot,
+            &breaches,
+            &HostBreach::default(),
+        );
+        assert_eq!(
+            decisions[0].1,
+            KillAction::SignalTermSent,
+            "policy=Kill + ram_breached=true (vram_breached=false) ⇒ \
+             SignalTermSent. The breach gate is (vram OR ram OR thermal). \
+             Got {:?}, reason={:?}",
+            decisions[0].1,
+            decisions[0].2,
+        );
+        assert!(
+            decisions[0].2.contains("ram"),
+            "reason string MUST name the RAM trigger so the audit \
+             trail attributes the kill correctly; got: {:?}",
+            decisions[0].2,
+        );
+    }
+
+    /// Host-thermal breach + opted-in Kill policy ⇒ SignalTermSent
+    /// even when per-PID has NO breach (the "shed load because the
+    /// system is overheating" Q6 framing). Pin that the host-level
+    /// signal alone is sufficient to flag an AI workload.
+    #[test]
+    fn host_thermal_breach_alone_signals_kill_under_kill_policy() {
+        let mut policy = GovernorPolicy::safe_default();
+        policy.default_ai_action = PolicyAction::Kill;
+        let mut executor = GovernorExecutor::new(policy);
+
+        let mut snapshot = crate::lifecycle::LifecycleSnapshot::new();
+        snapshot
+            .processes
+            .insert(80, make_lifecycle(80, "ai-cool", Some(AICategory::Inference), false));
+
+        // No per-PID breach.
+        let breaches = vec![ThresholdBreach {
+            pid: 80,
+            vram_pct: Some(40.0),
+            vram_breached: false,
+            ram_pct: Some(50.0),
+            ram_breached: false,
+        }];
+        let host = HostBreach {
+            thermal_breached: true,
+            max_temp_c: Some(95.0),
+            hottest_zone: Some("x86_pkg_temp".into()),
+        };
+        let decisions = executor.evaluate(&snapshot, &breaches, &host);
+        assert_eq!(
+            decisions[0].1,
+            KillAction::SignalTermSent,
+            "host-thermal alone (per-PID quiet) MUST signal kill — \
+             Q6 framing: thermal triggers load shedding across AI \
+             workloads. Got {:?}",
+            decisions[0].1,
+        );
+        assert!(
+            decisions[0].2.contains("host-thermal"),
+            "reason string MUST name the thermal trigger so the \
+             operator can correlate; got: {:?}",
+            decisions[0].2,
+        );
+    }
+
+    /// THE DEFAULT-OFF INVARIANT EXTENDED. With safe_default()
+    /// policy (Allow) — D80/D81 scar layer 1 — a PID breaching ANY
+    /// combination of (VRAM, RAM, host-thermal) MUST still produce
+    /// `Whitelisted`, not `SignalTermSent`. The policy gate fires
+    /// BEFORE the threshold gate. More dimensions doesn't break the
+    /// scar.
+    #[test]
+    fn default_allow_policy_suppresses_kill_across_all_widened_dimensions() {
+        let policy = GovernorPolicy::safe_default();
+        let mut executor = GovernorExecutor::new(policy);
+
+        let mut snapshot = crate::lifecycle::LifecycleSnapshot::new();
+        snapshot.processes.insert(
+            90,
+            make_lifecycle(90, "ai-everything-breaching", Some(AICategory::Inference), false),
+        );
+
+        // ALL signals firing simultaneously.
+        let breaches = vec![ThresholdBreach {
+            pid: 90,
+            vram_pct: Some(99.0),
+            vram_breached: true,
+            ram_pct: Some(99.0),
+            ram_breached: true,
+        }];
+        let host = HostBreach {
+            thermal_breached: true,
+            max_temp_c: Some(95.0),
+            hottest_zone: Some("acpitz".into()),
+        };
+        let decisions = executor.evaluate(&snapshot, &breaches, &host);
+        assert_eq!(
+            decisions[0].1,
+            KillAction::Whitelisted,
+            "v1.0.1 scar layer 1: default Allow MUST suppress kill \
+             decision regardless of how many breach dimensions are \
+             firing. Even with VRAM + RAM + thermal ALL tripped, the \
+             policy gate wins. Got {:?}.",
+            decisions[0].1,
+        );
+    }
+
+    /// Skipped covers the "policy permits but NOTHING is breaching"
+    /// case. With Kill policy + per-PID quiet + no host thermal,
+    /// the verdict is Skipped (not SignalTermSent). Pin the broader
+    /// not-breaching surface — pre-D84 this was VRAM-only; now it
+    /// must also exclude RAM and thermal.
+    #[test]
+    fn no_breach_anywhere_under_kill_policy_skips() {
+        let mut policy = GovernorPolicy::safe_default();
+        policy.default_ai_action = PolicyAction::Kill;
+        let mut executor = GovernorExecutor::new(policy);
+
+        let mut snapshot = crate::lifecycle::LifecycleSnapshot::new();
+        snapshot.processes.insert(
+            91,
+            make_lifecycle(91, "ai-quiet", Some(AICategory::Inference), false),
+        );
+
+        // Measured but well below all thresholds.
+        let breaches = vec![ThresholdBreach {
+            pid: 91,
+            vram_pct: Some(20.0),
+            vram_breached: false,
+            ram_pct: Some(15.0),
+            ram_breached: false,
+        }];
+        let decisions = executor.evaluate(
+            &snapshot,
+            &breaches,
+            &HostBreach::default(),
+        );
+        assert_eq!(
+            decisions[0].1,
+            KillAction::Skipped,
+            "no breach anywhere ⇒ Skipped; got {:?}",
+            decisions[0].1,
+        );
     }
 }

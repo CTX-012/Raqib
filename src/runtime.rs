@@ -1249,50 +1249,80 @@ impl Runtime {
         // v1.3.2 / DISPATCH 78 / step-3 — build the per-tick
         // threshold-breach projection (Q6 — VRAM%-first) and pass
         // it into the governor alongside the lifecycle snapshot.
-        // The breach computation mirrors the VRAM-pct logic
-        // `observe_alerts` already uses (runtime.rs:716-721); both
-        // alert and kill surfaces see the same projection.
+        //
+        // DISPATCH 84 / step-8 — widened from VRAM-only to:
+        //   * Per-PID VRAM% (unchanged)
+        //   * Per-PID RAM% (NEW)
+        //   * Host-level thermal breach (NEW, max-across-zones)
+        //
+        // The auto-kill SIGNAL surface and the alert SIGNAL surface
+        // read the same projection so an operator who's seen an
+        // alert won't be surprised by a different number on the kill
+        // decision.
         //
         // Empty-fallback: when no platform snapshot is available
         // yet (very first tick before the platform thread has
-        // produced one), we project against an empty GPU, which
-        // yields `vram_pct=None` for every PID → no breaches → no
-        // kill decisions. Honest default.
-        let breaches = if let Some(snap) = self.state.last_snapshot.as_ref() {
-            crate::governor::threshold_breach::build_threshold_breaches(
+        // produced one), we project against empty GPU + None total
+        // RAM, which yields `*_pct=None` for every PID → no per-PID
+        // breaches → no kill decisions. Honest default.
+        let (breaches, host_breach) = if let Some(snap) = self.state.last_snapshot.as_ref() {
+            let breaches = crate::governor::threshold_breach::build_threshold_breaches(
                 &self.state.annotated,
                 &snap.gpu,
+                Some(snap.system.total_memory),
                 &self.state.thresholds,
-            )
+            );
+            let host_breach = crate::governor::threshold_breach::build_host_breach(
+                &snap.vitals,
+                &self.state.thresholds,
+            );
+            (breaches, host_breach)
         } else {
-            Vec::new()
+            (
+                Vec::new(),
+                crate::governor::threshold_breach::HostBreach::default(),
+            )
         };
 
         // DISPATCH 80 / C3 — refresh the per-PID breach-since map
-        // before the actuation site reads it. Two-step update so the
-        // map stays bounded by the currently-breaching PID set:
-        //   1. Insert (or keep) an entry for every breaching PID.
-        //   2. Drop entries whose PID is no longer breaching (clears,
-        //      exits, or VRAM unmeasured this tick).
-        // A breach that clears and re-emerges restarts the window —
-        // an intermittent breach must never accumulate sustain credit.
-        // The update lives here (before `evaluate`) so the sustain
-        // check at the actuation site reads a map already accurate
-        // for THIS tick — including the just-arrived breach (window
-        // = 0 s, will not yet pass the gate).
+        // before the actuation site reads it.
+        //
+        // DISPATCH 84 — the breach-since map now tracks ANY of the
+        // three signal sources:
+        //   1. Per-PID VRAM-breach.
+        //   2. Per-PID RAM-breach.
+        //   3. Host-level thermal-breach → all AI-classified PIDs
+        //      become eligible because the host is shedding load;
+        //      the sustain gate then waits kill_sustain_secs of
+        //      sustained thermal pressure before firing on any of
+        //      them. This matches Q6's framing of thermal as the
+        //      "shed load because the system is overheating"
+        //      trigger — without inclusion here, a thermal-only
+        //      kill could never satisfy the sustain check.
+        //
+        // Two-step update keeps the map bounded by the currently-
+        // breaching PID set; a clear-then-reappear restarts the
+        // window (no accumulated sustain credit on flickers).
         let now_for_sustain = Instant::now();
-        let breaching_pids: std::collections::HashSet<u32> = breaches
+        let mut breaching_pids: std::collections::HashSet<u32> = breaches
             .iter()
-            .filter(|b| b.vram_breached)
+            .filter(|b| b.vram_breached || b.ram_breached)
             .map(|b| b.pid)
             .collect();
+        if host_breach.thermal_breached {
+            for p in &self.state.annotated {
+                if p.category != crate::model::AICategory::NotAi {
+                    breaching_pids.insert(p.pid);
+                }
+            }
+        }
         for pid in &breaching_pids {
             self.breach_since.entry(*pid).or_insert(now_for_sustain);
         }
         self.breach_since
             .retain(|pid, _| breaching_pids.contains(pid));
 
-        let decisions = self.governor.evaluate(&lifecycle, &breaches);
+        let decisions = self.governor.evaluate(&lifecycle, &breaches, &host_breach);
 
         // Tier 2.3 — count governor decisions by reason, for the
         // Prometheus exporter. Done before we move `decisions` onto

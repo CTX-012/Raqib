@@ -55,7 +55,7 @@ proptest! {
             .collect();
 
         let snap = snapshot_of(&entries);
-        let decisions = executor.evaluate(&snap, &[]);
+        let decisions = executor.evaluate(&snap, &[], &edge_monitor::governor::threshold_breach::HostBreach::default());
         for (_, action, _) in &decisions {
             prop_assert!(
                 !matches!(
@@ -101,9 +101,10 @@ proptest! {
                 pid: *pid,
                 vram_pct: Some(99.0),
                 vram_breached: true,
+                ..edge_monitor::governor::threshold_breach::ThresholdBreach::default()
             })
             .collect();
-        let decisions = executor.evaluate(&snap, &breaches);
+        let decisions = executor.evaluate(&snap, &breaches, &edge_monitor::governor::threshold_breach::HostBreach::default());
         let killed = decisions
             .iter()
             .filter(|(_, a, _)| *a == KillAction::SignalTermSent)

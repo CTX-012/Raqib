@@ -416,6 +416,39 @@ pub struct RuntimeConfig {
     pub audit_log_path: String,
     /// Persistent run-summary log file. Same disable-with-empty semantics.
     pub summary_log_path: String,
+    /// v1.3.2 / DISPATCH 89 / PHASE 5 step 0 — per-PID trajectory ring
+    /// bound. Caps the number of samples retained per live AI PID in
+    /// the History.trajectories cell. Default **1800** ≈ 30 min @ 1 Hz
+    /// (matches `tick_interval_ms = 1000`).
+    ///
+    /// Memory math (see [`docs/PHASE5_HISTORY_DESIGN.md`]): 32 B/sample
+    /// × 32 worst-case AI PIDs × this cap. Default settings ≈ 1.84 MB.
+    /// Upper guard at 18000 (10× default) capped at ~18.4 MB worst
+    /// case — prevents a fat-finger config from requesting gigabytes.
+    ///
+    /// **Pure config plumbing for D89; no readers in production yet.**
+    /// The trajectory CAPTURE site (PHASE 5 step 3) is a future
+    /// dispatch; this field exists today so the doc-locked default
+    /// has a single named home.
+    pub history_trajectory_samples_per_pid: usize,
+    /// v1.3.2 / DISPATCH 89 / PHASE 5 step 0 — event-archive ring
+    /// bound. Caps the cross-PID `HistoryEvent` ring that aggregates
+    /// exit / kill / regression events for the history view. Default
+    /// **500** (~150 KB at ~300 B/entry) covers ~1 hour of busy
+    /// operator activity.
+    ///
+    /// Additive structure: the existing `audit_history` /
+    /// `completed_history` rings (cap 100 / 50) feed the LIVE
+    /// activity panel + wire snapshot at the locked
+    /// `ACTIVITY_FEED_WIRE_MAX = 50` cap; this NEW archive is a
+    /// SEPARATE structure read only on demand by the future history
+    /// view. The live wire is NOT bloated by raising this cap.
+    ///
+    /// Upper guard at 5000 (10× default) caps the structure at
+    /// ~1.5 MB worst case.
+    ///
+    /// **Pure config plumbing for D89; no readers in production yet.**
+    pub history_event_archive_cap: usize,
 }
 
 /// Storage paths for the typed run store + ancillary caches.
@@ -503,6 +536,11 @@ impl Default for RuntimeConfig {
             audit_history: 100,
             audit_log_path: String::new(),
             summary_log_path: String::new(),
+            // v1.3.2 / DISPATCH 89 / PHASE 5 step 0 — doc-locked
+            // defaults. Memory math + upper-guard rationale on the
+            // field doc-comments above.
+            history_trajectory_samples_per_pid: 1800,
+            history_event_archive_cap: 500,
         }
     }
 }
@@ -572,6 +610,41 @@ impl Config {
                  by setting storage.run_store_path = \"\" instead)"
                     .into(),
             ));
+        }
+        // v1.3.2 / DISPATCH 89 / PHASE 5 step 0 — bounds on the new
+        // history tunables. Lower bound at 1 because a zero-cap ring
+        // would mean "discard every sample / event," which is what
+        // disabling History entirely should look like — and we
+        // don't expose a separate enable flag this early; an
+        // operator who really wants to disable can set both to 1
+        // and accept the tiny noise. Upper guards are 10× defaults
+        // (see field doc-comments for the memory math).
+        if self.runtime.history_trajectory_samples_per_pid == 0 {
+            return Err(ConfigError::Invalid(
+                "runtime.history_trajectory_samples_per_pid must be > 0".into(),
+            ));
+        }
+        if self.runtime.history_trajectory_samples_per_pid > 18000 {
+            return Err(ConfigError::Invalid(format!(
+                "runtime.history_trajectory_samples_per_pid ({}) must be <= 18000 \
+                 (10\u{00d7} the doc-locked default of 1800 ≈ 5 hours @ 1 Hz). \
+                 Memory math: 32 B \u{00d7} 32 PIDs \u{00d7} this cap; ceiling \
+                 \u{2248} 18.4 MB worst case.",
+                self.runtime.history_trajectory_samples_per_pid,
+            )));
+        }
+        if self.runtime.history_event_archive_cap == 0 {
+            return Err(ConfigError::Invalid(
+                "runtime.history_event_archive_cap must be > 0".into(),
+            ));
+        }
+        if self.runtime.history_event_archive_cap > 5000 {
+            return Err(ConfigError::Invalid(format!(
+                "runtime.history_event_archive_cap ({}) must be <= 5000 \
+                 (10\u{00d7} the doc-locked default of 500). Memory math: \
+                 \u{2248} 300 B/entry \u{00d7} this cap; ceiling \u{2248} 1.5 MB.",
+                self.runtime.history_event_archive_cap,
+            )));
         }
         if !self.regression.warn_pct.is_finite() || self.regression.warn_pct < 0.0 {
             return Err(ConfigError::Invalid(
@@ -1248,5 +1321,106 @@ mod tests {
              the web auth check lives on validate_web_auth so \
              --no-web bypasses it cleanly.",
         );
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // DISPATCH 89 / PHASE 5 step 0 — history config fields.
+    // ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn history_defaults_match_design_doc() {
+        let cfg = Config::default();
+        assert_eq!(
+            cfg.runtime.history_trajectory_samples_per_pid, 1800,
+            "doc-locked default: 1800 samples/PID (≈ 30 min @ 1 Hz)"
+        );
+        assert_eq!(
+            cfg.runtime.history_event_archive_cap, 500,
+            "doc-locked default: 500 events archive-wide"
+        );
+    }
+
+    #[test]
+    fn history_trajectory_samples_zero_rejected() {
+        let mut cfg = Config::default();
+        cfg.web.allow_no_auth = true;
+        cfg.runtime.history_trajectory_samples_per_pid = 0;
+        let err = cfg
+            .validate()
+            .expect_err("zero sample cap must reject");
+        assert!(
+            format!("{err}").contains("history_trajectory_samples_per_pid"),
+            "rejection must name the field; got {err}"
+        );
+    }
+
+    #[test]
+    fn history_trajectory_samples_over_upper_guard_rejected() {
+        let mut cfg = Config::default();
+        cfg.web.allow_no_auth = true;
+        cfg.runtime.history_trajectory_samples_per_pid = 18001;
+        let err = cfg
+            .validate()
+            .expect_err("> 18000 (10× default) must reject — memory ceiling");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("18001") && msg.contains("18000"),
+            "rejection must report both the value and the cap; got {msg}",
+        );
+    }
+
+    #[test]
+    fn history_trajectory_samples_at_upper_guard_accepted() {
+        let mut cfg = Config::default();
+        cfg.web.allow_no_auth = true;
+        cfg.runtime.history_trajectory_samples_per_pid = 18000;
+        cfg.validate().expect("18000 exactly must pass (boundary)");
+    }
+
+    #[test]
+    fn history_event_archive_zero_rejected() {
+        let mut cfg = Config::default();
+        cfg.web.allow_no_auth = true;
+        cfg.runtime.history_event_archive_cap = 0;
+        let err = cfg.validate().expect_err("zero archive cap must reject");
+        assert!(
+            format!("{err}").contains("history_event_archive_cap"),
+            "rejection must name the field; got {err}"
+        );
+    }
+
+    #[test]
+    fn history_event_archive_over_upper_guard_rejected() {
+        let mut cfg = Config::default();
+        cfg.web.allow_no_auth = true;
+        cfg.runtime.history_event_archive_cap = 5001;
+        let err = cfg
+            .validate()
+            .expect_err("> 5000 (10× default) must reject");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("5001") && msg.contains("5000"),
+            "rejection must report both the value and the cap; got {msg}",
+        );
+    }
+
+    #[test]
+    fn history_fields_round_trip_through_toml() {
+        let mut original = Config::default();
+        original.web.allow_no_auth = true;
+        original.runtime.history_trajectory_samples_per_pid = 600;
+        original.runtime.history_event_archive_cap = 250;
+        let serialized = toml::to_string(&original).expect("serialize");
+        assert!(
+            serialized.contains("history_trajectory_samples_per_pid"),
+            "TOML must include the new field name; got: {serialized}",
+        );
+        assert!(
+            serialized.contains("history_event_archive_cap"),
+            "TOML must include the new field name; got: {serialized}",
+        );
+        let parsed: Config = toml::from_str(&serialized).expect("deserialize");
+        assert_eq!(parsed.runtime.history_trajectory_samples_per_pid, 600);
+        assert_eq!(parsed.runtime.history_event_archive_cap, 250);
     }
 }

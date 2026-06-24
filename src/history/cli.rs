@@ -398,6 +398,7 @@ mod tests {
             peak_rss_mb: 512,
             peak_vram_mb: 0,
             samples: 42,
+            trajectory: None,
         };
         RunRecord::from_summary(summary)
     }

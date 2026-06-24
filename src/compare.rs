@@ -303,7 +303,7 @@ mod tests {
             peak_cpu_pct: 0.0,
             peak_rss_mb: 1024,
             peak_vram_mb: peak_vram,
-            samples: 60,
+            samples: 60,            trajectory: None,
         };
         let mut r = RunRecord::from_summary(summary);
         r.metrics = RunMetrics {

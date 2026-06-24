@@ -488,6 +488,29 @@ pub struct Runtime {
     /// headless — which is correct (there's no operator to
     /// "arm" anything). `None` when no card is open.
     armed_pid: Option<u32>,
+    /// v1.3.2 / DISPATCH 90 / PHASE 5 step 3 — per-PID trajectory
+    /// store. Constructed exactly ONCE in [`Self::new`] using the
+    /// caps from `runtime.history_trajectory_samples_per_pid` /
+    /// `runtime.history_event_archive_cap` (D89 config fields).
+    ///
+    /// Capture site: the existing `for (idx, p) in annotated.iter()`
+    /// loop in [`Self::tick`] (adjacent to the
+    /// `self.tracker.record_sample` call). Samples reuse metrics
+    /// already in scope at that point — `p.rss_mb` /
+    /// `p.vram_bytes` / `cpu_for_avg[idx]` — so capture adds NO new
+    /// /proc reads or GPU queries.
+    ///
+    /// Hand-off site: the exit-drain loop at
+    /// `for summary in &lifecycle.recent_exits` — the PID's ring is
+    /// `drain_trajectory`d into the `LifecycleSummary` that's pushed
+    /// into `state.completed`. The RunStore branch's clone is
+    /// EXPLICITLY set to `trajectory: None` so disk records stay
+    /// peak-only per the Q3-C design.
+    ///
+    /// The single ONE-construction-ONE-capture-ONE-drain shape is
+    /// pinned by the converted D89 tripwire
+    /// `history_capture_is_wired_exactly_once_in_runtime`.
+    pub(crate) history: crate::history::History,
 }
 
 impl Runtime {
@@ -560,6 +583,14 @@ impl Runtime {
         } else {
             Some(expand_tilde(&config.storage.fingerprint_cache))
         });
+        // v1.3.2 / DISPATCH 90 / PHASE 5 step 3 — read the doc-locked
+        // caps once at construction; the per-tick capture path stays
+        // a pure ring push with no config re-reads. Pre-validated by
+        // `Config::validate` (zero / above-10× rejected at load time).
+        let history = crate::history::History::new(
+            config.runtime.history_trajectory_samples_per_pid,
+            config.runtime.history_event_archive_cap,
+        );
         Ok(Self {
             config,
             tracker: LifecycleTracker::new(),
@@ -584,6 +615,7 @@ impl Runtime {
             clk_tck: read_clk_tck(),
             sys_for_metrics: platform::new_system_for_metrics(),
             armed_pid: None,
+            history,
         })
     }
 
@@ -992,6 +1024,39 @@ impl Runtime {
                     .record_resource_peaks(p.pid, p.rss_mb * 1024 * 1024, p.vram_bytes);
             }
             self.tracker.record_model_name(p.pid, p.model_name.clone());
+
+            // v1.3.2 / DISPATCH 90 / PHASE 5 step 3 — also push a
+            // History sample for AI-classified PIDs. REUSE the
+            // metrics already in scope from THIS tick — no second
+            // /proc read, no second GPU query. The cost is:
+            //   * `cpu_for_avg[idx].unwrap_or(0.0)` — already
+            //     computed above (cold-start ticks contribute 0.0;
+            //     the trajectory's first sample on cold start is
+            //     honest about that, mirroring the panel display).
+            //   * `p.rss_mb` narrowed to u32 — capped at u32::MAX
+            //     (4 GB sample ceiling well above any AI workload;
+            //     `min` is saturating, not silently truncating).
+            //   * `p.vram_bytes` ⇒ MB (preserving the `None ≠ 0`
+            //     honesty rule the D74/D78 VRAM_UNMEASURED display
+            //     enforces). NEVER zero-fill an unmeasured reading.
+            //
+            // AI-only filter: NotAi processes don't get a trajectory
+            // (the per-PID ring would balloon the HashMap across
+            // every transient shell on the host without any value
+            // — non-AI PIDs never receive a `LifecycleSummary` ⇒
+            // never project into the history view). Matches the
+            // PHASE5 design doc's "for each live AI-tracked PID."
+            if p.category != crate::model::AICategory::NotAi {
+                let sample = crate::history::Sample {
+                    timestamp: chrono::Utc::now(),
+                    cpu_pct: cpu_for_avg[idx].unwrap_or(0.0),
+                    rss_mb: p.rss_mb.min(u32::MAX as u64) as u32,
+                    vram_mb: p
+                        .vram_bytes
+                        .map(|b| (b / (1024 * 1024)).min(u32::MAX as u64) as u32),
+                };
+                self.history.record_sample(p.pid, sample);
+            }
         }
 
         // Tier 1.2 — drive telemetry samplers against AI processes
@@ -1095,7 +1160,19 @@ impl Runtime {
         let mut dmesg_cache: Option<Vec<String>> = None;
         // Record run summaries as they fire. Bounded by config to keep memory flat.
         for summary in &lifecycle.recent_exits {
-            self.state.completed.push_back(summary.clone());
+            // v1.3.2 / DISPATCH 90 / PHASE 5 step 4 — attach the
+            // PID's trajectory to the in-memory summary BEFORE
+            // pushing it into `state.completed`. This is the Q3-C
+            // hand-off: live trajectory lives on `Runtime::history`;
+            // on exit it MOVES onto `LifecycleSummary.trajectory` and
+            // the per-PID ring is removed from the HashMap. Dead PIDs
+            // do not linger — their data follows the lifecycle of the
+            // `LifecycleSummary` in `state.completed`, capped by
+            // `completed_history`.
+            let trajectory = self.history.drain_trajectory(summary.pid);
+            let mut summary_for_completed = summary.clone();
+            summary_for_completed.trajectory = trajectory;
+            self.state.completed.push_back(summary_for_completed);
             // v1.3.2 / DISPATCH 74 — push a placeholder into the
             // lock-step attribution VecDeque. Will be patched below
             // for AI exits once classify_exit runs. Non-AI exits
@@ -1207,6 +1284,20 @@ impl Runtime {
                 && let Some((reason, _, _)) = classification.clone()
             {
                 let mut summary_to_record = summary.clone();
+                // v1.3.2 / DISPATCH 90 / PHASE 5 Q3-C — disk-record
+                // discipline. The trajectory rides on
+                // `state.completed[i].trajectory` in memory; it MUST
+                // NOT bloat the RunStore JSONL records. The source
+                // `summary` (from `lifecycle.recent_exits`) carries
+                // no trajectory at this point (only the
+                // `summary_for_completed` clone above received the
+                // attached trajectory), so this assignment is
+                // belt-and-suspenders: it pins the invariant against
+                // a future refactor that might thread the trajectory
+                // through the source struct. `skip_serializing_if =
+                // "Option::is_none"` keeps the JSONL bytes
+                // identical to pre-D90 records.
+                summary_to_record.trajectory = None;
                 // Tier 1.2c — promote authoritative model_name from
                 // an API source (Ollama /api/ps) over the classifier's
                 // heuristic guess. Done before constructing the record
@@ -3983,7 +4074,7 @@ mod tests {
             peak_cpu_pct: 80.0,
             peak_rss_mb,
             peak_vram_mb: 0,
-            samples: 30,
+            samples: 30,            trajectory: None,
         }
     }
 
@@ -4553,5 +4644,149 @@ mod tests {
              moved, update this test AND the doc-comment in \
              `manual_kill`'s P1#1 insert.",
         );
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // DISPATCH 90 / PHASE 5 step 3+4 — history capture + exit hand-off.
+    // ─────────────────────────────────────────────────────────────
+
+    /// Runtime::new constructs `History` with the doc-locked caps
+    /// pulled straight from `RuntimeConfig`. A future refactor that
+    /// silently swaps in a different cap source (e.g. a hardcoded
+    /// 1800 ignoring the operator's TOML) fires this test.
+    #[test]
+    fn runtime_new_constructs_history_with_config_caps() {
+        let mut cfg = Config::default();
+        cfg.web.allow_no_auth = true;
+        cfg.runtime.history_trajectory_samples_per_pid = 333;
+        cfg.runtime.history_event_archive_cap = 77;
+        let rt = Runtime::new(cfg).expect("Runtime::new");
+        assert_eq!(rt.history.trajectory_cap_per_pid(), 333);
+        assert_eq!(rt.history.event_archive_cap(), 77);
+        assert_eq!(rt.history.live_pid_count(), 0);
+        assert_eq!(rt.history.event_count(), 0);
+    }
+
+    /// Hand-off site (PHASE 5 step 4): when a PID's ring is
+    /// populated and we call `drain_trajectory`, the returned
+    /// trajectory carries the samples AND the HashMap entry is
+    /// removed (the dead-PID-ring leak the step-4 hand-off closes).
+    #[test]
+    fn drain_trajectory_returns_samples_and_removes_entry() {
+        let mut cfg = Config::default();
+        cfg.web.allow_no_auth = true;
+        let mut rt = Runtime::new(cfg).expect("Runtime::new");
+
+        let pid = 8675309;
+        for i in 0..5 {
+            rt.history.record_sample(
+                pid,
+                crate::history::Sample {
+                    timestamp: chrono::DateTime::from_timestamp(i, 0).unwrap(),
+                    cpu_pct: i as f32,
+                    rss_mb: 10 + i as u32,
+                    vram_mb: None,
+                },
+            );
+        }
+        assert_eq!(rt.history.live_pid_count(), 1);
+
+        let traj = rt
+            .history
+            .drain_trajectory(pid)
+            .expect("non-empty ring freezes to Some");
+        assert_eq!(traj.samples.len(), 5);
+        assert_eq!(traj.first_sample_at.timestamp(), 0);
+        assert_eq!(traj.last_sample_at.timestamp(), 4);
+        assert_eq!(
+            rt.history.live_pid_count(),
+            0,
+            "exit hand-off MUST remove the per-PID ring — without \
+             this, dead PIDs linger in History.trajectories forever",
+        );
+    }
+
+    /// VRAM honesty (PHASE 5 step 3): when a sample's vram_mb is
+    /// `None` (unmeasured — the operator's driver-unloaded case),
+    /// the frozen trajectory MUST preserve `None`, NOT silently
+    /// substitute 0. Mirrors the D74/D78 VRAM_UNMEASURED display
+    /// discipline.
+    #[test]
+    fn capture_preserves_vram_unmeasured_as_none() {
+        let mut cfg = Config::default();
+        cfg.web.allow_no_auth = true;
+        let mut rt = Runtime::new(cfg).expect("Runtime::new");
+
+        let pid = 9_001;
+        rt.history.record_sample(
+            pid,
+            crate::history::Sample {
+                timestamp: chrono::Utc::now(),
+                cpu_pct: 1.0,
+                rss_mb: 100,
+                vram_mb: None,
+            },
+        );
+        let traj = rt
+            .history
+            .drain_trajectory(pid)
+            .expect("trajectory exists");
+        assert_eq!(traj.samples[0].vram_mb, None);
+    }
+
+    /// Disk discipline (PHASE 5 Q3-C): the LifecycleSummary's
+    /// `trajectory: None` field is `skip_serializing_if =
+    /// "Option::is_none"`, so a serialized RunRecord clone with
+    /// `trajectory = None` produces JSON byte-identical to pre-D90
+    /// records. The runtime explicitly sets `None` before
+    /// `rs.append`; this test pins the serde shape that backs that
+    /// discipline.
+    #[test]
+    fn lifecycle_summary_with_none_trajectory_omits_field_from_json() {
+        let summary = LifecycleSummary {
+            pid: 1,
+            name: "p".into(),
+            category: None,
+            model_name: None,
+            spawn_time: chrono::Utc::now(),
+            exit_time: chrono::Utc::now(),
+            uptime_secs: 1,
+            exit_code: Some(0),
+            signal: None,
+            avg_cpu_pct: 0.0,
+            peak_cpu_pct: 0.0,
+            peak_rss_mb: 0,
+            peak_vram_mb: 0,
+            samples: 0,
+            trajectory: None,
+        };
+        let json = serde_json::to_string(&summary).unwrap();
+        assert!(
+            !json.contains("trajectory"),
+            "trajectory=None MUST be omitted from JSON \
+             (skip_serializing_if). Pre-D90 disk records stay \
+             byte-identical. Got: {json}",
+        );
+
+        // Conversely, Some(traj) MUST round-trip in.
+        let mut summary_with = summary.clone();
+        summary_with.trajectory = Some(crate::history::Trajectory {
+            samples: vec![crate::history::Sample {
+                timestamp: chrono::Utc::now(),
+                cpu_pct: 1.0,
+                rss_mb: 5,
+                vram_mb: Some(10),
+            }],
+            first_sample_at: chrono::Utc::now(),
+            last_sample_at: chrono::Utc::now(),
+        });
+        let json_with = serde_json::to_string(&summary_with).unwrap();
+        assert!(
+            json_with.contains("trajectory"),
+            "Some(trajectory) MUST serialize. Got: {json_with}",
+        );
+        let round: LifecycleSummary = serde_json::from_str(&json_with).unwrap();
+        assert!(round.trajectory.is_some());
+        assert_eq!(round.trajectory.unwrap().samples.len(), 1);
     }
 }

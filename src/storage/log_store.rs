@@ -125,6 +125,7 @@ mod tests {
             peak_rss_mb: 512,
             peak_vram_mb: 2048,
             samples: 42,
+            trajectory: None,
         }
     }
 

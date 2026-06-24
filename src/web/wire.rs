@@ -1884,7 +1884,7 @@ mod tests {
                 peak_cpu_pct: 0.0,
                 peak_rss_mb: 0,
                 peak_vram_mb: 0,
-                samples: 1,
+                samples: 1,                trajectory: None,
             }
         }
         let clean = WireRunRecord::from_record(&RunRecord::from_summary(lc(None, Some(0))));
@@ -1918,7 +1918,7 @@ mod tests {
             peak_cpu_pct: 33.0,
             peak_rss_mb: 256,
             peak_vram_mb: 0,
-            samples: 10,
+            samples: 10,            trajectory: None,
         }
     }
 

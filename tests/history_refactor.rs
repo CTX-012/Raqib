@@ -60,6 +60,7 @@ fn fixture_summary(name: &str, model: &str, signal: Option<i32>) -> LifecycleSum
         peak_rss_mb: 1024,
         peak_vram_mb: 4096,
         samples: 60,
+        trajectory: None,
     }
 }
 

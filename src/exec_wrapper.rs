@@ -220,6 +220,12 @@ pub async fn run_exec(
         peak_rss_mb: 0,
         peak_vram_mb: 0,
         samples: 0,
+        // PHASE 5 step 2 (D90): exec_wrapper produces a synthetic
+        // summary without per-tick samples — there's no
+        // `Runtime::history` in the wrapper context, so no trajectory
+        // to attach. The summary still serializes identically to
+        // pre-D90 (skip_serializing_if = "Option::is_none").
+        trajectory: None,
     };
 
     let s = stats.lock().await.clone();

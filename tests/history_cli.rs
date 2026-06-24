@@ -32,6 +32,7 @@ fn fake_summary(pid: u32, model: &str, exit_code: Option<i32>) -> LifecycleSumma
         peak_rss_mb: 128,
         peak_vram_mb: 0,
         samples: 7,
+        trajectory: None,
     }
 }
 

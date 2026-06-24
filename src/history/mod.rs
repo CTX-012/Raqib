@@ -257,44 +257,106 @@ mod tests {
         );
     }
 
-    /// Nothing-wired-yet sanity: D89 is pure structure. The runtime
-    /// MUST NOT construct or read `History` until PHASE 5 step 3+. A
-    /// future contributor accidentally wiring CAPTURE into
-    /// `Runtime::tick()` ahead of the step-3 dispatch trips this
-    /// check.
+    /// THE D90 INVARIANT (CONVERTED from the D89 tripwire — same
+    /// guard role, evolved shape). The History capture path is
+    /// wired in EXACTLY ONE place in `runtime.rs`, with:
     ///
-    /// We grep the runtime source string for the `History` constructor
-    /// name. The match is loose on purpose (allow doc-comments and
-    /// future-tense planning text) — the trigger is a CALL site
-    /// `History::new(`.
+    ///   * exactly ONE `History::new(` construction (in `Runtime::new`),
+    ///   * exactly ONE `.record_sample(` call routed through
+    ///     `self.history` (the per-tick capture site in `Runtime::tick`),
+    ///   * exactly ONE `.drain_trajectory(` call (the exit hand-off
+    ///     in the `for summary in &lifecycle.recent_exits` loop).
+    ///
+    /// The D89 version of this test forbade ANY History construction
+    /// or method call in runtime.rs (the dormant-machinery posture);
+    /// D90 deliberately lights the capture path up. The guard is
+    /// CONVERTED, not deleted, so a future stray capture site (a
+    /// second `History::new`, a second `self.history.record_sample`
+    /// elsewhere) fires the assertion before review — same pattern
+    /// as the D80 `send_sigterm_actuation_site_is_auto_actuate_gated`
+    /// conversion.
     #[test]
-    fn history_is_not_constructed_in_runtime_yet() {
+    fn history_capture_is_wired_exactly_once_in_runtime() {
         let src = include_str!("../runtime.rs");
-        // Allow any prose mention; reject only the constructor call.
-        assert!(
-            !src.contains("History::new("),
-            "PHASE 5 step 1 invariant breached: runtime.rs constructs \
-             `History::new(...)` but D89 ships TYPES ONLY. CAPTURE \
-             wiring is PHASE 5 step 3 — a separate dispatch. If a \
-             follow-up step landed correctly, update this guard to \
-             allow the expected call site.",
+        // Strip the `#[cfg(test)]` test module so per-test fixture
+        // constructions don't count against the production guard.
+        let prod = match src.find("#[cfg(test)]") {
+            Some(i) => &src[..i],
+            None => src,
+        };
+
+        // (1) Exactly ONE `History::new(` call site in production.
+        let new_count = prod.matches("History::new(").count();
+        assert_eq!(
+            new_count, 1,
+            "PHASE 5 step 3 invariant: `History::new(...)` must \
+             appear EXACTLY ONCE in runtime.rs production (the \
+             `Runtime::new` construction). Found {new_count}. A \
+             second constructor would mean two trajectory stores \
+             that never see each other's samples — split-brain.",
         );
-        // Also reject calls into the record/drain entry points.
-        // The pre-existing `self.tracker\n    .record_sample(...)`
-        // method-chain at runtime.rs:983 is the ONLY allowed call
-        // site; it lives on `LifecycleTracker`, NOT on `History`.
-        // We walk every `.record_sample(` occurrence and verify each
-        // is preceded (within the immediate prefix, stripping
-        // whitespace) by a `tracker` token. A `History::record_sample`
-        // call would fail that check.
-        for (offset, _) in src.match_indices(".record_sample(") {
-            let head = src[..offset].trim_end();
+
+        // (2) Exactly ONE `self.history.record_sample(...)` capture
+        // site. Allow the pre-existing `self.tracker.record_sample`
+        // call (it lives on `LifecycleTracker`, a different type).
+        let mut history_capture_sites = 0usize;
+        for (offset, _) in prod.match_indices(".record_sample(") {
+            let head = prod[..offset].trim_end();
+            if head.ends_with("self.history") || head.ends_with("history") {
+                history_capture_sites += 1;
+            } else if head.ends_with("self.tracker") || head.ends_with("tracker") {
+                // pre-existing LifecycleTracker site — allow.
+            } else {
+                panic!(
+                    "PHASE 5 step 3 invariant: `.record_sample(...)` \
+                     called on an UNRECOGNISED receiver in runtime.rs \
+                     at byte offset {offset}. Allowed receivers are \
+                     `self.tracker` (pre-existing) and `self.history` \
+                     (D90 capture site). Prefix: …{:?}",
+                    &head[head.len().saturating_sub(40)..],
+                );
+            }
+        }
+        assert_eq!(
+            history_capture_sites, 1,
+            "PHASE 5 step 3 invariant: `self.history.record_sample(...)` \
+             must appear EXACTLY ONCE in runtime.rs production (the \
+             tick-loop capture site). Found {history_capture_sites}.",
+        );
+
+        // (3) Exactly ONE `.drain_trajectory(` call (the exit
+        // hand-off site, PHASE 5 step 4).
+        let drain_count = prod.matches(".drain_trajectory(").count();
+        assert_eq!(
+            drain_count, 1,
+            "PHASE 5 step 4 invariant: `.drain_trajectory(...)` must \
+             appear EXACTLY ONCE in runtime.rs production (the \
+             `for summary in &lifecycle.recent_exits` exit-drain \
+             hand-off). Found {drain_count}. Multiple drains would \
+             mean trajectories handed off in more than one place — \
+             the dead-PID retention story would split.",
+        );
+
+        // (4) No consumer yet. The History container is constructed
+        // and written to, but nothing READS the trajectories. A
+        // future contributor adding a read path before PHASE 5
+        // step 6 (the wire/view consumer) trips this check.
+        // Allowed: the cli.rs re-export and the existing trajectory
+        // field assignments (`= trajectory`, `= None`).
+        // Forbidden: any iteration / borrow of
+        // `self.history.trajectories` or `self.history.event_archive`.
+        for needle in [
+            "self.history.trajectories",
+            "self.history.event_archive",
+            "history.trajectories.iter",
+            "history.event_archive.iter",
+        ] {
             assert!(
-                head.ends_with("self.tracker") || head.ends_with("tracker"),
-                "PHASE 5 step 1 invariant breached: runtime.rs calls \
-                 `.record_sample(...)` on something other than the \
-                 existing `LifecycleTracker`. D89 is types-only. \
-                 First non-tracker call at byte offset {offset}.",
+                !prod.contains(needle),
+                "PHASE 5 step 3+4 invariant: runtime.rs reads from \
+                 `{needle}` but D90 ships WRITE-ONLY capture. The \
+                 first consumer is PHASE 5 step 6 (web /api/history) \
+                 — a separate dispatch (with a `ux_contract` bump).",
             );
         }
     }

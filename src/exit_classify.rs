@@ -245,7 +245,7 @@ mod tests {
             peak_cpu_pct: 0.0,
             peak_rss_mb: 0,
             peak_vram_mb: 0,
-            samples: 0,
+            samples: 0,            trajectory: None,
         }
     }
 

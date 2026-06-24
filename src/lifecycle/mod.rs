@@ -180,6 +180,24 @@ pub struct LifecycleSummary {
     pub peak_vram_mb: u64,
     #[serde(default)]
     pub samples: u32,
+    /// v1.3.2 / DISPATCH 90 / PHASE 5 step 2 — per-PID trajectory
+    /// attached at the runtime's exit-drain (PHASE 5 step 4). `None`
+    /// when:
+    ///   * the binary doesn't capture (a future opt-out, hypothetical
+    ///     today — the runtime always constructs `History` since D90),
+    ///   * the process exited before any sample was recorded (very
+    ///     short-lived; same shape as `samples == 0` for the existing
+    ///     peaks),
+    ///   * the summary was loaded from a pre-D90 disk record.
+    ///
+    /// **Disk discipline (Q3-C):** the runtime sets this to `None` on
+    /// the RunStore-bound `RunRecord` clone IMMEDIATELY before
+    /// `rs.append(record)`, so disk records stay peak-only.
+    /// `#[serde(skip_serializing_if = "Option::is_none")]` keeps the
+    /// JSON byte-identical to pre-D90 records when the runtime sets
+    /// `None`, so the schema bump is non-breaking.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trajectory: Option<crate::history::Trajectory>,
 }
 
 impl LifecycleSummary {
@@ -208,6 +226,13 @@ impl LifecycleSummary {
             peak_rss_mb: lifecycle.resources.rss_peak_bytes / (1024 * 1024),
             peak_vram_mb: lifecycle.resources.vram_peak_bytes / (1024 * 1024),
             samples: lifecycle.resources.sample_count,
+            // PHASE 5 step 2 (D90): trajectory is attached BY THE
+            // runtime's exit-drain after this constructor returns
+            // (the trajectory lives on `Runtime::history`, not on
+            // `ProcessLifecycle`). Default `None` here so the
+            // constructor stays usable from tests / RunStore
+            // deserialization.
+            trajectory: None,
         })
     }
 

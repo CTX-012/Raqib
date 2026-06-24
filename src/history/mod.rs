@@ -48,8 +48,11 @@
 //!   [`History::event_archive`] (PHASE 5 step 5, future dispatch).
 //!   ADDITIVE — the live wire activity feed cap is unchanged.
 
+mod from_state;
 mod ring;
 pub mod cli;
+
+pub use from_state::{exit_event, kill_event, regression_event};
 
 // Preserve the CLI's pre-D89 public API so `main.rs` (subcommand
 // dispatch) and `ui::panels::history_overlay` keep their existing
@@ -257,24 +260,30 @@ mod tests {
         );
     }
 
-    /// THE D90 INVARIANT (CONVERTED from the D89 tripwire — same
-    /// guard role, evolved shape). The History capture path is
-    /// wired in EXACTLY ONE place in `runtime.rs`, with:
+    /// THE D89/D90/D91 INVARIANT (CONVERTED at each step — same
+    /// guard role, evolved shape). The History write paths are
+    /// wired in known, bounded places in `runtime.rs`, with:
     ///
     ///   * exactly ONE `History::new(` construction (in `Runtime::new`),
     ///   * exactly ONE `.record_sample(` call routed through
-    ///     `self.history` (the per-tick capture site in `Runtime::tick`),
+    ///     `self.history` (the per-tick trajectory capture site in
+    ///     `Runtime::tick`),
     ///   * exactly ONE `.drain_trajectory(` call (the exit hand-off
-    ///     in the `for summary in &lifecycle.recent_exits` loop).
+    ///     in the `for summary in &lifecycle.recent_exits` loop),
+    ///   * **DISPATCH 91 / step 5:** exactly SIX `.record_event(`
+    ///     calls on `self.history` (1 exit-drain + 4 audit-push sites
+    ///     for kills + 1 regression-iter), and NOTHING ELSE.
     ///
-    /// The D89 version of this test forbade ANY History construction
-    /// or method call in runtime.rs (the dormant-machinery posture);
-    /// D90 deliberately lights the capture path up. The guard is
-    /// CONVERTED, not deleted, so a future stray capture site (a
-    /// second `History::new`, a second `self.history.record_sample`
-    /// elsewhere) fires the assertion before review — same pattern
-    /// as the D80 `send_sigterm_actuation_site_is_auto_actuate_gated`
-    /// conversion.
+    /// Plus the WRITE-ONLY invariant: nothing in `runtime.rs` reads
+    /// `self.history.trajectories` or `self.history.event_archive`.
+    /// The first consumer is PHASE 5 step 6 (a separate dispatch
+    /// with a contract bump).
+    ///
+    /// Conversion history: D89 forbade ANY History construction or
+    /// method call (dormant); D90 lit up trajectory capture + exit
+    /// hand-off; D91 lights up event-archive writes. Same pattern as
+    /// the D80 `send_sigterm_actuation_site_is_auto_actuate_gated`
+    /// staged tripwire.
     #[test]
     fn history_capture_is_wired_exactly_once_in_runtime() {
         let src = include_str!("../runtime.rs");
@@ -337,14 +346,50 @@ mod tests {
              the dead-PID retention story would split.",
         );
 
-        // (4) No consumer yet. The History container is constructed
-        // and written to, but nothing READS the trajectories. A
-        // future contributor adding a read path before PHASE 5
-        // step 6 (the wire/view consumer) trips this check.
-        // Allowed: the cli.rs re-export and the existing trajectory
-        // field assignments (`= trajectory`, `= None`).
-        // Forbidden: any iteration / borrow of
-        // `self.history.trajectories` or `self.history.event_archive`.
+        // (4) DISPATCH 91 / step 5 — event-archive write sites.
+        // Six expected calls:
+        //   * 1 in the `for summary in &lifecycle.recent_exits` loop
+        //     (the EXIT site, AI-only filtered).
+        //   * 4 at the audit-push sites for kills:
+        //       - `manual_kill` (SIGTERM, operator-initiated)
+        //       - `manual_force_kill` (SIGKILL, operator-consent)
+        //       - `record_governor_audit` SIGTERM auto path
+        //       - `record_governor_audit` SIGKILL escalation
+        //   * 1 in the `state.regressions.iter().skip(regs_before)`
+        //     loop (the REGRESSION mirror, alongside the existing
+        //     Prom counter increment).
+        // A 7th would mean a stray event source landed without
+        // review; fewer than 6 means a refactor moved a kill push
+        // off the audit path.
+        let mut history_event_sites = 0usize;
+        for (offset, _) in prod.match_indices(".record_event(") {
+            let head = prod[..offset].trim_end();
+            if head.ends_with("self.history") || head.ends_with("history") {
+                history_event_sites += 1;
+            } else {
+                panic!(
+                    "PHASE 5 step 5 invariant: `.record_event(...)` \
+                     called on an UNRECOGNISED receiver in runtime.rs \
+                     at byte offset {offset}. Only `self.history` is \
+                     allowed. Prefix: …{:?}",
+                    &head[head.len().saturating_sub(40)..],
+                );
+            }
+        }
+        assert_eq!(
+            history_event_sites, 6,
+            "PHASE 5 step 5 invariant: `self.history.record_event(...)` \
+             must appear EXACTLY 6 times in runtime.rs production \
+             (1 exit + 4 kill + 1 regression). Found {history_event_sites}. \
+             A 7th would mean a stray event class slipped past review; \
+             fewer means a kill audit push lost its mirror.",
+        );
+
+        // (5) WRITE-ONLY invariant — extended from D90. The History
+        // container is constructed and written to, but nothing
+        // READS the trajectories or event archive. A future
+        // contributor adding a read path before PHASE 5 step 6
+        // (the wire/view consumer) trips this check.
         for needle in [
             "self.history.trajectories",
             "self.history.event_archive",
@@ -353,9 +398,9 @@ mod tests {
         ] {
             assert!(
                 !prod.contains(needle),
-                "PHASE 5 step 3+4 invariant: runtime.rs reads from \
-                 `{needle}` but D90 ships WRITE-ONLY capture. The \
-                 first consumer is PHASE 5 step 6 (web /api/history) \
+                "PHASE 5 step 3+4+5 invariant: runtime.rs reads from \
+                 `{needle}` but D91 ships WRITE-ONLY capture + archive. \
+                 The first consumer is PHASE 5 step 6 (web /api/history) \
                  — a separate dispatch (with a `ux_contract` bump).",
             );
         }

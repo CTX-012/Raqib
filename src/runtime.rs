@@ -1172,6 +1172,23 @@ impl Runtime {
             let trajectory = self.history.drain_trajectory(summary.pid);
             let mut summary_for_completed = summary.clone();
             summary_for_completed.trajectory = trajectory;
+
+            // v1.3.2 / DISPATCH 91 / PHASE 5 step 5 — mirror the
+            // exit into the cross-PID event archive (cap 500 per
+            // D89 config). AI-only filter matches the live activity
+            // feed (`build_activity` in web/wire.rs lines 1273-1276
+            // and `build_events` in ui/panels/activity.rs lines
+            // 194-196) — non-AI exits stay in the persistent
+            // summary_log JSONL but don't surface to the operator's
+            // history view. Structural dedup: this loop pushes once
+            // per `lifecycle.recent_exits` entry; the feed sources
+            // are themselves the deduped truth, so no key check is
+            // needed here.
+            if summary.category.is_some() {
+                self.history
+                    .record_event(crate::history::exit_event(summary));
+            }
+
             self.state.completed.push_back(summary_for_completed);
             // v1.3.2 / DISPATCH 74 — push a placeholder into the
             // lock-step attribution VecDeque. Will be patched below
@@ -1363,11 +1380,20 @@ impl Runtime {
                     self.config.runtime.audit_history,
                 );
                 // Tier 2.3 — count regressions for the Prom counter.
+                //
+                // v1.3.2 / DISPATCH 91 / PHASE 5 step 5 — same scan
+                // ALSO mirrors each new regression into the history
+                // event archive. Structural dedup: the
+                // `iter().skip(regs_before)` slice is exactly the
+                // events `check_regressions` added on this tick;
+                // each lands in the archive exactly once.
                 for ev in self.state.regressions.iter().skip(regs_before) {
                     *self
                         .regressions_count
                         .entry((ev.model.clone(), ev.regression.metric.clone()))
                         .or_insert(0) += 1;
+                    self.history
+                        .record_event(crate::history::regression_event(ev));
                 }
             }
             // Drop accumulator state for the exited PID so a recycled
@@ -1739,6 +1765,12 @@ impl Runtime {
             self.governor_killed_pids
                 .insert(pid, entry.reason.clone());
         }
+        // v1.3.2 / DISPATCH 91 / PHASE 5 step 5 — mirror this kill
+        // into the cross-PID event archive. Build the HistoryEvent
+        // BEFORE the move into state.audit so we don't need to
+        // re-borrow the entry. Same structural-dedup rationale as
+        // the exit-drain push above.
+        self.history.record_event(crate::history::kill_event(&entry));
         self.state.audit.push_back(entry);
         while self.state.audit.len() > self.config.runtime.audit_history {
             self.state.audit.pop_front();
@@ -1856,6 +1888,8 @@ impl Runtime {
             self.governor_killed_pids
                 .insert(pid, "force-kill via SIGKILL".to_string());
         }
+        // v1.3.2 / DISPATCH 91 / PHASE 5 step 5 — mirror into archive.
+        self.history.record_event(crate::history::kill_event(&entry));
         self.state.audit.push_back(entry);
         while self.state.audit.len() > self.config.runtime.audit_history {
             self.state.audit.pop_front();
@@ -2072,6 +2106,9 @@ impl Runtime {
                 self.governor_killed_pids.insert(pid, reason.clone());
             }
 
+            // v1.3.2 / DISPATCH 91 / PHASE 5 step 5 — mirror auto
+            // SIGTERM kill into archive.
+            self.history.record_event(crate::history::kill_event(&entry));
             self.state.audit.push_back(entry);
             while self.state.audit.len() > audit_history {
                 self.state.audit.pop_front();
@@ -2233,6 +2270,9 @@ impl Runtime {
                     .insert(pid, "SIGKILL after SIGTERM grace".to_string());
             }
 
+            // v1.3.2 / DISPATCH 91 / PHASE 5 step 5 — mirror auto
+            // SIGKILL escalation into archive.
+            self.history.record_event(crate::history::kill_event(&entry));
             self.state.audit.push_back(entry);
             while self.state.audit.len() > audit_history {
                 self.state.audit.pop_front();
@@ -4788,5 +4828,109 @@ mod tests {
         let round: LifecycleSummary = serde_json::from_str(&json_with).unwrap();
         assert!(round.trajectory.is_some());
         assert_eq!(round.trajectory.unwrap().samples.len(), 1);
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // DISPATCH 91 / PHASE 5 step 5 — event archive write sites.
+    // ─────────────────────────────────────────────────────────────
+
+    /// A manual kill via `Runtime::manual_kill` pushes BOTH into
+    /// `state.audit` (existing behavior) AND into the cross-PID
+    /// `history.event_archive` (D91 mirror). The archive carries a
+    /// `Kill`-kind event with the same PID + name + summary the
+    /// wire activity feed renders, but it lives in a deeper
+    /// (cap-500) store the future history view will query.
+    #[test]
+    fn manual_kill_mirrors_into_history_event_archive() {
+        use crate::governor::PendingKill;
+
+        let mut cfg = Config::default();
+        cfg.web.allow_no_auth = true;
+        let mut rt = Runtime::new(cfg).expect("Runtime::new");
+        // Seed a synthetic lifecycle so manual_kill can resolve.
+        seed_lifecycle_with_pid(&mut rt, 1_000_000_030, "manual-victim");
+
+        // The send_sigterm call will return Err on the fake PID,
+        // but the audit entry (failure) is still recorded. That's
+        // fine for this test: the archive mirror runs on EVERY
+        // audit push, success or failure.
+        let _ = rt.manual_kill(1_000_000_030, "test mirror".to_string());
+
+        assert_eq!(
+            rt.history.event_count(),
+            1,
+            "manual_kill MUST mirror exactly one event into the \
+             archive (success or failure — both audit pushes mirror)."
+        );
+        let ev = rt.history.event_archive.front().expect("event present");
+        assert!(matches!(ev.kind, crate::history::HistoryEventKind::Kill));
+        assert_eq!(ev.pid, 1_000_000_030);
+        let _ = PendingKill::new; // proof: import path stable
+    }
+
+    /// THE Q4 INVARIANT: the live wire activity feed cap stays
+    /// UNCHANGED at `ACTIVITY_FEED_WIRE_MAX = 50`. The history
+    /// archive's cap is a SEPARATE 500. Raising the live cap would
+    /// bloat every `/api/snapshot` payload (1 Hz polling); the
+    /// archive is on-demand only.
+    #[test]
+    fn live_wire_activity_cap_unchanged_by_history_archive() {
+        // The wire constant is set on the contract side; this test
+        // pins that the consumer hasn't quietly raised it as part of
+        // D91. The archive cap (default 500) is materially larger.
+        assert_eq!(
+            ux_contract::limits::ACTIVITY_FEED_WIRE_MAX,
+            50,
+            "Q4 invariant: the wire's activity feed cap is locked at \
+             50. The archive's 500 cap is a SEPARATE store (read on \
+             demand by the future history endpoint), NOT a raise of \
+             the live wire cap."
+        );
+        let cfg = Config::default();
+        assert!(
+            cfg.runtime.history_event_archive_cap
+                > ux_contract::limits::ACTIVITY_FEED_WIRE_MAX,
+            "archive cap ({}) MUST exceed the wire cap ({}); otherwise \
+             we'd be duplicating the wire feed at the same depth, \
+             which is the no-op shape the Q4 rationale rejects",
+            cfg.runtime.history_event_archive_cap,
+            ux_contract::limits::ACTIVITY_FEED_WIRE_MAX,
+        );
+    }
+
+    /// FIFO eviction at the archive cap. Push more events than the
+    /// configured cap and confirm the OLDEST is evicted (newest
+    /// retained). Tests the cap enforcement directly on the
+    /// `History` container; the runtime's call sites use the same
+    /// `record_event` path.
+    #[test]
+    fn history_event_archive_caps_at_configured_size_fifo() {
+        let mut cfg = Config::default();
+        cfg.web.allow_no_auth = true;
+        cfg.runtime.history_event_archive_cap = 3; // tiny for the test
+        let mut rt = Runtime::new(cfg).expect("Runtime::new");
+        for i in 0..7 {
+            rt.history
+                .record_event(crate::history::HistoryEvent {
+                    timestamp: chrono::DateTime::from_timestamp(i, 0).unwrap(),
+                    pid: 100 + i as u32,
+                    name: format!("p{i}"),
+                    kind: crate::history::HistoryEventKind::Exit,
+                    summary: format!("ev #{i}"),
+                });
+        }
+        assert_eq!(
+            rt.history.event_count(),
+            3,
+            "archive MUST cap at the configured size"
+        );
+        // FIFO: the LAST 3 events survive (timestamps 4, 5, 6).
+        let timestamps: Vec<i64> = rt
+            .history
+            .event_archive
+            .iter()
+            .map(|e| e.timestamp.timestamp())
+            .collect();
+        assert_eq!(timestamps, vec![4, 5, 6]);
     }
 }

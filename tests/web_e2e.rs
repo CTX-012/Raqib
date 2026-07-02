@@ -50,6 +50,7 @@ async fn spawn_server_with(
         config_path: None,
         auto_actuate_at_load: false,
         default_ai_action_at_load: "Allow".into(),
+        history_view: None,
     };
     // Bind on port 0 so the OS picks an ephemeral; we then read it
     // back from the listener for the test client to connect.
@@ -620,5 +621,261 @@ async fn settings_post_unknown_field_in_thresholds_is_silently_dropped() {
          got {}: {}",
         resp.status(),
         resp.text().await.unwrap(),
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// DISPATCH 94 / PHASE 5 step 6 — /api/history + /api/history/trajectory
+// endpoints. Two auth-gated read routes; snapshot is LIGHT (no full
+// trajectories embedded); per-PID trajectory fetched on demand; VRAM
+// null-not-zero on wire.
+// ─────────────────────────────────────────────────────────────────────
+
+use edge_monitor::web::history::{
+    HistoryReadState, SharedHistoryView, WireDeadPidEntry, WireHistoryEvent,
+    WireHistorySnapshot, WireSample, WireTrajectory, shared_view,
+};
+
+/// Full-fat spawner that plumbs a pre-populated [`SharedHistoryView`]
+/// into the router's state — D94 endpoints need this to exercise the
+/// full happy path without depending on a live tick loop.
+async fn spawn_server_with_history(
+    token: Option<&str>,
+    history_view: Option<SharedHistoryView>,
+) -> (SocketAddr, watch::Sender<WireSnapshot>) {
+    let (tx, rx) = watch::channel(WireSnapshot::empty());
+    let auth_token = token.map(std::sync::Arc::from);
+    let state = WebState {
+        rx,
+        auth_token,
+        tunables: None,
+        config_path: None,
+        auto_actuate_at_load: false,
+        default_ai_action_at_load: "Allow".into(),
+        history_view,
+    };
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let app = edge_monitor::web::router(state);
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    (addr, tx)
+}
+
+fn fixture_history_view() -> SharedHistoryView {
+    let view = shared_view();
+    let sample_measured = WireSample {
+        timestamp: chrono::DateTime::from_timestamp(10, 0).unwrap(),
+        cpu_pct: 12.5,
+        rss_mb: 300,
+        vram_mb: Some(4800),
+    };
+    let sample_unmeasured = WireSample {
+        timestamp: chrono::DateTime::from_timestamp(20, 0).unwrap(),
+        cpu_pct: 15.0,
+        rss_mb: 320,
+        vram_mb: None,
+    };
+    let trajectory = WireTrajectory {
+        samples: vec![sample_measured, sample_unmeasured],
+        first_sample_at: chrono::DateTime::from_timestamp(10, 0).unwrap(),
+        last_sample_at: chrono::DateTime::from_timestamp(20, 0).unwrap(),
+    };
+    let event = WireHistoryEvent {
+        kind: "kill".into(),
+        timestamp: chrono::DateTime::from_timestamp(30, 0).unwrap(),
+        pid: 99,
+        name: "python3".into(),
+        summary: "SIGTERM OK manual pid=99 python3 - test".into(),
+    };
+    let dead = WireDeadPidEntry {
+        pid: 99,
+        name: "python3".into(),
+        model_name: Some("yolov8n".into()),
+        exit_time: chrono::DateTime::from_timestamp(40, 0).unwrap(),
+    };
+    let mut trajectories = std::collections::HashMap::new();
+    trajectories.insert(99u32, trajectory);
+    let state = HistoryReadState {
+        snapshot: WireHistorySnapshot {
+            events: vec![event],
+            dead_pids: vec![dead],
+        },
+        dead_pid_trajectories: trajectories,
+    };
+    *view.write().unwrap() = state;
+    view
+}
+
+#[tokio::test]
+async fn history_snapshot_returns_401_when_no_authorization_header() {
+    let view = fixture_history_view();
+    let (addr, _tx) = spawn_server_with_history(Some("hunter2"), Some(view)).await;
+    let resp = reqwest::get(format!("http://{addr}/api/history")).await.unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn history_snapshot_returns_200_with_correct_bearer_token() {
+    let view = fixture_history_view();
+    let (addr, _tx) = spawn_server_with_history(Some("hunter2"), Some(view)).await;
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("http://{addr}/api/history"))
+        .header("Authorization", "Bearer hunter2")
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success(), "got {}", resp.status());
+    let json: serde_json::Value = resp.json().await.unwrap();
+    assert!(json.get("events").is_some(), "snapshot MUST expose `events`");
+    assert!(
+        json.get("dead_pids").is_some(),
+        "snapshot MUST expose `dead_pids` — the light index",
+    );
+    // CAR-D93 Q2: snapshot is LIGHT. The full trajectory keys
+    // (`samples`, `first_sample_at`, `last_sample_at`) MUST NOT
+    // appear anywhere in the snapshot body — those live at the
+    // per-PID trajectory endpoint.
+    let raw = json.to_string();
+    assert!(
+        !raw.contains("samples"),
+        "LIGHT-SNAPSHOT invariant: /api/history MUST NOT embed \
+         `samples` — trajectory arrays live at /api/history/trajectory/:pid. \
+         Got: {raw}",
+    );
+    assert!(
+        !raw.contains("first_sample_at"),
+        "LIGHT-SNAPSHOT invariant: /api/history MUST NOT embed \
+         `first_sample_at`. Got: {raw}",
+    );
+}
+
+#[tokio::test]
+async fn history_snapshot_dead_pid_entry_carries_identity_only() {
+    let view = fixture_history_view();
+    let (addr, _tx) = spawn_server_with_history(Some("hunter2"), Some(view)).await;
+    let client = reqwest::Client::new();
+    let json: serde_json::Value = client
+        .get(format!("http://{addr}/api/history"))
+        .header("Authorization", "Bearer hunter2")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let dead = &json["dead_pids"][0];
+    assert_eq!(dead["pid"], 99);
+    assert_eq!(dead["name"], "python3");
+    assert_eq!(dead["model_name"], "yolov8n");
+    assert!(dead["exit_time"].is_string());
+}
+
+#[tokio::test]
+async fn history_trajectory_returns_the_full_sample_sequence() {
+    let view = fixture_history_view();
+    let (addr, _tx) = spawn_server_with_history(Some("hunter2"), Some(view)).await;
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("http://{addr}/api/history/trajectory/99"))
+        .header("Authorization", "Bearer hunter2")
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success(), "got {}", resp.status());
+    let json: serde_json::Value = resp.json().await.unwrap();
+    let samples = json["samples"].as_array().unwrap();
+    assert_eq!(samples.len(), 2);
+    // First sample: measured VRAM = 4800 MB.
+    assert_eq!(samples[0]["vram_mb"], 4800);
+    // Second sample: unmeasured VRAM — the field MUST be absent on
+    // the wire, never zero-filled. CAR-D93 Q3 honesty rule.
+    assert!(
+        samples[1].get("vram_mb").is_none(),
+        "VRAM-HONESTY invariant: unmeasured VRAM MUST NOT appear \
+         on the wire — omitted, not zero. Got: {}",
+        samples[1],
+    );
+}
+
+#[tokio::test]
+async fn history_trajectory_returns_404_for_unknown_pid() {
+    let view = fixture_history_view();
+    let (addr, _tx) = spawn_server_with_history(Some("hunter2"), Some(view)).await;
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("http://{addr}/api/history/trajectory/12345"))
+        .header("Authorization", "Bearer hunter2")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::NOT_FOUND,
+        "unknown PID MUST 404 — not 500, not empty 200",
+    );
+}
+
+#[tokio::test]
+async fn history_endpoints_return_503_when_view_not_wired() {
+    // Legacy path — the web companion was launched without a
+    // SharedHistoryView. Both endpoints MUST reply 503 rather than
+    // panic on the None branch.
+    let (addr, _tx) = spawn_server_with_history(Some("hunter2"), None).await;
+    let client = reqwest::Client::new();
+    let snap = client
+        .get(format!("http://{addr}/api/history"))
+        .header("Authorization", "Bearer hunter2")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(snap.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+    let traj = client
+        .get(format!("http://{addr}/api/history/trajectory/1"))
+        .header("Authorization", "Bearer hunter2")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(traj.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+}
+
+#[tokio::test]
+async fn history_endpoint_paths_match_contract_constants() {
+    // The ux_contract v0.3.20 pins these paths; regressing the
+    // route strings would silently break the (future) consumer.
+    assert_eq!(ux_contract::history::PATH, "/api/history");
+    assert_eq!(
+        ux_contract::history::PATH_TRAJECTORY_PREFIX,
+        "/api/history/trajectory/"
+    );
+}
+
+#[tokio::test]
+async fn snapshot_route_unaffected_by_history_wiring() {
+    // Regression pin: adding /api/history endpoints must NOT
+    // change /api/snapshot's shape (that surface is what the live
+    // dashboard polls at 1 Hz). Sanity: with a history view wired,
+    // /api/snapshot still returns its usual JSON body and doesn't
+    // leak history keys.
+    let view = fixture_history_view();
+    let (addr, _tx) = spawn_server_with_history(Some("hunter2"), Some(view)).await;
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("http://{addr}/api/snapshot"))
+        .header("Authorization", "Bearer hunter2")
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success());
+    let raw = resp.text().await.unwrap();
+    // /api/snapshot MUST NOT accidentally embed the history
+    // event archive or dead-PID index — those live at /api/history.
+    assert!(
+        !raw.contains("dead_pids"),
+        "/api/snapshot MUST NOT expose the dead-PID index (that's \
+         /api/history territory). Got: {raw}",
     );
 }

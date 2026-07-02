@@ -44,6 +44,7 @@
 pub mod assets;
 pub mod auth;
 pub mod handlers;
+pub mod history;
 pub mod settings;
 pub mod stream;
 pub mod tunables;
@@ -95,6 +96,12 @@ pub struct WebState {
     /// Read-only mirror of `config.policy.default_ai_action` at
     /// load time. Same display-honesty rationale.
     pub default_ai_action_at_load: String,
+    /// v1.3.2 / DISPATCH 94 / PHASE 5 step 6 — shared history read
+    /// state populated by the tick loop's [`history::refresh_shared`]
+    /// call. `None` when the web companion was launched without the
+    /// history view attached (legacy path); the endpoints return
+    /// 503 in that case.
+    pub history_view: Option<history::SharedHistoryView>,
 }
 
 /// Construct the axum router. Exposed so integration tests can
@@ -147,6 +154,16 @@ pub fn router(state: WebState) -> Router {
             "/settings",
             get(settings::get_settings).post(settings::update_settings),
         )
+        // v1.3.2 / DISPATCH 94 / PHASE 5 step 6 — history surface.
+        // Two GET endpoints per CAR-D93 Q2 (split delivery): a
+        // light snapshot (events + dead-PID index) and an
+        // on-demand per-PID trajectory. Both auth-gated by the D85
+        // middleware applied below.
+        .route("/history", get(history::get_snapshot))
+        .route(
+            "/history/trajectory/:pid",
+            get(history::get_trajectory),
+        )
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             auth::require_token,
@@ -196,6 +213,7 @@ mod tests {
             config_path: None,
             auto_actuate_at_load: false,
             default_ai_action_at_load: "Allow".into(),
+            history_view: None,
         });
     }
 }

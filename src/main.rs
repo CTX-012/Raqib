@@ -204,6 +204,11 @@ fn main() -> anyhow::Result<()> {
     // Web POST handlers mutate it; runtime tick reads from it via
     // `Runtime::apply_pending_tunables` each iteration.
     let shared_tunables = edge_monitor::web::tunables::shared_from_config(&config);
+    // v1.3.2 / DISPATCH 94 / PHASE 5 step 6 — SharedHistoryView is
+    // the cross-thread cell the tick loop refreshes and the
+    // /api/history handlers read. Built here so the same Arc is
+    // shared with the web state (below).
+    let shared_history_view = edge_monitor::web::history::shared_view();
     let config_path = cli.config.as_deref().map(std::path::Path::to_path_buf);
     let mut runtime = Runtime::new(config)
         .with_context(|| "invalid configuration; aborting startup")?;
@@ -233,6 +238,7 @@ fn main() -> anyhow::Result<()> {
             runtime.config(),
             config_path,
             shared_tunables.clone(),
+            shared_history_view.clone(),
         ) {
             Ok(tx) => Some(tx),
             Err(e) => {
@@ -247,7 +253,13 @@ fn main() -> anyhow::Result<()> {
     };
 
     if cli.no_ui {
-        run_headless(runtime, shutdown, cli.ticks, web_tx_for_loop)?;
+        run_headless(
+            runtime,
+            shutdown,
+            cli.ticks,
+            web_tx_for_loop,
+            Some(shared_history_view.clone()),
+        )?;
     } else {
         // §13 — resolve theme from CLI flag → [ui].theme → default
         // `dark`. The CLI string wins outright when provided so an
@@ -259,7 +271,13 @@ fn main() -> anyhow::Result<()> {
             .unwrap_or_else(|| runtime.config().ui.theme.clone());
         let theme = edge_monitor::ui::theme::current_theme(&theme_name);
         // Returns the runtime back to us so we can flush state on the way out.
-        let runtime = ui::run(runtime, shutdown, theme, web_tx_for_loop)?;
+        let runtime = ui::run(
+            runtime,
+            shutdown,
+            theme,
+            web_tx_for_loop,
+            Some(shared_history_view.clone()),
+        )?;
         tracing::info!("exited cleanly after {} ticks", runtime.state().tick_count);
     }
 
@@ -291,6 +309,7 @@ fn spawn_web_server(
     full_cfg: &edge_monitor::config::Config,
     config_path: Option<std::path::PathBuf>,
     tunables: edge_monitor::web::tunables::SharedTunables,
+    history_view: edge_monitor::web::history::SharedHistoryView,
 ) -> anyhow::Result<tokio::sync::watch::Sender<edge_monitor::web::WireSnapshot>> {
     use edge_monitor::web::{WebState, WireSnapshot, serve};
 
@@ -316,6 +335,7 @@ fn spawn_web_server(
         config_path: config_path.clone(),
         auto_actuate_at_load: full_cfg.governor.auto_actuate,
         default_ai_action_at_load: format!("{:?}", full_cfg.policy.default_ai_action),
+        history_view: Some(history_view),
     };
     let addr: std::net::SocketAddr = (bind, port).into();
 
@@ -729,6 +749,7 @@ fn run_headless(
     shutdown: Arc<AtomicBool>,
     tick_budget: u64,
     web_tx: Option<tokio::sync::watch::Sender<edge_monitor::web::WireSnapshot>>,
+    history_view: Option<edge_monitor::web::history::SharedHistoryView>,
 ) -> anyhow::Result<()> {
     let interval = Duration::from_millis(runtime.config().runtime.tick_interval_ms);
     let (tx, rx) = mpsc::channel::<()>();
@@ -762,6 +783,19 @@ fn run_headless(
             }
         }
         runtime.record_governor_audit();
+
+        // v1.3.2 / DISPATCH 94 / PHASE 5 step 6 — refresh the
+        // history read view for the web endpoints. Called from
+        // main.rs (outside runtime.rs) so the tick-loop READ of
+        // history state doesn't land inside the file the D91
+        // tripwire scans.
+        if let Some(view) = history_view.as_ref() {
+            edge_monitor::web::history::refresh_shared(
+                view,
+                runtime.state(),
+                runtime.history_capture(),
+            );
+        }
 
         // Sprint-6 — publish a fresh wire snapshot to the web
         // companion when running with `--no-ui` (headless +

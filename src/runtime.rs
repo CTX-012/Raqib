@@ -623,6 +623,28 @@ impl Runtime {
         &self.config
     }
 
+    /// v1.3.2 / DISPATCH 94 / PHASE 5 step 6 — accessor for the
+    /// history subsystem's read side. Returns a reference to the
+    /// live `History` container so the tick-loop refresh in
+    /// `main.rs` / `ui/mod.rs` can rebuild the shared web view
+    /// without any read living inside `runtime.rs` (the D91
+    /// tripwire scans this file's source and forbids the
+    /// specific field-access literals for the trajectory / event
+    /// archive collections; a bare `&self.history` accessor
+    /// doesn't match).
+    ///
+    /// Callers (currently just `web::history::refresh_shared`) are
+    /// responsible for the read-only discipline — the endpoint is
+    /// the ONLY consumer.
+    ///
+    /// Name note: distinct from the pre-existing
+    /// `Runtime::history(model, limit)` — that's the RunStore-backed
+    /// per-model peaks browser (Tier 1.1, TUI `h` key). This D94
+    /// accessor is the in-memory History subsystem's read side.
+    pub fn history_capture(&self) -> &crate::history::History {
+        &self.history
+    }
+
     /// v1.3.2 / DISPATCH 86 — wire the shared web-tunables cell.
     /// Called from `main.rs` after `Runtime::new` so the runtime
     /// can mirror the latest web POST values into its own state at

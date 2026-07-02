@@ -385,11 +385,17 @@ mod tests {
              fewer means a kill audit push lost its mirror.",
         );
 
-        // (5) WRITE-ONLY invariant — extended from D90. The History
-        // container is constructed and written to, but nothing
-        // READS the trajectories or event archive. A future
-        // contributor adding a read path before PHASE 5 step 6
-        // (the wire/view consumer) trips this check.
+        // (5) WRITE-ONLY-IN-RUNTIME invariant — extended from D90,
+        // converted at D94. runtime.rs is the OWNER: it constructs
+        // History, feeds it samples/exits/kills/regressions, and hands
+        // out a read-only reference via `Runtime::history_capture()`.
+        // The reader (D94's `web::history::refresh_shared`) lives
+        // OUTSIDE runtime.rs — in `src/web/history.rs`, which this
+        // tripwire does NOT scan. Concentrating the read at the
+        // endpoint keeps the "one owner, one reader" split legible
+        // in git blame; a stray `self.history.trajectories` read
+        // inside runtime.rs would multiply the reader without a
+        // dispatch review.
         for needle in [
             "self.history.trajectories",
             "self.history.event_archive",
@@ -398,10 +404,11 @@ mod tests {
         ] {
             assert!(
                 !prod.contains(needle),
-                "PHASE 5 step 3+4+5 invariant: runtime.rs reads from \
-                 `{needle}` but D91 ships WRITE-ONLY capture + archive. \
-                 The first consumer is PHASE 5 step 6 (web /api/history) \
-                 — a separate dispatch (with a `ux_contract` bump).",
+                "PHASE 5 step 3+4+5+6 invariant: runtime.rs reads from \
+                 `{needle}` — but reads MUST live in `src/web/history.rs` \
+                 (the D94 endpoint layer), not in runtime.rs. Move the \
+                 read behind `runtime.history_capture()` and consume it \
+                 from the endpoint.",
             );
         }
     }

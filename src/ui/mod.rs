@@ -52,6 +52,7 @@ pub fn run(
     shutdown: Arc<AtomicBool>,
     theme: UiTheme,
     web_tx: Option<tokio::sync::watch::Sender<crate::web::WireSnapshot>>,
+    history_view: Option<crate::web::history::SharedHistoryView>,
 ) -> anyhow::Result<Runtime> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -59,7 +60,7 @@ pub fn run(
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let result = run_loop(&mut terminal, &mut runtime, shutdown, theme, web_tx);
+    let result = run_loop(&mut terminal, &mut runtime, shutdown, theme, web_tx, history_view);
 
     // Always restore the terminal, even if the loop errored.
     disable_raw_mode().ok();
@@ -76,6 +77,7 @@ fn run_loop(
     shutdown: Arc<AtomicBool>,
     theme: UiTheme,
     web_tx: Option<tokio::sync::watch::Sender<crate::web::WireSnapshot>>,
+    history_view: Option<crate::web::history::SharedHistoryView>,
 ) -> anyhow::Result<()> {
     let tick = Duration::from_millis(runtime.config().runtime.tick_interval_ms);
     let render = Duration::from_millis(runtime.config().runtime.render_interval_ms);
@@ -152,6 +154,20 @@ fn run_loop(
                 tracing::error!("tick failed: {}", e);
             }
             runtime.record_governor_audit();
+
+            // v1.3.2 / DISPATCH 94 / PHASE 5 step 6 — refresh the
+            // history read view for the web endpoints. Called from
+            // ui/mod.rs (outside runtime.rs) so the tick-loop READ
+            // of history state doesn't land inside the file the D91
+            // tripwire scans.
+            if let Some(view) = history_view.as_ref() {
+                crate::web::history::refresh_shared(
+                    view,
+                    runtime.state(),
+                    runtime.history_capture(),
+                );
+            }
+
             // DISPATCH 83 / C2 — once per tick, check whether a
             // Waiting-state kill_confirm card's targeted PID has
             // exited; if so, dismiss the card so the next render

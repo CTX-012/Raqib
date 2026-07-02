@@ -22,13 +22,69 @@
     import type {
         WireActivityEntry,
         WireActivityDetail,
+        WireTrajectory,
     } from '../lib/types';
     import { ACTIVITY_FEED_WEB_MAX } from '../lib/limits';
+    // v1.3.2 / DISPATCH 96 / PHASE 5 step 8 — shape-B trajectory
+    // curve inside the post-mortem expand. Reuses the D95 chart +
+    // the D94 endpoint verbatim; no second chart component.
+    import { fetchHistoryTrajectory } from '../lib/rest';
+    import TrajectoryChart from './TrajectoryChart.svelte';
     export let activity: WireActivityEntry[];
 
     // Track which entry is expanded. Key matches the {#each} key
     // exactly: `${kind}-${pid}-${timestamp}` (D65 composite).
     let expandedKey: string | null = null;
+
+    // ── D96 shape-B: lazy trajectory cache ─────────────────────────
+    // Per-pid cache: null value ⇒ endpoint 404'd (or returned
+    // empty) — a definitive "no trajectory captured" answer we
+    // should NOT re-request on subsequent re-expands. Absence of
+    // the key ⇒ not yet fetched. The reassign-to-self pattern
+    // (`= trajectoryByPid`) forces Svelte reactivity on Map
+    // mutation. Same idiom for `trajectoryLoading` /
+    // `trajectoryErrors`.
+    let trajectoryByPid: Map<number, WireTrajectory | null> = new Map();
+    let trajectoryLoading: Set<number> = new Set();
+    let trajectoryErrors: Map<number, string> = new Map();
+
+    /**
+     * Fetch the trajectory for a dead PID and cache the outcome.
+     * Idempotent: bail if the pid is already cached OR already
+     * in-flight (a mid-flight second call would race the
+     * finally-block into a Set-mutation reorder). A pid that
+     * previously errored WILL retry on next expand — errors are
+     * transient (network blip, server restart) whereas 404 is a
+     * definitive "no trajectory" answer that we cache.
+     */
+    async function fetchTrajectoryFor(pid: number): Promise<void> {
+        if (trajectoryByPid.has(pid) || trajectoryLoading.has(pid)) {
+            return;
+        }
+        trajectoryErrors.delete(pid);
+        trajectoryErrors = trajectoryErrors;
+        trajectoryLoading.add(pid);
+        trajectoryLoading = trajectoryLoading;
+        try {
+            const t = await fetchHistoryTrajectory(pid);
+            // `fetchHistoryTrajectory` returns null on 404 (rolled
+            // out of the window, kill entry whose pid is still
+            // alive, regression sentinel). Cache the null so we
+            // don't retry every re-expand — it's a definitive
+            // answer, not an error.
+            trajectoryByPid.set(pid, t);
+            trajectoryByPid = trajectoryByPid;
+        } catch (err) {
+            trajectoryErrors.set(
+                pid,
+                (err as Error).message ?? String(err),
+            );
+            trajectoryErrors = trajectoryErrors;
+        } finally {
+            trajectoryLoading.delete(pid);
+            trajectoryLoading = trajectoryLoading;
+        }
+    }
 
     function entryKey(ev: WireActivityEntry): string {
         return `${ev.kind}-${ev.pid}-${ev.timestamp}`;
@@ -40,7 +96,17 @@
             return;
         }
         const k = entryKey(ev);
-        expandedKey = expandedKey === k ? null : k;
+        const willOpen = expandedKey !== k;
+        expandedKey = willOpen ? k : null;
+        // v1.3.2 / DISPATCH 96 — LAZY trajectory fetch. Fires
+        // ONLY on the open transition, so the activity feed's
+        // per-tick render stays cheap: an unexpanded entry never
+        // hits the network. Cached fetches (or in-flight ones)
+        // no-op in `fetchTrajectoryFor` — safe to call blindly.
+        // Regression rows returned above; kills/exits both fetch.
+        if (willOpen) {
+            void fetchTrajectoryFor(ev.pid);
+        }
     }
 
     function severityClass(severity: WireActivityEntry['severity']): string {
@@ -176,6 +242,49 @@
                                         <span class="text-critical">{ev.detail.error_msg}</span>
                                     </div>
                                 {/if}
+                            {/if}
+
+                            <!--
+                                v1.3.2 / DISPATCH 96 / PHASE 5 step 8 — shape-B
+                                trajectory curve. Reuses the D95 chart + the
+                                D94 endpoint verbatim. Lazy: fetch fires in
+                                `toggleExpand` on the open transition; the
+                                render below reads from the per-pid cache.
+                                Graceful degrade: null trajectory (404 —
+                                kill entry whose pid is still alive, or an
+                                aged-out ring entry) → quiet "no trajectory
+                                captured" line, NOT an error banner.
+                                Regression rows never reach here (canExpand
+                                gates the whole expand block); the outer
+                                {#if ev.kind !== 'regression'} is both a
+                                belt-and-braces guard AND the block scope
+                                Svelte requires for the {@const} declarations.
+                            -->
+                            {#if ev.kind !== 'regression'}
+                                {@const traj = trajectoryByPid.get(ev.pid)}
+                                {@const isLoading = trajectoryLoading.has(ev.pid)}
+                                {@const trajErr = trajectoryErrors.get(ev.pid)}
+                                {@const attempted = trajectoryByPid.has(ev.pid)}
+                                <div class="mt-2 pt-2 border-t border-fg-muted/20">
+                                    {#if isLoading}
+                                        <div class="text-fg-muted italic">
+                                            Loading trajectory…
+                                        </div>
+                                    {:else if trajErr}
+                                        <div class="text-fg-muted italic">
+                                            Trajectory unavailable ({trajErr}).
+                                        </div>
+                                    {:else if traj && traj.samples.length > 0}
+                                        <div class="text-fg-muted mb-1">
+                                            trajectory
+                                        </div>
+                                        <TrajectoryChart trajectory={traj} />
+                                    {:else if attempted}
+                                        <div class="text-fg-muted italic">
+                                            no trajectory captured
+                                        </div>
+                                    {/if}
+                                </div>
                             {/if}
                         </div>
                     {/if}

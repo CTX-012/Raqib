@@ -12,6 +12,7 @@
     import ConnectionPill from './components/ConnectionPill.svelte';
     import AlertsPanel from './components/AlertsPanel.svelte';
     import SettingsPanel from './components/SettingsPanel.svelte';
+    import HistoryPage from './components/HistoryPage.svelte';
 
     onMount(() => {
         connect();
@@ -67,6 +68,15 @@
             <ActivityFeed activity={$snapshot.activity} />
         </section>
     </main>
+
+    <!-- v1.3.2 / DISPATCH 95 / PHASE 5 step 7 — history panel.
+         Collapsed by default; opens SNAPSHOT-ON-OPEN (Q5, not a
+         live poll). Event archive + dead-PID index + on-demand
+         per-PID trajectory chart. Sits next to Settings — both
+         read the same panel-toggle convention. -->
+    <div class="px-6 pb-2">
+        <HistoryPage />
+    </div>
 
     <!-- v1.3.2 / DISPATCH 86 — settings panel. Collapsed by default.
          Tunes thresholds + sustain windows; auto_actuate stays

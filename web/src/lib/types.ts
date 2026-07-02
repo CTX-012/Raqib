@@ -291,6 +291,72 @@ export interface WireActivityDetail {
     error_msg?: string;
 }
 
+// ─────────────────────────────────────────────────────────────────
+// v1.3.2 / DISPATCH 95 / PHASE 5 step 7 — history wire types.
+// Mirrors `src/web/history.rs` (WireSample / WireTrajectory /
+// WireHistoryEvent / WireDeadPidEntry / WireHistorySnapshot);
+// consumer-side of ux_contract v0.3.20 `KEY_*` field names.
+//
+// VRAM HONESTY (CAR-D93 Q3): `vram_mb` on a sample is
+// `number | null | undefined`. `null` / undefined ⇒ NO measurement
+// (driver unloaded, NVML failed, tick-window-short) — the renderer
+// MUST show a gap or the VRAM_UNMEASURED "—" placeholder, NEVER a
+// zero-line. A genuine `0` ⇒ measured zero this tick. The gap-vs-zero
+// discriminator lives at the wire boundary; the chart carries it
+// through visually.
+// ─────────────────────────────────────────────────────────────────
+
+/** One sample in a per-PID trajectory. */
+export interface WireSample {
+    /** RFC 3339 timestamp string. */
+    timestamp: string;
+    cpu_pct: number;
+    rss_mb: number;
+    /**
+     * `undefined`/absent OR `null` ⇒ VRAM was NOT measured this
+     * tick (CAR-D93 Q3 honesty). Render as a chart gap / "—",
+     * NEVER coerce to 0. A numeric value (including 0) ⇒ measured.
+     */
+    vram_mb?: number | null;
+}
+
+/** Full per-PID trajectory — the on-demand heavy payload. */
+export interface WireTrajectory {
+    samples: WireSample[];
+    first_sample_at: string;
+    last_sample_at: string;
+}
+
+/** One event in the history archive. */
+export interface WireHistoryEvent {
+    /** One of `"exit" | "kill" | "regression"` (reuses ActivityKind). */
+    kind: 'exit' | 'kill' | 'regression';
+    timestamp: string;
+    pid: number;
+    name: string;
+    /** Server-pre-rendered one-line summary; print verbatim. */
+    summary: string;
+}
+
+/**
+ * One entry in the dead-PID index. Lightweight — enough for the
+ * operator to identify + click into a trajectory. Does NOT carry
+ * the sample sequence (that lives at
+ * `/api/history/trajectory/{pid}`).
+ */
+export interface WireDeadPidEntry {
+    pid: number;
+    name: string;
+    model_name?: string | null;
+    exit_time: string;
+}
+
+/** `GET /api/history` response envelope. */
+export interface WireHistorySnapshot {
+    events: WireHistoryEvent[];
+    dead_pids: WireDeadPidEntry[];
+}
+
 /** Empty snapshot used as the initial store value. */
 export const EMPTY_SNAPSHOT: WireSnapshot = {
     tick: 0,

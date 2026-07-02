@@ -1,5 +1,9 @@
 import { snapshot, connectionStatus } from './stores';
-import type { WireSnapshot } from './types';
+import type {
+    WireSnapshot,
+    WireHistorySnapshot,
+    WireTrajectory,
+} from './types';
 
 /**
  * v1.3.2 / DISPATCH 68 — REST polling client.
@@ -368,4 +372,63 @@ export async function postSettings(
         throw new Error(`postSettings: HTTP ${resp.status} — ${text}`);
     }
     return (await resp.json()) as SettingsPostResponse;
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// v1.3.2 / DISPATCH 95 / PHASE 5 step 7 — history fetchers.
+//
+// Two read-only GETs against the D94 endpoints:
+//   * /api/history               — SNAPSHOT: events + dead-PID index
+//   * /api/history/trajectory/N  — per-PID sample sequence (on demand)
+//
+// SNAPSHOT-ON-OPEN (Q5): the History view calls `fetchHistorySnapshot`
+// once when opened + on explicit Reload — NOT on a 1Hz interval. The
+// selection-stability lesson (D76): a live-streaming view drops the
+// operator's selected PID under them when the archive shifts.
+// ─────────────────────────────────────────────────────────────────────
+
+/**
+ * Contract-pinned paths — mirrors
+ * `ux_contract::history::{PATH, PATH_TRAJECTORY_PREFIX}` v0.3.20.
+ * A Rust-side regression test could pin these against the crate
+ * (same style as `web_limits_mirror.rs`); the D94 e2e test already
+ * pins the server side to the same constants.
+ */
+const HISTORY_PATH = '/api/history';
+const HISTORY_TRAJECTORY_PREFIX = '/api/history/trajectory/';
+
+/**
+ * GET /api/history — the light snapshot (events + dead-PID index).
+ * Throws on non-2xx (including 503 when the server was launched
+ * without the SharedHistoryView).
+ */
+export async function fetchHistorySnapshot(): Promise<WireHistorySnapshot> {
+    const resp = await fetchWithAuth(HISTORY_PATH);
+    if (!resp.ok) {
+        const text = await resp.text().catch(() => '');
+        throw new Error(`fetchHistorySnapshot: HTTP ${resp.status}${text ? ` — ${text}` : ''}`);
+    }
+    return (await resp.json()) as WireHistorySnapshot;
+}
+
+/**
+ * GET /api/history/trajectory/{pid} — the heavy per-PID sample
+ * sequence. Returns `null` on 404 (PID rolled out of the window
+ * OR was never captured) so the UI can show "no trajectory"
+ * without an error banner; throws on other non-2xx.
+ */
+export async function fetchHistoryTrajectory(
+    pid: number,
+): Promise<WireTrajectory | null> {
+    const resp = await fetchWithAuth(`${HISTORY_TRAJECTORY_PREFIX}${pid}`);
+    if (resp.status === 404) {
+        return null;
+    }
+    if (!resp.ok) {
+        const text = await resp.text().catch(() => '');
+        throw new Error(
+            `fetchHistoryTrajectory(${pid}): HTTP ${resp.status}${text ? ` — ${text}` : ''}`,
+        );
+    }
+    return (await resp.json()) as WireTrajectory;
 }

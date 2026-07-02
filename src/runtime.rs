@@ -4933,4 +4933,372 @@ mod tests {
             .collect();
         assert_eq!(timestamps, vec![4, 5, 6]);
     }
+
+    // ─────────────────────────────────────────────────────────────
+    // DISPATCH 92 / PHASE 5 verification — capture end-to-end.
+    //
+    // These tests exercise the same call sequence the runtime tick
+    // path uses (`self.history.record_sample(...)` at the capture
+    // site, `self.history.drain_trajectory(...)` at the exit-drain
+    // site, `summary_for_completed.trajectory = trajectory` +
+    // `state.completed.push_back(...)`). The tests REPRODUCE those
+    // call sites — they do NOT extract or refactor production code
+    // (the tripwire forbids adding a read path in runtime.rs). The
+    // guarantee is thin (a refactor could shift the call site
+    // without breaking these tests) but the tripwire counts + names
+    // the sites, so drift is caught THERE; D92 answers a different
+    // question: does the DATA that flows through those sites carry
+    // real, non-defaulted values?
+    // ─────────────────────────────────────────────────────────────
+
+    /// Build a `LifecycleSummary` shaped like the runtime's exit
+    /// drain would surface. Used across the V1-V3 tests to keep the
+    /// synthetic-exit shape consistent.
+    fn synthetic_summary(pid: u32, name: &str) -> LifecycleSummary {
+        LifecycleSummary {
+            pid,
+            name: name.into(),
+            category: Some(crate::model::AICategory::Inference),
+            model_name: Some("llama3-8b".into()),
+            spawn_time: chrono::DateTime::from_timestamp(0, 0).unwrap(),
+            exit_time: chrono::DateTime::from_timestamp(60, 0).unwrap(),
+            uptime_secs: 60,
+            exit_code: Some(0),
+            signal: None,
+            avg_cpu_pct: 30.0,
+            peak_cpu_pct: 80.0,
+            peak_rss_mb: 500,
+            peak_vram_mb: 600,
+            samples: 60,
+            trajectory: None,
+        }
+    }
+
+    /// V1 — trajectory end-to-end. Push N samples via the SAME
+    /// `self.history.record_sample(...)` call the runtime uses at
+    /// runtime.rs's capture site, then reproduce the SAME
+    /// drain-and-attach sequence the runtime's exit-drain uses.
+    /// Assert the trajectory lands with N samples AND the metric
+    /// values are REAL — not zeros / defaults.
+    #[test]
+    fn v1_trajectory_end_to_end_carries_real_metrics() {
+        let mut cfg = Config::default();
+        cfg.web.allow_no_auth = true;
+        let mut rt = Runtime::new(cfg).expect("Runtime::new");
+
+        let pid = 42_100u32;
+        // Push 5 distinct samples with rising metric values so a
+        // zero-fill / default-only bug would be caught by the
+        // per-sample assertions below.
+        for i in 0..5 {
+            let sample = crate::history::Sample {
+                timestamp: chrono::DateTime::from_timestamp(i as i64, 0).unwrap(),
+                cpu_pct: (i as f32) * 10.0 + 5.0, // 5, 15, 25, 35, 45
+                rss_mb: 100 + i,
+                vram_mb: Some(500 + i * 10),
+            };
+            rt.history.record_sample(pid, sample);
+        }
+        assert_eq!(rt.history.live_pid_count(), 1);
+
+        // Reproduce the runtime's exit-drain sequence.
+        let summary = synthetic_summary(pid, "llama-server");
+        let trajectory = rt.history.drain_trajectory(pid);
+        assert!(
+            trajectory.is_some(),
+            "V1 FAILURE: drain_trajectory returned None even though \
+             5 samples were pushed — capture path is broken."
+        );
+        let mut summary_for_completed = summary.clone();
+        summary_for_completed.trajectory = trajectory;
+        rt.state.completed.push_back(summary_for_completed);
+
+        // Verify the trajectory landed with real metrics.
+        let landed = rt
+            .state
+            .completed
+            .back()
+            .expect("state.completed populated");
+        let traj = landed.trajectory.as_ref().expect(
+            "V1 FAILURE: state.completed[last].trajectory is None — \
+             the Q3-C hand-off is broken; step 4 didn't attach.",
+        );
+        assert_eq!(
+            traj.samples.len(),
+            5,
+            "V1 FAILURE: expected 5 samples on the completed \
+             trajectory; got {}. Capture is dropping samples between \
+             record_sample and drain_trajectory.",
+            traj.samples.len(),
+        );
+        // Real metric flow — verify each sample carries the value
+        // it was pushed with, in order.
+        for (i, s) in traj.samples.iter().enumerate() {
+            let expected_cpu = (i as f32) * 10.0 + 5.0;
+            assert!(
+                (s.cpu_pct - expected_cpu).abs() < 0.01,
+                "V1 FAILURE: sample {i}.cpu_pct = {} — expected {expected_cpu}. \
+                 Metric threading through capture is broken (zeroed / \
+                 default value).",
+                s.cpu_pct,
+            );
+            assert_eq!(
+                s.rss_mb,
+                100 + i as u32,
+                "V1 FAILURE: sample {i}.rss_mb = {} — expected {}. \
+                 RSS metric is not threading.",
+                s.rss_mb,
+                100 + i,
+            );
+            assert_eq!(
+                s.vram_mb,
+                Some(500 + i as u32 * 10),
+                "V1 FAILURE: sample {i}.vram_mb — VRAM metric not \
+                 threading.",
+            );
+        }
+        // Post-drain hygiene: the live PID map should have shed this
+        // PID (dead-PID-ring leak closure — D90 step 4).
+        assert_eq!(
+            rt.history.live_pid_count(),
+            0,
+            "V1 FAILURE: drain didn't remove the PID from \
+             History.trajectories — dead-PID-ring leak."
+        );
+    }
+
+    /// V2 — VRAM honesty end-to-end. When capture pushes samples
+    /// with `vram_mb: None` (the operator's driver-unloaded case),
+    /// the FROZEN trajectory MUST preserve `None`, never fabricate a
+    /// 0 that reads as real. Same discipline as the D74/D78
+    /// VRAM_UNMEASURED display path — pinned end-to-end here.
+    #[test]
+    fn v2_vram_unmeasured_survives_full_capture_to_completed_path() {
+        let mut cfg = Config::default();
+        cfg.web.allow_no_auth = true;
+        let mut rt = Runtime::new(cfg).expect("Runtime::new");
+
+        let pid = 42_200u32;
+        for i in 0..3 {
+            rt.history.record_sample(
+                pid,
+                crate::history::Sample {
+                    timestamp: chrono::DateTime::from_timestamp(i, 0).unwrap(),
+                    cpu_pct: 12.5,
+                    rss_mb: 200,
+                    vram_mb: None, // unmeasured
+                },
+            );
+        }
+        let summary = synthetic_summary(pid, "phi3-mini");
+        let trajectory = rt.history.drain_trajectory(pid);
+        let mut summary_for_completed = summary.clone();
+        summary_for_completed.trajectory = trajectory;
+        rt.state.completed.push_back(summary_for_completed);
+
+        let traj = rt
+            .state
+            .completed
+            .back()
+            .and_then(|s| s.trajectory.as_ref())
+            .expect("trajectory attached");
+        for (i, s) in traj.samples.iter().enumerate() {
+            assert!(
+                s.vram_mb.is_none(),
+                "V2 FAILURE: sample {i}.vram_mb = {:?} — expected None. \
+                 VRAM honesty violated end-to-end (a fabricated 0 or a \
+                 non-None value would fool the future view into \
+                 rendering a fake reading).",
+                s.vram_mb,
+            );
+        }
+    }
+
+    /// V3 — event archive end-to-end for all three source types.
+    /// Reproduces the runtime call sites at each event's push point
+    /// and verifies the corresponding `HistoryEvent` lands with
+    /// correct kind + pid + name + non-empty summary.
+    ///
+    /// KILL is already end-to-end covered by
+    /// `manual_kill_mirrors_into_history_event_archive` (D91). This
+    /// test covers EXIT + REGRESSION.
+    #[test]
+    fn v3_exit_and_regression_events_land_in_archive_end_to_end() {
+        let mut cfg = Config::default();
+        cfg.web.allow_no_auth = true;
+        let mut rt = Runtime::new(cfg).expect("Runtime::new");
+
+        // EXIT push — reproduces the runtime's exit-drain call site:
+        //   if summary.category.is_some() {
+        //       self.history.record_event(crate::history::exit_event(summary));
+        //   }
+        let exit_summary = synthetic_summary(9_001, "vllm-worker");
+        assert!(exit_summary.category.is_some(), "test premise: AI-classified");
+        rt.history.record_event(crate::history::exit_event(&exit_summary));
+
+        // REGRESSION push — reproduces the runtime's regression-count
+        // loop's `.record_event(regression_event(ev))` call.
+        use crate::analysis::compare::{Regression, Severity};
+        use crate::analysis::RegressionEvent;
+        let regression = RegressionEvent {
+            timestamp: chrono::Utc::now(),
+            model: "llama3-8b".into(),
+            regression: Regression {
+                metric: "tokens_per_sec".into(),
+                baseline: 100.0,
+                current: 78.0,
+                delta_pct: -22.0,
+                severity: Severity::Critical,
+            },
+            baseline_size: 12,
+        };
+        rt.history
+            .record_event(crate::history::regression_event(&regression));
+
+        assert_eq!(rt.history.event_count(), 2, "expected 2 events");
+
+        // The archive is FIFO (newest at the back). Iterate and pin
+        // each event's shape.
+        let events: Vec<_> = rt.history.event_archive.iter().collect();
+        let exit_ev = &events[0];
+        assert!(
+            matches!(exit_ev.kind, crate::history::HistoryEventKind::Exit),
+            "V3 FAILURE: first event must be Exit; got {:?}",
+            exit_ev.kind,
+        );
+        assert_eq!(exit_ev.pid, 9_001);
+        assert_eq!(exit_ev.name, "vllm-worker");
+        assert!(
+            exit_ev.summary.contains("exit pid=9001") && exit_ev.summary.contains("vllm-worker"),
+            "V3 FAILURE: exit summary must carry pid+name; got {:?}",
+            exit_ev.summary,
+        );
+
+        let reg_ev = &events[1];
+        assert!(
+            matches!(reg_ev.kind, crate::history::HistoryEventKind::Regression),
+            "V3 FAILURE: second event must be Regression; got {:?}",
+            reg_ev.kind,
+        );
+        assert_eq!(
+            reg_ev.pid, 0,
+            "regressions use PID 0 sentinel — matches wire (D71)"
+        );
+        assert_eq!(reg_ev.name, "llama3-8b");
+        assert!(
+            reg_ev.summary.contains("REGRESSION")
+                && reg_ev.summary.contains("llama3-8b")
+                && reg_ev.summary.contains("-22.0%"),
+            "V3 FAILURE: regression summary must carry the metric delta; got {:?}",
+            reg_ev.summary,
+        );
+    }
+
+    /// V4 — leak check. Drive many spawn+exit cycles through the
+    /// SAME `record_sample` + `drain_trajectory` calls the runtime
+    /// uses; the `History.trajectories` HashMap MUST NOT grow with
+    /// cumulative PIDs — it should track LIVE PIDs only (dead ones
+    /// removed by the drain, per D90 step 4). This pins the leak
+    /// closure end-to-end under a realistic PID-churn pattern (the
+    /// operator's ROS2 short-lived-nodes shape).
+    #[test]
+    fn v4_high_pid_churn_does_not_leak_history_trajectories() {
+        let mut cfg = Config::default();
+        cfg.web.allow_no_auth = true;
+        let mut rt = Runtime::new(cfg).expect("Runtime::new");
+
+        const CYCLES: u32 = 100;
+        // Spawn + exit each PID one at a time — this is the classic
+        // "short-lived process" pattern (unit test proxy for a ROS2
+        // graph doing lots of ephemeral python3 nodes).
+        for i in 0..CYCLES {
+            let pid = 50_000 + i;
+            rt.history.record_sample(
+                pid,
+                crate::history::Sample {
+                    timestamp: chrono::DateTime::from_timestamp(i as i64, 0).unwrap(),
+                    cpu_pct: 5.0,
+                    rss_mb: 50,
+                    vram_mb: None,
+                },
+            );
+            assert_eq!(
+                rt.history.live_pid_count(),
+                1,
+                "V4 FAILURE (cycle {i}): live_pid_count should be 1 \
+                 during the single-PID-active phase; got {}. Sample \
+                 accumulation across cycles indicates the drain is \
+                 not clearing prior PIDs.",
+                rt.history.live_pid_count(),
+            );
+            let drained = rt.history.drain_trajectory(pid);
+            assert!(
+                drained.is_some(),
+                "V4 FAILURE (cycle {i}): drain returned None"
+            );
+            assert_eq!(
+                rt.history.live_pid_count(),
+                0,
+                "V4 FAILURE (cycle {i}): drain didn't remove the PID \
+                 from the HashMap — dead-PID-ring LEAK. HashMap size \
+                 is {}.",
+                rt.history.live_pid_count(),
+            );
+        }
+
+        // Final invariant: after CYCLES × (record + drain), the
+        // HashMap is empty. If any cycle's drain leaked, the count
+        // would be > 0 here.
+        assert_eq!(
+            rt.history.live_pid_count(),
+            0,
+            "V4 FAILURE: after {CYCLES} spawn+exit cycles, \
+             History.trajectories has {} entries — a leak of \
+             cumulative PIDs.",
+            rt.history.live_pid_count(),
+        );
+    }
+
+    /// V4b — the concurrent-live variant. Multiple PIDs active at
+    /// once, each drained after its own captured samples. Ensures
+    /// the HashMap holds N live PIDs at peak and shrinks to 0 after
+    /// all drain, even when their lifetimes overlap.
+    #[test]
+    fn v4b_concurrent_live_pids_shrink_to_zero_after_all_drain() {
+        let mut cfg = Config::default();
+        cfg.web.allow_no_auth = true;
+        let mut rt = Runtime::new(cfg).expect("Runtime::new");
+
+        const N: u32 = 32;
+        // Phase 1: N PIDs all alive with samples.
+        for i in 0..N {
+            rt.history.record_sample(
+                60_000 + i,
+                crate::history::Sample {
+                    timestamp: chrono::Utc::now(),
+                    cpu_pct: 1.0,
+                    rss_mb: 10,
+                    vram_mb: None,
+                },
+            );
+        }
+        assert_eq!(
+            rt.history.live_pid_count(),
+            N as usize,
+            "V4b FAILURE: expected {N} live PIDs; got {}",
+            rt.history.live_pid_count(),
+        );
+
+        // Phase 2: drain them all, one by one.
+        for i in 0..N {
+            let _ = rt.history.drain_trajectory(60_000 + i);
+        }
+        assert_eq!(
+            rt.history.live_pid_count(),
+            0,
+            "V4b FAILURE: after draining all {N} PIDs, HashMap should be \
+             empty; got {}. LEAK.",
+            rt.history.live_pid_count(),
+        );
+    }
 }

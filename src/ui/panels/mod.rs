@@ -26,6 +26,7 @@ pub(crate) mod activity;
 pub mod alerts;
 pub mod header;
 mod help;
+mod history_events;
 mod history_overlay;
 pub mod kill_confirm;
 pub mod live_detail;
@@ -106,6 +107,17 @@ pub fn render(
     // card (see below) — though the input layer prevents both from
     // being open simultaneously.
     history_overlay::render(f, body_area, app, theme);
+
+    // v1.3.2 / CAR-D97 / DISPATCH 97 — history-events browse overlay
+    // (SCOPED to the archive; no trajectory charts — the CAR-D97
+    // rule). Rendered unconditionally; the panel no-ops when
+    // `app.history_events_browse()` is None. Sits at the same z-slot
+    // tier as `history_overlay` — the input layer prevents both from
+    // being open simultaneously (H closes the RunStore overlay
+    // wouldn't apply since they route through different Actions;
+    // the modal capture branches keep them from overlapping in
+    // practice).
+    history_events::render(f, body_area, app, theme);
 
     // CAR-17 / §5 — detail-card layer floats above every other panel.
     // Three cards, one z-slot. Priority (highest first):

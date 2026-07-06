@@ -133,15 +133,30 @@ fn run_loop(
             // default to Press in crossterm, so this filter doesn't
             // drop events on legacy hosts.
             && should_dispatch_key(key.kind)
-            && let Some(action) = input::translate(key, &app)
         {
-            apply_action(
-                action,
-                runtime,
-                &mut app,
-                &mut live_detail,
-                &mut live_buffers,
-            );
+            // v1.3.2 / CAR-D97 / DISPATCH 97 — local `r` handler for
+            // the history-events overlay. Peeled off BEFORE
+            // `input::translate` so the reload doesn't need a new
+            // `Action` variant (Option B — mirrors the RunStore
+            // overlay's local `h`/`q` precedent). Only fires when the
+            // overlay is open; every other context leaves `r`
+            // unbound (translate returns None for it).
+            if app.is_history_events_browsing()
+                && matches!(key.code, crossterm::event::KeyCode::Char('r'))
+            {
+                let count = app.reload_history_events_browse(runtime);
+                let msg = ux_contract::history_events::RELOAD_TEMPLATE
+                    .replace("{count}", &count.to_string());
+                app.set_status(msg);
+            } else if let Some(action) = input::translate(key, &app) {
+                apply_action(
+                    action,
+                    runtime,
+                    &mut app,
+                    &mut live_detail,
+                    &mut live_buffers,
+                );
+            }
         }
 
         if last_tick.elapsed() >= tick {
@@ -283,6 +298,15 @@ fn apply_action(
                         .map(|e| e.key())
                         .collect();
                 app.activity_browse_prev(&keys);
+            } else if app.is_history_events_browsing() {
+                // v1.3.2 / CAR-D97 / DISPATCH 97 — modal capture:
+                // j/k belong to the events overlay's cursor. The
+                // snapshot is FROZEN on App itself (unlike the
+                // activity browse, which re-derives keys from
+                // runtime.state() each tick because the live feed
+                // shifts). Snapshot-on-open ⇒ App is the source of
+                // truth for the cursor.
+                app.history_events_browse_prev();
             } else {
                 app.select_prev(runtime.state());
             }
@@ -295,6 +319,8 @@ fn apply_action(
                         .map(|e| e.key())
                         .collect();
                 app.activity_browse_next(&keys);
+            } else if app.is_history_events_browsing() {
+                app.history_events_browse_next();
             } else {
                 app.select_next(runtime.state());
             }
@@ -457,6 +483,22 @@ fn apply_action(
         // unchanged — browse mode is OPT-IN.
         Action::ToggleActivityBrowse => {
             app.toggle_activity_browse(runtime.state());
+        }
+        // v1.3.2 / CAR-D97 / DISPATCH 97 — `H` toggles the history-
+        // events browse overlay. Coexists with lowercase `h`
+        // (Action::ToggleHistory / RunStore per-model overlay) —
+        // DIFFERENT surfaces, both preserved. Snapshot-on-open (Q5):
+        // opening the overlay ALSO immediately calls
+        // `reload_history_events_browse` so the frozen event list
+        // is populated on entry (`toggle_*` seeds an empty snapshot
+        // sentinel; the reload call fills it). Closing the overlay
+        // just drops the snapshot — no runtime touch needed.
+        Action::ToggleHistoryEvents => {
+            let was_open = app.is_history_events_browsing();
+            app.toggle_history_events_browse(runtime.state());
+            if !was_open {
+                app.reload_history_events_browse(runtime);
+            }
         }
     }
 }

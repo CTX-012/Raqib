@@ -31,6 +31,31 @@ pub fn translate(key: KeyEvent, app: &App) -> Option<Action> {
         };
     }
 
+    // v1.3.2 / CAR-D97 / DISPATCH 97 — history-events browse modal
+    // capture. Mirrors the D76 activity-browse shape: while the
+    // events overlay is up, j/k belong to the events cursor, Esc
+    // cascades to close, capital `H`/`q` toggle shut. Every other
+    // top-level binding is suppressed so the operator doesn't
+    // accidentally fire kill / detail / sort on the panel beneath.
+    //
+    // Reload key `r` is NOT routed through an Action here (CAR-D97
+    // Option B): the run_loop peels it off BEFORE `translate` and
+    // calls `App::reload_history_events_browse` directly. That
+    // matches the RunStore overlay's local `h`/`q` precedent —
+    // reload is a same-scope refresh, not a distinct dispatch
+    // event to log or replay.
+    if app.is_history_events_browsing() {
+        return match key.code {
+            KeyCode::Esc => Some(Action::EscapeCascade),
+            KeyCode::Char('H') | KeyCode::Char('q') => {
+                Some(Action::ToggleHistoryEvents)
+            }
+            KeyCode::Char('j') | KeyCode::Down => Some(Action::SelectDown),
+            KeyCode::Char('K') | KeyCode::Up => Some(Action::SelectUp),
+            _ => None,
+        };
+    }
+
     match key.code {
         // §6 — Esc cascades through overlays / armed kill / quit.
         // App::handle_escape owns the priority order.
@@ -43,6 +68,12 @@ pub fn translate(key: KeyEvent, app: &App) -> Option<Action> {
         KeyCode::Char('?') => Some(Action::ToggleHelp),
         KeyCode::Char('k') => Some(Action::KillOrConfirm),
         KeyCode::Char('h') => Some(Action::ToggleHistory),
+        // v1.3.2 / CAR-D97 / DISPATCH 97 — capital `H` opens the
+        // history-events browse overlay. Coexists with lowercase
+        // `h` (ToggleHistory / RunStore per-model overlay) above —
+        // both preserved. When the overlay is open, the modal
+        // capture branch at the top of `translate` swallows input.
+        KeyCode::Char('H') => Some(Action::ToggleHistoryEvents),
         // §6 — `a` acknowledges all visible alerts. Silent (no
         // status footer) when no alerts are active; the dispatch
         // handler in `apply_action` decides.
@@ -233,5 +264,81 @@ mod tests {
         // `x` is not bound to anything in §6 — the dispatch loop
         // skips silently.
         assert_eq!(translate(key(KeyCode::Char('x')), &app), None);
+    }
+
+    // ── v1.3.2 / CAR-D97 / DISPATCH 97 — history-events overlay pins ──
+
+    /// CAR-D97 coexistence pin. Lowercase `h` opens the RunStore
+    /// per-model overlay (Action::ToggleHistory); capital `H` opens
+    /// the event archive browser (Action::ToggleHistoryEvents).
+    /// DIFFERENT surfaces, both preserved. A future rebind that
+    /// collapses either into the other fires this test.
+    #[test]
+    fn lowercase_h_and_capital_h_route_to_distinct_actions() {
+        let app = App::new();
+        assert_eq!(
+            translate(key(KeyCode::Char('h')), &app),
+            Some(Action::ToggleHistory),
+            "lowercase `h` must open the RunStore per-model overlay",
+        );
+        assert_eq!(
+            translate(key(KeyCode::Char('H')), &app),
+            Some(Action::ToggleHistoryEvents),
+            "capital `H` must open the history-events browse overlay",
+        );
+    }
+
+    /// CAR-D97 modal capture. While the events overlay is open, j/k
+    /// route to the events cursor (SelectUp/SelectDown are re-used
+    /// for the modal cursor per D76 precedent), Esc cascades, and
+    /// `H`/`q` toggle shut. Every other key is dropped so the panel
+    /// beneath doesn't accidentally receive kill / detail / sort.
+    #[test]
+    fn events_overlay_modally_captures_keys() {
+        let mut app = App::new();
+        app.toggle_history_events_browse(&crate::runtime::RuntimeState::default());
+        // In-scope keys.
+        assert_eq!(
+            translate(key(KeyCode::Char('j')), &app),
+            Some(Action::SelectDown),
+        );
+        assert_eq!(
+            translate(key(KeyCode::Char('K')), &app),
+            Some(Action::SelectUp),
+        );
+        assert_eq!(
+            translate(key(KeyCode::Esc), &app),
+            Some(Action::EscapeCascade),
+        );
+        assert_eq!(
+            translate(key(KeyCode::Char('H')), &app),
+            Some(Action::ToggleHistoryEvents),
+        );
+        assert_eq!(
+            translate(key(KeyCode::Char('q')), &app),
+            Some(Action::ToggleHistoryEvents),
+        );
+        // Suppressed. These would fire kill / detail / sort / new-
+        // overlay if the modal capture leaked; they must return None.
+        for suppressed in [
+            KeyCode::Char('k'),
+            KeyCode::Enter,
+            KeyCode::Char('t'),
+            KeyCode::Char('h'),
+            KeyCode::Char('a'),
+            KeyCode::Char('?'),
+            // `r` is handled LOCALLY by the run_loop before
+            // translate is called (CAR-D97 Option B) — the input
+            // layer returns None here so translate stays a pure
+            // key→Action mapping.
+            KeyCode::Char('r'),
+        ] {
+            assert_eq!(
+                translate(key(suppressed), &app),
+                None,
+                "{:?} must be modally suppressed while events overlay is open",
+                suppressed,
+            );
+        }
     }
 }

@@ -121,6 +121,59 @@ pub struct App {
     ///     exits browse mode; then the existing Esc cascade
     ///     proceeds.
     activity_browse: Option<ActivityBrowse>,
+    /// v1.3.2 / CAR-D97 / DISPATCH 97 — opt-in TUI history-events
+    /// browse mode. `Some(_)` while the operator is browsing the
+    /// event archive overlay (toggled via `H` →
+    /// `Action::ToggleHistoryEvents`); `None` in the default TUI.
+    ///
+    /// When browse mode is active:
+    ///   * The overlay renders in place of the activity panel with
+    ///     a snapshot of the History event archive frozen at open
+    ///     time (Q5 snapshot-on-open — the D76 selection-stability
+    ///     lesson applied to the archive too).
+    ///   * j/k move a composite-key cursor within the frozen list.
+    ///   * `r` calls [`Self::reload_history_events_browse`] via
+    ///     the run_loop's local handler (CAR-D97 Option B — no
+    ///     distinct `Action` variant).
+    ///   * Esc collapses the overlay via the same cascade shape
+    ///     the D76 activity browse uses.
+    ///
+    /// SCOPED to events — this state carries NO trajectory samples.
+    /// The web HistoryPage (D95) owns the curve.
+    history_events_browse: Option<HistoryEventsBrowse>,
+}
+
+/// v1.3.2 / CAR-D97 / DISPATCH 97 — TUI history-events browse state.
+///
+/// Holds a frozen SNAPSHOT of the event archive taken at overlay-open
+/// time (Q5). The renderer reads `events` directly — new events
+/// arriving on the runtime side while the overlay is open do NOT
+/// shift the visible list under the operator (the D76 selection-
+/// stability lesson applied to the archive too; a mid-browse shift
+/// would drop the cursor onto a different row when the operator
+/// wasn't looking).
+///
+/// Selection identity is the entry's composite key
+/// (`${kind}-${pid}-${timestamp.rfc3339()}`) — same shape as the D76
+/// activity-browse cursor. Stability across `r`-reload: if the
+/// previously-selected key still exists in the fresh snapshot, the
+/// cursor stays on it; otherwise the fallback is the top entry.
+///
+/// `snapshot_at` is the wall-clock instant of the snapshot; the
+/// overlay header prints its `HH:MM:SS` so the operator sees they're
+/// looking at a frozen moment, not a live feed.
+#[derive(Debug, Clone)]
+pub struct HistoryEventsBrowse {
+    /// Frozen snapshot of the event archive at open (or last `r`)
+    /// time. Newest-first — the archive's own ordering (VecDeque
+    /// with newest-at-back) is inverted at snapshot time.
+    pub events: Vec<crate::history::HistoryEvent>,
+    /// Composite key of the cursor row, or `None` to fall back to
+    /// the top entry at render time.
+    pub selected_key: Option<String>,
+    /// Wall-clock instant of the snapshot, for the header's
+    /// "snapshot @ HH:MM:SS" hint.
+    pub snapshot_at: chrono::DateTime<chrono::Utc>,
 }
 
 /// v1.3.2 / CAR-D75 / DISPATCH 76 — activity-panel browse state.
@@ -172,6 +225,7 @@ impl App {
             status: None,
             symbol_set,
             activity_browse: None,
+            history_events_browse: None,
             top_processes_sort: TopProcessesSort::default(),
             dismissed_pid: None,
         }
@@ -310,6 +364,137 @@ impl App {
             }
             // Collapsed — second Esc exits browse mode.
             self.activity_browse = None;
+            return true;
+        }
+        false
+    }
+
+    // ── v1.3.2 / CAR-D97 / DISPATCH 97 — history-events browse ──
+
+    /// Toggle the TUI history-events browse overlay. On enter, takes
+    /// a SNAPSHOT of the runtime's event archive (Q5 snapshot-on-open
+    /// — the frozen list survives ticks so a mid-browse arrival
+    /// doesn't shift the cursor). On exit, drops the snapshot.
+    ///
+    /// The archive is read via the D94 `Runtime::history_capture()`
+    /// accessor. The read happens HERE, at the UI layer — NOT in
+    /// `runtime.rs` core. The D91 tripwire scans `runtime.rs` source
+    /// for the forbidden read patterns; this file is out of scope,
+    /// so the tripwire stays green.
+    ///
+    /// SCOPED to events — the snapshot carries `HistoryEvent`s only,
+    /// no `Trajectory` samples. The CAR-D97 rule: "no chart in the
+    /// TUI." An operator who wants the curve uses the web view.
+    pub fn toggle_history_events_browse(&mut self, _state: &RuntimeState) {
+        if self.history_events_browse.is_some() {
+            self.history_events_browse = None;
+        } else {
+            // Empty snapshot as a sentinel; the dispatcher calls
+            // `reload_history_events_browse(runtime)` immediately
+            // after with the real archive. Splitting the two lets
+            // this method stay `&mut RuntimeState`-shaped (matching
+            // the D76 activity-browse toggle) — Runtime access
+            // happens at the dispatcher layer.
+            self.history_events_browse = Some(HistoryEventsBrowse {
+                events: Vec::new(),
+                selected_key: None,
+                snapshot_at: chrono::Utc::now(),
+            });
+        }
+    }
+
+    /// Re-snapshot the event archive from `runtime`. Called both
+    /// on open (from the dispatcher immediately after
+    /// `toggle_history_events_browse`) and on the `r` key inside
+    /// the overlay (routed by the run_loop's local handler per
+    /// CAR-D97 Option B).
+    ///
+    /// Preserves the current cursor if the same composite key
+    /// still appears in the fresh snapshot — the operator was
+    /// reading an event, `r` should not scroll them away from it.
+    /// If the key aged out (rare with a 500-entry cap), the cursor
+    /// falls back to the top entry lazily at render time.
+    ///
+    /// Returns the number of events in the new snapshot; the
+    /// dispatcher uses this for the `history_events::RELOAD_TEMPLATE`
+    /// status footer.
+    pub fn reload_history_events_browse(
+        &mut self,
+        runtime: &crate::runtime::Runtime,
+    ) -> usize {
+        // If the overlay isn't open, nothing to reload — no-op.
+        // (Not an error; the run_loop's `r` local handler is
+        // gated on `is_history_events_browsing()` too.)
+        let Some(browse) = self.history_events_browse.as_mut() else {
+            return 0;
+        };
+        let history = runtime.history_capture();
+        // The archive is a VecDeque with newest-at-back. Reverse
+        // into a Vec so index 0 is the newest event — matches the
+        // ActivityFeed's time-descending render order.
+        let mut events: Vec<crate::history::HistoryEvent> =
+            history.event_archive.iter().cloned().collect();
+        events.reverse();
+        browse.events = events;
+        browse.snapshot_at = chrono::Utc::now();
+        browse.events.len()
+    }
+
+    /// Read-only access to the browse state. `None` when not
+    /// browsing.
+    pub fn history_events_browse(&self) -> Option<&HistoryEventsBrowse> {
+        self.history_events_browse.as_ref()
+    }
+
+    /// True iff the events overlay is open. The input layer's modal
+    /// capture branch routes against this predicate.
+    pub fn is_history_events_browsing(&self) -> bool {
+        self.history_events_browse.is_some()
+    }
+
+    /// Move the events cursor to the next (older) entry. Bounds-
+    /// clamps at the end of the frozen list — j at the bottom
+    /// doesn't wrap (mirrors the D76 activity-browse shape; wrap
+    /// would be a footgun in a list the operator is inspecting for
+    /// a specific event).
+    pub fn history_events_browse_next(&mut self) {
+        let Some(b) = self.history_events_browse.as_mut() else {
+            return;
+        };
+        if b.events.is_empty() {
+            b.selected_key = None;
+            return;
+        }
+        let i = current_events_browse_index(b);
+        let next = (i + 1).min(b.events.len() - 1);
+        b.selected_key = Some(event_key(&b.events[next]));
+    }
+
+    /// Move the events cursor to the previous (newer) entry.
+    /// Saturating at 0 — k at the top doesn't wrap either.
+    pub fn history_events_browse_prev(&mut self) {
+        let Some(b) = self.history_events_browse.as_mut() else {
+            return;
+        };
+        if b.events.is_empty() {
+            b.selected_key = None;
+            return;
+        }
+        let i = current_events_browse_index(b);
+        let prev = i.saturating_sub(1);
+        b.selected_key = Some(event_key(&b.events[prev]));
+    }
+
+    /// Esc handler for the events overlay. Single-step close: Esc
+    /// exits the overlay (there's no expand-collapse layer to peel
+    /// off first, since the CAR-D97 scope is events-only — no
+    /// trajectory drilldown to collapse first).
+    ///
+    /// Returns true if it consumed the Esc, false otherwise (so
+    /// the outer cascade in `handle_escape` can proceed).
+    pub fn handle_history_events_browse_escape(&mut self) -> bool {
+        if self.history_events_browse.is_some() {
+            self.history_events_browse = None;
             return true;
         }
         false
@@ -532,6 +717,15 @@ impl App {
         if self.handle_activity_browse_escape() {
             return true;
         }
+        // v1.3.2 / CAR-D97 / DISPATCH 97 — history-events overlay
+        // sits right below activity-browse in the cascade. Single-
+        // step close: Esc exits the overlay (there's no in-overlay
+        // expand layer to peel off — CAR-D97 scope is events-only).
+        // Placed above kill_confirm so an operator's "back out of
+        // browse" intent isn't shadowed by a card they didn't open.
+        if self.handle_history_events_browse_escape() {
+            return true;
+        }
         if self.kill_confirm.is_some() {
             self.dismiss_kill_confirm();
             return true;
@@ -631,6 +825,37 @@ fn current_browse_index(b: &ActivityBrowse, event_keys: &[String]) -> usize {
     b.selected_key
         .as_ref()
         .and_then(|k| event_keys.iter().position(|x| x == k))
+        .unwrap_or(0)
+}
+
+/// Composite key for a [`HistoryEvent`], matching the D65/D71 shape
+/// the activity feed uses (`${kind}-${pid}-${timestamp.rfc3339()}`).
+/// A `HistoryEvent` from the archive can share a PID with an entry
+/// of a different kind (an exit AND a kill for the same PID both
+/// live in the archive after the workload dies); the composite is
+/// what disambiguates them.
+///
+/// The `kind` prefix is the wire string
+/// (`exit`/`kill`/`regression`) — the D95 web view uses the same
+/// prefix, so a future cross-surface debug tool (e.g. logging a
+/// selected event) has a stable identifier.
+pub(super) fn event_key(ev: &crate::history::HistoryEvent) -> String {
+    let kind = match ev.kind {
+        crate::history::HistoryEventKind::Exit => "exit",
+        crate::history::HistoryEventKind::Kill => "kill",
+        crate::history::HistoryEventKind::Regression => "regression",
+    };
+    format!("{}-{}-{}", kind, ev.pid, ev.timestamp.to_rfc3339())
+}
+
+/// Resolve the cursor's position within the frozen events list.
+/// Fallback to 0 (the newest entry) when the selected key is `None`
+/// (just-entered browse mode) OR when the previously-selected key
+/// has aged out of the fresh snapshot between reloads.
+fn current_events_browse_index(b: &HistoryEventsBrowse) -> usize {
+    b.selected_key
+        .as_ref()
+        .and_then(|k| b.events.iter().position(|ev| &event_key(ev) == k))
         .unwrap_or(0)
 }
 

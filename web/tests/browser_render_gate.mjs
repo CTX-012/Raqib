@@ -17,7 +17,27 @@
 // `_negative_control_colliding_activity.json`. Loaded verbatim
 // (dispatch C2: reuse, don't re-author).
 //
-// Re-run: `npm --prefix web run test:browser` from the repo root.
+// ── Re-run ──────────────────────────────────────────────────────────
+//
+// From the repo root:
+//   npm --prefix web run test:browser
+//
+// Or from `web/`:
+//   npm run test:browser
+//
+// The npm script chains `npm run build && node tests/browser_render_gate.mjs`
+// so the gate always runs against a fresh bundle. Exit code 0 on
+// pass, 1 on any assertion failure, 2 on missing prerequisites
+// (no Chrome, no fixtures, no built bundle), 3 on harness crash.
+//
+// Environment:
+//   * EM_CHROME_PATH — override the Chrome binary path
+//     (default: /usr/bin/google-chrome). Tested with Google Chrome
+//     150 on Ubuntu 22.04.
+//
+// CI hint: puppeteer-core does NOT download Chromium. The runner
+// must provide Chrome via apt-get, a base image, or the
+// EM_CHROME_PATH env var — see the `test:browser` script.
 
 import { createServer } from 'node:http';
 import { readFile, readdir } from 'node:fs/promises';
@@ -418,31 +438,18 @@ async function runFixture(browser, url, fx, opts) {
     // the load-bearing assertion for the negative case.
     const skipNodeCount = !!expectedFailures.eachKey;
 
-    // WorkloadRow renders one <div class="grid grid-cols-[auto_1fr_
-    // auto_auto_auto_auto] ..."> per workload. The `[auto_1fr...]`
-    // arbitrary-value bracket is Tailwind's JIT — vite preserves
-    // it verbatim in the compiled CSS class list. A `class^=` prefix
-    // match on that literal is stable across renames of adjacent
-    // utility classes (padding, gap) but pins the load-bearing
-    // structural cue (the 6-column grid).
-    const wlCount = await page.evaluate(() => {
-        const heads = [...document.querySelectorAll('h2')];
-        const h = heads.find((el) => el.textContent.trim() === 'AI Workloads');
-        if (!h) return 0;
-        const panel = h.parentElement;
-        if (!panel) return 0;
-        // Belt-and-braces: try the literal prefix selector first,
-        // then fall back to a contains check on the class attribute
-        // (in case a future Tailwind version reorders class tokens).
-        const prefixHits = panel.querySelectorAll(
-            'div[class^="grid grid-cols-[auto_1fr"]',
-        );
-        if (prefixHits.length > 0) return prefixHits.length;
-        return [...panel.querySelectorAll('div')].filter((el) => {
-            const c = el.getAttribute('class') || '';
-            return c.includes('grid-cols-[auto_1fr');
-        }).length;
-    });
+    // WorkloadRow.svelte carries `data-testid="workload-row"` (added
+    // in D98 alongside this harness) — a stable structural hook that
+    // survives CSS refactors. Ships inert: no styling, no behavior,
+    // no bytes in the compiled output beyond the attribute itself.
+    // If the testid is removed from WorkloadRow, this selector will
+    // return 0 and the fixture row-count assertion will fail loudly
+    // rather than silently — the correct fail-loud coupling for a
+    // structural pin.
+    const wlCount = await page.$$eval(
+        '[data-testid="workload-row"]',
+        (els) => els.length,
+    );
     const thermalCount = await page.evaluate(() => {
         const heads = [...document.querySelectorAll('div, span')];
         const h = heads.find((el) => el.textContent.trim() === 'Thermal');

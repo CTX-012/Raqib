@@ -50,7 +50,16 @@
     })();
 </script>
 
-<div class="grid grid-cols-[auto_1fr_auto_auto_auto_auto] gap-x-3 py-0.5 items-baseline text-sm">
+<!--
+    v1.3.2 / DISPATCH 98 — `data-testid="workload-row"` is the
+    stable structural hook the browser render gate
+    (`web/tests/browser_render_gate.mjs`) uses to count rendered
+    rows. Durable across the CSS refactors the upcoming 5-web-modes
+    work will bring — an inert attribute, no behavior, no bytes in
+    the styled output. If you remove or rename it, update the
+    harness selector in lockstep.
+-->
+<div data-testid="workload-row" class="grid grid-cols-[auto_1fr_auto_auto_auto_auto] gap-x-3 py-0.5 items-baseline text-sm">
     <span class={STATUS_CLASS[workload.status]} aria-label={workload.status}>
         {STATUS_GLYPH[workload.status]}
     </span>

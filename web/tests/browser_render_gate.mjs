@@ -627,19 +627,18 @@ async function runVramHonestyGate(browser, url) {
         req.respond({ status: 404 });
     });
 
-    await page.goto(url, { waitUntil: 'networkidle2', timeout: 15000 });
-    await new Promise((r) => setTimeout(r, 400));
-
-    // Open the History panel.
-    await page.evaluate(() => {
-        const btn = [...document.querySelectorAll('button')].find(
-            (b) =>
-                b.textContent.trim().startsWith('History ') &&
-                b.getAttribute('aria-expanded') !== null,
-        );
-        if (btn) btn.click();
+    // v1.3.2 / DISPATCH 101 — C5 used to open the dashboard's
+    // collapsible HistoryPage; D101 promoted History to its own
+    // mode and removed the collapsible from the dashboard. Load
+    // the history mode directly — HistoryPage's `alwaysOpen`
+    // fires the fetch on mount, so no toggle click is needed.
+    await page.goto(`${url}/?mode=history`, {
+        waitUntil: 'networkidle2',
+        timeout: 15000,
     });
-    await new Promise((r) => setTimeout(r, 500));
+    // Give the mount + snapshot-on-open fetch + first render a
+    // beat to land before we ask for the dead-PID row.
+    await new Promise((r) => setTimeout(r, 700));
 
     // Click the dead-PID row.
     await page.evaluate(() => {
@@ -739,6 +738,246 @@ async function runVramHonestyGate(browser, url) {
     return result;
 }
 
+// ── D101 — HISTORY mode gate ────────────────────────────────────────
+//
+// Loads `?mode=history` in the browser, mocks /api/history against
+// F3 (same-pid exit+kill — the D71 keying scar) plus two synthetic
+// dead-PID entries, and asserts:
+//   * the HistoryView renders (data-testid="history-view")
+//   * HistoryPage is embedded with alwaysOpen (data-testid="history-panel"
+//     with data-testid-open="true", no collapsible chrome)
+//   * event count matches fixture (fires the D95 event composite
+//     key ${kind}-${pid}-${timestamp} against F3's same-pid exit+kill)
+//   * dead-PID count matches the mock (fires the D95 dead-PID
+//     composite ${pid}-${exit_time})
+//   * zero each_key_duplicate signals across console + pageerror
+//   * the dashboard collapsible HistoryPage is GONE from `?mode=dashboard`
+//     (D101 C2 decision — history has its own home now)
+
+async function runHistoryModeGate(browser, url) {
+    const result = new GateResult();
+    const fx = await loadFixture('F3_same_pid_exit_kill');
+    // Build the /api/history response: the events reuse F3's activity
+    // list (same-pid exit+kill exercises the composite key), and two
+    // synthetic dead PIDs let the dead-PID list render + exercise its
+    // own `${pid}-${exit_time}` composite.
+    const derivedEvents = derivedHistorySnapshot(fx).events;
+    const historyPayload = {
+        events: derivedEvents,
+        dead_pids: [
+            {
+                pid: 7777,
+                name: 'test_workload_a',
+                model_name: 'test-model-a',
+                exit_time: '2026-06-17T20:00:02Z',
+            },
+            {
+                pid: 8888,
+                name: 'test_workload_b',
+                model_name: null,
+                exit_time: '2026-06-17T19:58:11Z',
+            },
+        ],
+    };
+    const expectedEventCount = derivedEvents.length;
+    const expectedDeadCount = historyPayload.dead_pids.length;
+
+    // A: history mode renders the view + panel + rows correctly.
+    const page = await browser.newPage();
+    const consoleMessages = [];
+    const pageErrors = [];
+    page.on('console', (m) =>
+        consoleMessages.push({ type: m.type(), text: m.text() }),
+    );
+    page.on('pageerror', (err) => pageErrors.push(err.message));
+
+    await page.setRequestInterception(true);
+    page.on('request', (req) => {
+        const u = new URL(req.url());
+        if (!u.pathname.startsWith('/api/')) {
+            req.continue();
+            return;
+        }
+        const j = (obj, status = 200) =>
+            req.respond({
+                status,
+                contentType: 'application/json; charset=utf-8',
+                body: JSON.stringify(obj),
+            });
+        if (u.pathname === '/api/snapshot') return j(fx);
+        if (u.pathname === '/api/health') return j({ ok: true });
+        if (u.pathname === '/api/history') return j(historyPayload);
+        if (u.pathname.startsWith('/api/history/trajectory/'))
+            return req.respond({ status: 404 });
+        req.respond({ status: 404 });
+    });
+
+    await page.goto(`${url}/?mode=history`, {
+        waitUntil: 'networkidle2',
+        timeout: 15000,
+    });
+    // HistoryPage fires its snapshot-on-open fetch from onMount.
+    // Give the fetch + first render a beat to land.
+    await new Promise((r) => setTimeout(r, 700));
+
+    const shot = await page.evaluate(() => {
+        const view = document.querySelector('[data-testid="history-view"]');
+        const panel = document.querySelector('[data-testid="history-panel"]');
+        const alwaysOpen = panel
+            ? panel.getAttribute('data-testid-open')
+            : null;
+        const eventRows = document.querySelectorAll(
+            '[data-testid="history-event-row"]',
+        );
+        const deadRows = document.querySelectorAll(
+            '[data-testid="history-dead-row"]',
+        );
+        // Collapsible chrome should NOT be present in history mode.
+        const collapsibleToggle = document.querySelector('.history-toggle');
+        // Dashboard-side hooks (workloads/activity headings) should
+        // NOT be present in history mode either.
+        const wlHeading = [...document.querySelectorAll('h2')].find(
+            (h) => h.textContent.trim() === 'AI Workloads',
+        );
+        return {
+            hasView: !!view,
+            hasPanel: !!panel,
+            alwaysOpen,
+            eventCount: eventRows.length,
+            deadCount: deadRows.length,
+            hasCollapsibleToggle: !!collapsibleToggle,
+            hasWorkloadsHeading: !!wlHeading,
+        };
+    });
+
+    if (shot.hasView) result.ok(`[history-mode] HistoryView rendered`);
+    else result.fail(`[history-mode] HistoryView not found in DOM`);
+
+    if (shot.hasPanel && shot.alwaysOpen === 'true') {
+        result.ok(`[history-mode] HistoryPage embedded with alwaysOpen=true`);
+    } else {
+        result.fail(
+            `[history-mode] HistoryPage not in alwaysOpen state (panel=${shot.hasPanel}, alwaysOpen=${shot.alwaysOpen})`,
+        );
+    }
+
+    if (!shot.hasCollapsibleToggle) {
+        result.ok(
+            `[history-mode] no collapsible '▸/▾' toggle button (alwaysOpen hides it)`,
+        );
+    } else {
+        result.fail(
+            `[history-mode] collapsible toggle still visible in history mode — alwaysOpen chrome-hide broke`,
+        );
+    }
+
+    if (shot.eventCount === expectedEventCount) {
+        result.ok(
+            `[history-mode] event row-count matches fixture (${shot.eventCount})`,
+        );
+    } else {
+        result.fail(
+            `[history-mode] event row-count mismatch: DOM ${shot.eventCount} vs fixture ${expectedEventCount} — D95 event composite key regression`,
+        );
+    }
+
+    if (shot.deadCount === expectedDeadCount) {
+        result.ok(
+            `[history-mode] dead-PID row-count matches mock (${shot.deadCount})`,
+        );
+    } else {
+        result.fail(
+            `[history-mode] dead-PID row-count mismatch: DOM ${shot.deadCount} vs mock ${expectedDeadCount} — D95 dead-PID composite key regression`,
+        );
+    }
+
+    if (shot.hasWorkloadsHeading) {
+        result.fail(
+            `[history-mode] dashboard's "AI Workloads" heading is leaking into history mode — the mode router is not swapping cleanly`,
+        );
+    } else {
+        result.ok(
+            `[history-mode] dashboard content not present (mode router swapped cleanly)`,
+        );
+    }
+
+    // Each_key detection — same primary channels as elsewhere.
+    const eachKeyConsole = consoleMessages.filter(
+        (m) =>
+            (m.type === 'warning' || m.type === 'error') &&
+            isEachKeyDuplicateSignal(m.text),
+    );
+    const eachKeyThrows = pageErrors.filter((msg) =>
+        isEachKeyDuplicateSignal(msg),
+    );
+    const anyEachKey = eachKeyConsole.length + eachKeyThrows.length;
+    if (anyEachKey === 0) {
+        result.ok(
+            `[history-mode] no each_key duplicate signals in the event / dead-PID lists`,
+        );
+    } else {
+        result.fail(
+            `[history-mode] each_key duplicate signal(s) detected (${anyEachKey}): ` +
+                JSON.stringify([
+                    ...eachKeyConsole.map((m) => m.text),
+                    ...eachKeyThrows,
+                ]),
+        );
+    }
+
+    const otherErrors = pageErrors.filter(
+        (msg) => !isEachKeyDuplicateSignal(msg),
+    );
+    if (otherErrors.length > 0) {
+        result.fail(
+            `[history-mode] unexpected pageerror(s): ${JSON.stringify(otherErrors)}`,
+        );
+    } else {
+        result.ok(`[history-mode] no unexpected page errors`);
+    }
+    await page.close();
+
+    // B: dashboard mode no longer carries the collapsible HistoryPage
+    // (D101 C2 decision). If it's still there, the dashboard-lean
+    // property broke silently.
+    const dashPage = await browser.newPage();
+    await dashPage.setRequestInterception(true);
+    dashPage.on('request', (req) => {
+        const u = new URL(req.url());
+        if (!u.pathname.startsWith('/api/')) return req.continue();
+        const j = (obj) =>
+            req.respond({
+                status: 200,
+                contentType: 'application/json; charset=utf-8',
+                body: JSON.stringify(obj),
+            });
+        if (u.pathname === '/api/snapshot') return j(fx);
+        if (u.pathname === '/api/health') return j({ ok: true });
+        req.respond({ status: 404 });
+    });
+    await dashPage.goto(`${url}/?mode=dashboard`, {
+        waitUntil: 'networkidle2',
+        timeout: 15000,
+    });
+    await new Promise((r) => setTimeout(r, 400));
+    const dashShot = await dashPage.evaluate(() => {
+        const panel = document.querySelector('[data-testid="history-panel"]');
+        const toggle = document.querySelector('.history-toggle');
+        return { hasPanel: !!panel, hasToggle: !!toggle };
+    });
+    if (!dashShot.hasPanel && !dashShot.hasToggle) {
+        result.ok(
+            `[dashboard-mode] HistoryPage collapsible removed from dashboard (C2 dashboard-lean confirmed)`,
+        );
+    } else {
+        result.fail(
+            `[dashboard-mode] HistoryPage still present in dashboard (panel=${dashShot.hasPanel}, toggle=${dashShot.hasToggle}) — C2 dashboard-lean regressed`,
+        );
+    }
+    await dashPage.close();
+    return result;
+}
+
 // ── Driver ──────────────────────────────────────────────────────────
 
 async function main() {
@@ -802,6 +1041,18 @@ async function main() {
     vramRes.passes.forEach((p) => console.log(`   ✓ ${p}`));
     vramRes.failures.forEach((f) => console.log(`   ✗ ${f}`));
     results.push({ name: 'C5_vram_honesty', ...vramRes.summarize() });
+
+    // v1.3.2 / DISPATCH 101 — extends the gate with HISTORY-mode
+    // coverage. New render surface (?mode=history → HistoryView
+    // → HistoryPage alwaysOpen). Reuses F3 (same-pid exit+kill —
+    // the D71 composite-key scar) as the archive fixture so the
+    // event {#each} key is exercised. The dead-PID list is
+    // stubbed with two synthetic entries.
+    console.log(`\n▶ D101 — HISTORY mode (?mode=history)`);
+    const historyRes = await runHistoryModeGate(browser, url);
+    historyRes.passes.forEach((p) => console.log(`   ✓ ${p}`));
+    historyRes.failures.forEach((f) => console.log(`   ✗ ${f}`));
+    results.push({ name: 'D101_history_mode', ...historyRes.summarize() });
 
     await browser.close();
     server.close();

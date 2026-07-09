@@ -19,6 +19,7 @@
      * across the ring window; the timestamp disambiguates).
      */
 
+    import { onMount } from 'svelte';
     import {
         fetchHistorySnapshot,
         fetchHistoryTrajectory,
@@ -31,7 +32,26 @@
     } from '../lib/types';
     import TrajectoryChart from './TrajectoryChart.svelte';
 
-    let expanded = false;
+    /**
+     * v1.3.2 / DISPATCH 101 / PHASE 5 display modes step 2 —
+     * `alwaysOpen` is the ONLY internal change this dispatch makes
+     * to HistoryPage (per D101 HARD RULE 1: internals unchanged; a
+     * small adaptation to embed cleanly full-viewport is allowed).
+     *
+     * When set:
+     *   * The collapsible toggle button is hidden (no `▸/▾`).
+     *   * The body renders unconditionally.
+     *   * The initial fetch fires on mount (equivalent to the
+     *     first-toggle-open branch — the Q5 snapshot-on-open
+     *     semantic is preserved).
+     * When left at the default (`false`), the component behaves
+     * EXACTLY as the D95 collapsible — the dashboard-collapsible
+     * regression surface is off-limits to this dispatch and this
+     * default keeps callers unaffected.
+     */
+    export let alwaysOpen: boolean = false;
+
+    let expanded = alwaysOpen;
 
     // Snapshot state — set once per fetch (open or Reload).
     let snapshot: WireHistorySnapshot | null = null;
@@ -90,6 +110,16 @@
             await refresh();
         }
     }
+
+    // v1.3.2 / DISPATCH 101 — when embedded as the HISTORY mode
+    // (`alwaysOpen`), fire the same first-open fetch the collapsible
+    // triggers via `toggle()`. Snapshot-on-open (Q5) is preserved
+    // because this runs ONCE at mount, not on a poll.
+    onMount(() => {
+        if (alwaysOpen && snapshot === null && !loading) {
+            void refresh();
+        }
+    });
 
     function eventKey(ev: WireHistoryEvent): string {
         // D65/D71 composite — kind AND pid AND timestamp. A PID
@@ -167,15 +197,29 @@
     }
 </script>
 
-<section class="history-panel" aria-label="History">
-    <button
-        type="button"
-        class="history-toggle"
-        on:click={toggle}
-        aria-expanded={expanded}
-    >
-        History {expanded ? '▾' : '▸'}
-    </button>
+<section
+    class="history-panel"
+    class:history-panel--full={alwaysOpen}
+    aria-label="History"
+    data-testid="history-panel"
+    data-testid-open={String(alwaysOpen)}
+>
+    {#if !alwaysOpen}
+        <!--
+            D101: the collapsible toggle only renders when embedded as
+            a dashboard panel (D95's original callsite). In HISTORY
+            mode (`alwaysOpen`), the mode itself IS the affordance —
+            an extra "History ▾" button would be redundant chrome.
+        -->
+        <button
+            type="button"
+            class="history-toggle"
+            on:click={toggle}
+            aria-expanded={expanded}
+        >
+            History {expanded ? '▾' : '▸'}
+        </button>
+    {/if}
 
     {#if expanded}
         <div class="history-body">
@@ -220,9 +264,9 @@
                                 No events in the archive.
                             </div>
                         {:else}
-                            <ul class="events">
+                            <ul class="events" data-testid="history-events">
                                 {#each snapshot.events as ev (eventKey(ev))}
-                                    <li class="event-row">
+                                    <li class="event-row" data-testid="history-event-row">
                                         <span class="text-fg-muted text-xs">
                                             {shortTime(ev.timestamp)}
                                         </span>
@@ -262,11 +306,11 @@
                                 No dead workloads in the window.
                             </div>
                         {:else}
-                            <ul class="dead-pids">
+                            <ul class="dead-pids" data-testid="history-dead-pids">
                                 {#each snapshot.dead_pids as entry (deadKey(entry))}
                                     {@const key = deadKey(entry)}
                                     {@const isSelected = selectedKey === key}
-                                    <li>
+                                    <li data-testid="history-dead-row">
                                         <button
                                             type="button"
                                             class="dead-row"
@@ -346,6 +390,17 @@
     .history-panel {
         margin: 0.5rem 0;
         font-size: 0.875rem;
+    }
+    /*
+     * v1.3.2 / DISPATCH 101 — the .history-panel--full modifier is
+     * applied when the component is embedded as the HISTORY mode
+     * (`alwaysOpen`). Drops the collapsible chrome's margin so the
+     * full-viewport layout doesn't inherit a top/bottom gap that
+     * only made sense next to a dashboard panel above/below it.
+     */
+    .history-panel--full {
+        margin: 0;
+        font-size: 0.9rem;
     }
     .history-toggle {
         background: transparent;

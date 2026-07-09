@@ -23,16 +23,26 @@
     import ConnectionPill from './components/ConnectionPill.svelte';
     import AlertsPanel from './components/AlertsPanel.svelte';
     import SettingsPanel from './components/SettingsPanel.svelte';
-    import HistoryPage from './components/HistoryPage.svelte';
+    // v1.3.2 / DISPATCH 101 / PHASE 5 display modes step 2 —
+    // HistoryPage no longer lives inside the dashboard grid as a
+    // collapsible panel; it's now the exclusive content of the
+    // HISTORY mode via HistoryView (full-viewport). Removed from
+    // the dashboard branch to keep the dashboard lean — a
+    // deliberate, single-home-per-component change, not a
+    // regression. See docs/PHASE5_DISPLAY_MODES_DESIGN.md §1.2.
+    import HistoryView from './views/HistoryView.svelte';
     import ModePlaceholder from './components/ModePlaceholder.svelte';
 
     // v1.3.2 / DISPATCH 100 — the step each placeholder mode's real
     // view lands in (per PHASE5_DISPLAY_MODES_DESIGN.md §7).
+    // v1.3.2 / DISPATCH 101 — `history` dropped from this map (its
+    // real view landed as HistoryView in this step). Remaining
+    // placeholders track their real-view landing step per
+    // docs/PHASE5_DISPLAY_MODES_DESIGN.md §7.
     const PLACEHOLDER_STEP: Record<
-        Exclude<ModeName, 'dashboard'>,
+        'kiosk' | 'timeline' | 'focus',
         string
     > = {
-        history: 'step 2',
         kiosk: 'step 3',
         timeline: 'step 4',
         focus: 'step 5',
@@ -145,14 +155,15 @@
             </section>
         </main>
 
-        <!-- v1.3.2 / DISPATCH 95 / PHASE 5 step 7 — history panel.
-             Collapsed by default; opens SNAPSHOT-ON-OPEN (Q5, not a
-             live poll). Event archive + dead-PID index + on-demand
-             per-PID trajectory chart. Sits next to Settings — both
-             read the same panel-toggle convention. -->
-        <div class="px-6 pb-2">
-            <HistoryPage />
-        </div>
+        <!--
+            v1.3.2 / DISPATCH 101 — the D95 collapsible HistoryPage
+            was removed from the dashboard grid here. History has
+            its own mode now (`?mode=history` → HistoryView).
+            Intentional dashboard change — the only diff between
+            D100 and D101 in the dashboard branch. Everything else
+            (VitalsPanel / WorkloadsPanel / ActivityFeed /
+            SettingsPanel / footer) is byte-identical to D100.
+        -->
 
         <!-- v1.3.2 / DISPATCH 86 — settings panel. Collapsed by default.
              Tunes thresholds + sustain windows; auto_actuate stays
@@ -167,7 +178,7 @@
             edge_monitor web companion (read-only) · use the TUI for control
         </footer>
     {:else if $mode === 'history'}
-        <ModePlaceholder mode="history" step={PLACEHOLDER_STEP.history} />
+        <HistoryView />
     {:else if $mode === 'kiosk'}
         <ModePlaceholder mode="kiosk" step={PLACEHOLDER_STEP.kiosk} />
     {:else if $mode === 'timeline'}

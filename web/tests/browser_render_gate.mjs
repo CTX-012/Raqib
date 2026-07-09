@@ -978,6 +978,285 @@ async function runHistoryModeGate(browser, url) {
     return result;
 }
 
+// ── D102 — KIOSK mode gate ──────────────────────────────────────────
+//
+// Loads `?mode=kiosk` in the browser against three fixture shapes:
+//   * F6_kiosk_all_criticals — every meter at 99%, thermal red,
+//     critical alerts. Asserts kiosk's aggregation lands on
+//     `data-testid-severity="critical"` and NO each_key on the tiles.
+//   * F1_dense_colliding_names — 14 healthy workloads, gpu null.
+//     Asserts the healthy path AND the VRAM-unmeasured discriminator
+//     (`data-testid-unmeasured="true"` + "—", NOT "0%").
+//   * F2_duplicate_label_thermals — 2 acpitz thermals, low % — the
+//     healthy path with thermal data present. Sanity-check the
+//     mode routing works against a small snapshot.
+//
+// Plus a no-interaction pin: kiosk view must contain zero
+// `<button>` / `<a>` / `<input>` elements — the glance-only
+// property from §1.2. If a future edit adds interactivity, this
+// fires. (The header's mode <select> is outside the KioskView
+// scope so it doesn't count.)
+async function runKioskModeGate(browser, url) {
+    const result = new GateResult();
+
+    async function probe(fixtureName, expectSeverity, extra) {
+        const fx = await loadFixture(fixtureName);
+        const page = await browser.newPage();
+        const consoleMessages = [];
+        const pageErrors = [];
+        page.on('console', (m) =>
+            consoleMessages.push({ type: m.type(), text: m.text() }),
+        );
+        page.on('pageerror', (err) => pageErrors.push(err.message));
+
+        await page.setRequestInterception(true);
+        page.on('request', (req) => {
+            const u = new URL(req.url());
+            if (!u.pathname.startsWith('/api/')) return req.continue();
+            const j = (obj) =>
+                req.respond({
+                    status: 200,
+                    contentType: 'application/json; charset=utf-8',
+                    body: JSON.stringify(obj),
+                });
+            if (u.pathname === '/api/snapshot') return j(fx);
+            if (u.pathname === '/api/health') return j({ ok: true });
+            if (u.pathname === '/api/history') return j({ events: [], dead_pids: [] });
+            req.respond({ status: 404 });
+        });
+        await page.goto(`${url}/?mode=kiosk`, {
+            waitUntil: 'networkidle2',
+            timeout: 15000,
+        });
+        // Give the 1 Hz first poll a beat to land.
+        await new Promise((r) => setTimeout(r, 600));
+
+        const shot = await page.evaluate(() => {
+            const view = document.querySelector('[data-testid="kiosk-view"]');
+            const severity = view
+                ? view.getAttribute('data-testid-severity')
+                : null;
+            const severityLabelEl = document.querySelector(
+                '[data-testid="kiosk-severity"]',
+            );
+            const severityLabelText = severityLabelEl
+                ? severityLabelEl.textContent.trim()
+                : '';
+            const ramTile = document.querySelector(
+                '[data-testid="kiosk-tile-ram"]',
+            );
+            const vramTile = document.querySelector(
+                '[data-testid="kiosk-tile-vram"]',
+            );
+            const vramValueEl = document.querySelector(
+                '[data-testid="kiosk-vram-value"]',
+            );
+            const vramUnmeasured = vramValueEl
+                ? vramValueEl.getAttribute('data-testid-unmeasured') === 'true'
+                : false;
+            const vramText = vramValueEl ? vramValueEl.textContent.trim() : '';
+            const thermalTile = document.querySelector(
+                '[data-testid="kiosk-tile-thermal"]',
+            );
+            // No-interaction pin: count interactive nodes INSIDE
+            // the kiosk view. The app header's mode select is
+            // outside the view boundary so it doesn't count.
+            const interactiveNodes = view
+                ? view.querySelectorAll('button, a[href], input, select, textarea')
+                      .length
+                : 0;
+            // Dashboard cards should NOT leak into kiosk.
+            const dashWorkloadsHead = [
+                ...document.querySelectorAll('h2'),
+            ].find((h) => h.textContent.trim() === 'AI Workloads');
+            return {
+                hasView: !!view,
+                severity,
+                severityLabelText,
+                hasRamTile: !!ramTile,
+                hasVramTile: !!vramTile,
+                vramUnmeasured,
+                vramText,
+                hasThermalTile: !!thermalTile,
+                interactiveNodes,
+                dashLeak: !!dashWorkloadsHead,
+            };
+        });
+
+        const label = `[kiosk:${fixtureName}]`;
+
+        if (shot.hasView) result.ok(`${label} KioskView rendered`);
+        else result.fail(`${label} KioskView not in DOM`);
+
+        if (shot.severity === expectSeverity) {
+            result.ok(
+                `${label} overall severity=${shot.severity} (matches expected)`,
+            );
+        } else {
+            result.fail(
+                `${label} overall severity mismatch: DOM ${shot.severity} vs expected ${expectSeverity}`,
+            );
+        }
+        if (shot.severityLabelText.includes(expectSeverity.toUpperCase())) {
+            result.ok(
+                `${label} severity label reads "${shot.severityLabelText}"`,
+            );
+        } else {
+            result.fail(
+                `${label} severity label "${shot.severityLabelText}" doesn't carry the expected verdict`,
+            );
+        }
+
+        if (shot.hasRamTile && shot.hasVramTile && shot.hasThermalTile) {
+            result.ok(`${label} 3 big-number tiles present (RAM / VRAM / THERMAL)`);
+        } else {
+            result.fail(
+                `${label} tile(s) missing: RAM=${shot.hasRamTile} VRAM=${shot.hasVramTile} THERMAL=${shot.hasThermalTile}`,
+            );
+        }
+
+        if (extra && extra.expectVramUnmeasured) {
+            if (shot.vramUnmeasured && shot.vramText === '—') {
+                result.ok(
+                    `${label} VRAM UNMEASURED honesty at kiosk scale: "—" + data-testid-unmeasured (NOT "0%")`,
+                );
+            } else {
+                result.fail(
+                    `${label} VRAM unmeasured discriminator broke: unmeasured=${shot.vramUnmeasured}, text="${shot.vramText}" — expected "—" (NOT the "0%" trap)`,
+                );
+            }
+            if (shot.vramText === '0%' || shot.vramText === '0') {
+                result.fail(
+                    `${label} VRAM shows "${shot.vramText}" — the very "0% on a wall" the honesty discriminator forbids`,
+                );
+            }
+        }
+        if (extra && extra.expectVramMeasured) {
+            if (!shot.vramUnmeasured && /\d+%/.test(shot.vramText)) {
+                result.ok(
+                    `${label} VRAM measured tile shows numeric % ("${shot.vramText}")`,
+                );
+            } else {
+                result.fail(
+                    `${label} VRAM measured tile missing numeric %: unmeasured=${shot.vramUnmeasured}, text="${shot.vramText}"`,
+                );
+            }
+        }
+
+        if (shot.interactiveNodes === 0) {
+            result.ok(
+                `${label} no-interaction confirmed (0 buttons/links/inputs inside KioskView)`,
+            );
+        } else {
+            result.fail(
+                `${label} glance-only invariant violated: ${shot.interactiveNodes} interactive node(s) inside KioskView. Kiosk is read-only per §1.2.`,
+            );
+        }
+
+        if (!shot.dashLeak) {
+            result.ok(`${label} dashboard content not leaking into kiosk`);
+        } else {
+            result.fail(
+                `${label} dashboard's "AI Workloads" heading leaking into kiosk`,
+            );
+        }
+
+        const eachKeyConsole = consoleMessages.filter(
+            (m) =>
+                (m.type === 'warning' || m.type === 'error') &&
+                isEachKeyDuplicateSignal(m.text),
+        );
+        const eachKeyThrows = pageErrors.filter((msg) =>
+            isEachKeyDuplicateSignal(msg),
+        );
+        const anyEachKey = eachKeyConsole.length + eachKeyThrows.length;
+        if (anyEachKey === 0) {
+            result.ok(`${label} no each_key duplicate signals`);
+        } else {
+            result.fail(
+                `${label} each_key duplicate signal(s) detected (${anyEachKey})`,
+            );
+        }
+
+        const otherErrors = pageErrors.filter(
+            (msg) => !isEachKeyDuplicateSignal(msg),
+        );
+        if (otherErrors.length === 0) {
+            result.ok(`${label} no unexpected page errors`);
+        } else {
+            result.fail(
+                `${label} unexpected pageerror(s): ${JSON.stringify(otherErrors)}`,
+            );
+        }
+        await page.close();
+    }
+
+    await probe('F6_kiosk_all_criticals', 'critical', {
+        expectVramMeasured: true,
+    });
+    await probe('F1_dense_colliding_names', 'healthy', {
+        expectVramUnmeasured: true,
+    });
+    await probe('F2_duplicate_label_thermals', 'healthy', {
+        expectVramUnmeasured: true,
+    });
+
+    // Auto-hc default: bookmarking `?mode=kiosk` on a fresh session
+    // must default the theme to hc (legibility from distance, per §4.3).
+    const page = await browser.newPage();
+    await page.setRequestInterception(true);
+    page.on('request', (req) => {
+        const u = new URL(req.url());
+        if (!u.pathname.startsWith('/api/')) return req.continue();
+        const j = (obj) =>
+            req.respond({
+                status: 200,
+                contentType: 'application/json; charset=utf-8',
+                body: JSON.stringify(obj),
+            });
+        if (u.pathname === '/api/snapshot')
+            return j({
+                tick: 1,
+                server_time: '2026-06-17T20:00:00Z',
+                mission: { workloads: 0, degraded: 0 },
+                vitals: {
+                    memory_pct: 12,
+                    memory_used_mb: 2400,
+                    memory_total_mb: 20000,
+                    load_average: [0, 0, 0],
+                    cpu_count: 12,
+                    process_count: 200,
+                    gpu: null,
+                    thermal_zones: [],
+                },
+                workloads: [],
+                activity: [],
+                alerts: [],
+            });
+        if (u.pathname === '/api/health') return j({ ok: true });
+        if (u.pathname === '/api/history') return j({ events: [], dead_pids: [] });
+        req.respond({ status: 404 });
+    });
+    await page.goto(`${url}/?mode=kiosk`, {
+        waitUntil: 'networkidle2',
+        timeout: 15000,
+    });
+    await new Promise((r) => setTimeout(r, 400));
+    const bodyClass = await page.evaluate(() => document.body.className);
+    if (bodyClass.includes('theme-hc')) {
+        result.ok(
+            `[kiosk:auto-hc] fresh ?mode=kiosk load defaults theme to high-contrast (body.className="${bodyClass}")`,
+        );
+    } else {
+        result.fail(
+            `[kiosk:auto-hc] fresh ?mode=kiosk load did NOT default to high-contrast — body.className="${bodyClass}"`,
+        );
+    }
+    await page.close();
+
+    return result;
+}
+
 // ── Driver ──────────────────────────────────────────────────────────
 
 async function main() {
@@ -1053,6 +1332,12 @@ async function main() {
     historyRes.passes.forEach((p) => console.log(`   ✓ ${p}`));
     historyRes.failures.forEach((f) => console.log(`   ✗ ${f}`));
     results.push({ name: 'D101_history_mode', ...historyRes.summarize() });
+
+    console.log(`\n▶ D102 — KIOSK mode (?mode=kiosk, glance-only)`);
+    const kioskRes = await runKioskModeGate(browser, url);
+    kioskRes.passes.forEach((p) => console.log(`   ✓ ${p}`));
+    kioskRes.failures.forEach((f) => console.log(`   ✗ ${f}`));
+    results.push({ name: 'D102_kiosk_mode', ...kioskRes.summarize() });
 
     await browser.close();
     server.close();

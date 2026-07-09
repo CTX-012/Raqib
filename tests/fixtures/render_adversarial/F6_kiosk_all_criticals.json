@@ -1,0 +1,106 @@
+{
+  "tick": 99999,
+  "server_time": "2026-06-17T22:15:00Z",
+  "mission": {
+    "workloads": 3,
+    "degraded": 3
+  },
+  "vitals": {
+    "memory_pct": 98.0,
+    "memory_used_mb": 19600,
+    "memory_total_mb": 20000,
+    "load_average": [7.8, 8.2, 7.9],
+    "cpu_count": 12,
+    "process_count": 320,
+    "gpu": {
+      "vram_pct": 99.0,
+      "vram_used_mb": 11880,
+      "vram_total_mb": 12000,
+      "device_count": 1
+    },
+    "thermal_zones": [
+      { "label": "acpitz", "temp_celsius": 95.0, "severity": "red" },
+      { "label": "x86_pkg_temp", "temp_celsius": 96.5, "severity": "red" }
+    ]
+  },
+  "workloads": [
+    {
+      "pid": 8001,
+      "name": "ollama_serve",
+      "model_name": "llama3-70b",
+      "category": "AI",
+      "workload_category": "llm",
+      "cpu_pct": 380.0,
+      "rss_mb": 14200,
+      "ram_pct": 71.0,
+      "vram_mb": 11800,
+      "tokens_per_sec": 42.1,
+      "fps": null,
+      "activity_state": "active",
+      "first_observed_at_secs_ago": 1200,
+      "vram_unmeasured": false,
+      "status": "critical",
+      "alerts": ["vram_pressure"]
+    },
+    {
+      "pid": 8002,
+      "name": "vllm_serve",
+      "model_name": "phi3-mini",
+      "category": "AI",
+      "workload_category": "llm",
+      "cpu_pct": 260.0,
+      "rss_mb": 8400,
+      "ram_pct": 42.0,
+      "vram_mb": 200,
+      "tokens_per_sec": 18.4,
+      "fps": null,
+      "activity_state": "active",
+      "first_observed_at_secs_ago": 900,
+      "vram_unmeasured": false,
+      "status": "critical",
+      "alerts": ["ram_pressure"]
+    },
+    {
+      "pid": 8003,
+      "name": "yolo_infer",
+      "model_name": "yolov8x",
+      "category": "AI",
+      "workload_category": "vision",
+      "cpu_pct": 180.0,
+      "rss_mb": 3200,
+      "ram_pct": 16.0,
+      "vram_mb": 900,
+      "tokens_per_sec": null,
+      "fps": 12.4,
+      "activity_state": "active",
+      "first_observed_at_secs_ago": 700,
+      "vram_unmeasured": false,
+      "status": "attention",
+      "alerts": []
+    }
+  ],
+  "activity": [],
+  "alerts": [
+    {
+      "alert_id": "vram_pressure",
+      "pid": 8001,
+      "workload_name": "ollama_serve",
+      "severity": "critical",
+      "text": "VRAM at 99% — llama3-70b (PID 8001) — kill armed"
+    },
+    {
+      "alert_id": "ram_pressure",
+      "pid": null,
+      "workload_name": "",
+      "severity": "critical",
+      "text": "RAM at 98% — system-wide"
+    },
+    {
+      "alert_id": "thermal_pressure",
+      "pid": null,
+      "workload_name": "",
+      "severity": "critical",
+      "text": "Thermal at 96.5°C — x86_pkg_temp"
+    }
+  ]
+}

@@ -31,19 +31,23 @@
     // deliberate, single-home-per-component change, not a
     // regression. See docs/PHASE5_DISPLAY_MODES_DESIGN.md §1.2.
     import HistoryView from './views/HistoryView.svelte';
+    // v1.3.2 / DISPATCH 102 / PHASE 5 display modes step 3 —
+    // KIOSK view. Glance-only wall monitor: overall severity +
+    // big-number tiles, no interaction. Auto-hc default when
+    // `?mode=kiosk` is loaded from URL (see lib/mode_url.ts).
+    import KioskView from './views/KioskView.svelte';
     import ModePlaceholder from './components/ModePlaceholder.svelte';
 
     // v1.3.2 / DISPATCH 100 — the step each placeholder mode's real
     // view lands in (per PHASE5_DISPLAY_MODES_DESIGN.md §7).
-    // v1.3.2 / DISPATCH 101 — `history` dropped from this map (its
-    // real view landed as HistoryView in this step). Remaining
+    // v1.3.2 / DISPATCH 102 — `kiosk` dropped from this map too;
+    // its real view (KioskView) lands in this step. Remaining
     // placeholders track their real-view landing step per
     // docs/PHASE5_DISPLAY_MODES_DESIGN.md §7.
     const PLACEHOLDER_STEP: Record<
-        'kiosk' | 'timeline' | 'focus',
+        'timeline' | 'focus',
         string
     > = {
-        kiosk: 'step 3',
         timeline: 'step 4',
         focus: 'step 5',
     };
@@ -180,7 +184,7 @@
     {:else if $mode === 'history'}
         <HistoryView />
     {:else if $mode === 'kiosk'}
-        <ModePlaceholder mode="kiosk" step={PLACEHOLDER_STEP.kiosk} />
+        <KioskView />
     {:else if $mode === 'timeline'}
         <ModePlaceholder mode="timeline" step={PLACEHOLDER_STEP.timeline} />
     {:else if $mode === 'focus'}

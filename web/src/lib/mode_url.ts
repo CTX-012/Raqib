@@ -15,7 +15,7 @@
 //                     other params)
 
 import { get } from 'svelte/store';
-import { coerceMode, focusPid, mode, type ModeName } from './stores';
+import { coerceMode, focusPid, mode, theme, type ModeName } from './stores';
 
 /**
  * Parse the current URL and seed the stores. Called once at mount.
@@ -89,6 +89,21 @@ export function installModeUrlSync(): () => void {
 
     // 1. Seed stores from the URL on mount.
     readFromUrl();
+
+    // 1b. v1.3.2 / DISPATCH 102 — kiosk auto-high-contrast default.
+    //     PHASE5_DISPLAY_MODES_DESIGN.md §4.3: when `?mode=kiosk` is
+    //     bookmarked (wall monitor use case), the fresh-session theme
+    //     defaults to `hc` for legibility across a room. Fires ONCE
+    //     at mount ONLY — subsequent mode switches (dropdown, popstate)
+    //     do NOT re-apply, so the operator's later theme choice
+    //     sticks. The check is deliberately naive (URL param on mount);
+    //     if the URL says kiosk right now, hc is the safer default.
+    if (typeof window !== 'undefined') {
+        const initialParams = new URLSearchParams(window.location.search);
+        if (initialParams.get('mode') === 'kiosk') {
+            theme.set('hc');
+        }
+    }
 
     // 2. Any store change → push to URL. `get(...)` at write time
     //    picks up the latest values without a fresh subscribe.

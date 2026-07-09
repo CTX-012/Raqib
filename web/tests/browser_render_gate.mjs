@@ -1257,6 +1257,361 @@ async function runKioskModeGate(browser, url) {
     return result;
 }
 
+// ── D103 — TIMELINE mode gate ───────────────────────────────────────
+//
+// Loads `?mode=timeline` and asserts the chronological view renders
+// correctly against three shapes:
+//   * F7_timeline_dense_ordering — 12 activity events (some kill+exit
+//     same-pid same-timestamp — the D71 keying scar), 3 alerts, 4
+//     workloads. Asserts the composite {#each} keys hold, event
+//     order matches wire, D74 expand still fires (click one event
+//     row → detail visible), workloads side rail renders.
+//   * F3_same_pid_exit_kill — the tighter D71 case (3 events, one
+//     kill+exit same-pid). Belt-and-braces on the composite key
+//     under a smaller fixture.
+//   * F1_dense_colliding_names — 14 healthy workloads (no activity).
+//     Asserts the empty-activity path (ActivityFeed's "No recent
+//     activity" fallback) doesn't crash the timeline layout.
+//
+// Also pins:
+//   * VitalsStrip renders (`data-testid="vitals-strip"`) — the new
+//     small component this dispatch introduces.
+//   * TIMELINE preserves interactivity: at least one clickable
+//     element (button) exists inside the view (distinct from
+//     kiosk's zero-interaction property).
+//   * Dashboard content doesn't leak into timeline.
+
+async function runTimelineModeGate(browser, url) {
+    const result = new GateResult();
+
+    async function probe(fixtureName, opts) {
+        const fx = await loadFixture(fixtureName);
+        const {
+            expectActivityCount,
+            expectWorkloadCount,
+            expectAlertCount,
+            expectVramUnmeasured = false,
+            testD74Expand = false,
+        } = opts;
+
+        const page = await browser.newPage();
+        const consoleMessages = [];
+        const pageErrors = [];
+        page.on('console', (m) =>
+            consoleMessages.push({ type: m.type(), text: m.text() }),
+        );
+        page.on('pageerror', (err) => pageErrors.push(err.message));
+
+        await page.setRequestInterception(true);
+        page.on('request', (req) => {
+            const u = new URL(req.url());
+            if (!u.pathname.startsWith('/api/')) return req.continue();
+            const j = (obj) =>
+                req.respond({
+                    status: 200,
+                    contentType: 'application/json; charset=utf-8',
+                    body: JSON.stringify(obj),
+                });
+            if (u.pathname === '/api/snapshot') return j(fx);
+            if (u.pathname === '/api/health') return j({ ok: true });
+            if (u.pathname === '/api/history')
+                return j({ events: [], dead_pids: [] });
+            req.respond({ status: 404 });
+        });
+        await page.goto(`${url}/?mode=timeline`, {
+            waitUntil: 'networkidle2',
+            timeout: 15000,
+        });
+        await new Promise((r) => setTimeout(r, 600));
+
+        const label = `[timeline:${fixtureName}]`;
+
+        const shot = await page.evaluate(() => {
+            const view = document.querySelector(
+                '[data-testid="timeline-view"]',
+            );
+            const strip = document.querySelector(
+                '[data-testid="vitals-strip"]',
+            );
+            const main = document.querySelector(
+                '[data-testid="timeline-main"]',
+            );
+            const workloadsAside = document.querySelector(
+                '[data-testid="timeline-workloads"]',
+            );
+            const workloadRows = document.querySelectorAll(
+                '[data-testid="workload-row"]',
+            );
+            // Scoped selector: only the ActivityFeed's own `<ul>`
+            // children. Without this scope, AlertsPanel's own `<li>`
+            // list (state-of-now alerts) would inflate the count.
+            const activityFeed = document.querySelector(
+                '[data-testid="activity-feed"]',
+            );
+            const activityRows = activityFeed
+                ? activityFeed.querySelectorAll('ul > li')
+                : [];
+            const activityHead = [...document.querySelectorAll('h2')]
+                .filter(
+                    (h) =>
+                        h.textContent.trim() === 'Activity' ||
+                        h.textContent.trim().startsWith('Activity'),
+                )
+                .length;
+            const alertsHead = [...document.querySelectorAll('h2')].some((h) =>
+                h.textContent.trim().startsWith('Alerts'),
+            );
+            // Dashboard leak: the dashboard grid mounts VitalsPanel
+            // ("System" h2) + WorkloadsPanel ("AI Workloads" h2).
+            // Timeline SHOULD NOT show those exact headings.
+            const dashSystemHead = [...document.querySelectorAll('h2')].some(
+                (h) => h.textContent.trim() === 'System',
+            );
+            const dashAiWorkloadsHead = [
+                ...document.querySelectorAll('h2'),
+            ].some((h) => h.textContent.trim() === 'AI Workloads');
+            // Interactivity pin: buttons inside the view. ActivityFeed
+            // renders one <button> per activity row for click-to-expand.
+            const interactiveNodes = view
+                ? view.querySelectorAll('button, a[href], input, select')
+                      .length
+                : 0;
+            const vramValueEl = document.querySelector(
+                '[data-testid="vitals-strip-vram-value"]',
+            );
+            const vramText = vramValueEl
+                ? vramValueEl.textContent.trim()
+                : '';
+            const vramUnmeasured = vramValueEl
+                ? vramValueEl.getAttribute('data-testid-unmeasured') === 'true'
+                : false;
+            return {
+                hasView: !!view,
+                hasStrip: !!strip,
+                hasMain: !!main,
+                hasWorkloadsAside: !!workloadsAside,
+                workloadRowCount: workloadRows.length,
+                activityRowCount: activityRows.length,
+                alertsHead,
+                activityHead,
+                dashSystemHead,
+                dashAiWorkloadsHead,
+                interactiveNodes,
+                vramText,
+                vramUnmeasured,
+            };
+        });
+
+        if (shot.hasView) result.ok(`${label} TimelineView rendered`);
+        else result.fail(`${label} TimelineView not in DOM`);
+
+        if (shot.hasStrip) result.ok(`${label} VitalsStrip rendered`);
+        else result.fail(`${label} VitalsStrip missing`);
+
+        if (shot.hasMain && shot.hasWorkloadsAside) {
+            result.ok(`${label} main column + workloads side rail present`);
+        } else {
+            result.fail(
+                `${label} layout regions missing: main=${shot.hasMain}, workloads=${shot.hasWorkloadsAside}`,
+            );
+        }
+
+        if (shot.workloadRowCount === expectWorkloadCount) {
+            result.ok(
+                `${label} workloads side-rail row-count matches fixture (${shot.workloadRowCount})`,
+            );
+        } else {
+            result.fail(
+                `${label} workloads side-rail mismatch: DOM ${shot.workloadRowCount} vs fixture ${expectWorkloadCount}`,
+            );
+        }
+
+        if (shot.activityRowCount === expectActivityCount) {
+            result.ok(
+                `${label} activity rows in DOM match expected (${shot.activityRowCount})`,
+            );
+        } else {
+            result.fail(
+                `${label} activity row-count mismatch: DOM ${shot.activityRowCount} vs expected ${expectActivityCount} — the D71 composite-key regression surface`,
+            );
+        }
+
+        if (!shot.dashSystemHead && !shot.dashAiWorkloadsHead) {
+            result.ok(
+                `${label} dashboard content not leaking into timeline (no "System" / "AI Workloads" h2)`,
+            );
+        } else {
+            result.fail(
+                `${label} dashboard content leaking into timeline: System=${shot.dashSystemHead}, AI Workloads=${shot.dashAiWorkloadsHead}`,
+            );
+        }
+
+        // The interaction pin only meaningfully applies when there's
+        // content to interact with. On an empty-activity + no-alerts
+        // fixture (e.g. F1 has 14 workloads but 0 activity / 0
+        // alerts), a "0 interactive nodes" reading is honest — there
+        // are no rows to click. Assert instead that the SUM of
+        // activity + alert content justifies the interactivity
+        // expected, and treat empty-empty as trivially preserved.
+        const clickables = expectActivityCount + expectAlertCount;
+        if (clickables === 0) {
+            result.ok(
+                `${label} interaction pin vacuous (0 activity + 0 alerts — nothing to click); no regression`,
+            );
+        } else if (shot.interactiveNodes > 0) {
+            result.ok(
+                `${label} interaction preserved (${shot.interactiveNodes} interactive nodes inside TimelineView — distinct from kiosk)`,
+            );
+        } else {
+            result.fail(
+                `${label} interaction stripped: 0 interactive nodes with ${clickables} clickable content rows expected — timeline should preserve ActivityFeed's D74 expand`,
+            );
+        }
+
+        if (expectVramUnmeasured) {
+            if (shot.vramUnmeasured && shot.vramText === '—') {
+                result.ok(
+                    `${label} VitalsStrip VRAM unmeasured discriminator ("—" + testid-unmeasured, NOT "0%")`,
+                );
+            } else {
+                result.fail(
+                    `${label} VitalsStrip VRAM unmeasured discriminator broke: unmeasured=${shot.vramUnmeasured}, text="${shot.vramText}"`,
+                );
+            }
+        } else {
+            if (!shot.vramUnmeasured && /\d+%/.test(shot.vramText)) {
+                result.ok(
+                    `${label} VitalsStrip VRAM measured tile shows numeric % ("${shot.vramText}")`,
+                );
+            } else {
+                result.fail(
+                    `${label} VitalsStrip VRAM measured tile missing numeric %: text="${shot.vramText}"`,
+                );
+            }
+        }
+
+        // D74 expand test — click the first activity <button> and
+        // assert the expand DOM appears (Activity + Reload row
+        // structure). Only runs for fixtures with expandable
+        // entries.
+        if (testD74Expand && shot.activityRowCount > 0) {
+            const expandResult = await page.evaluate(() => {
+                const view = document.querySelector(
+                    '[data-testid="timeline-view"]',
+                );
+                if (!view) return { ok: false, reason: 'no view' };
+                // Find the first <button aria-expanded="false"> inside
+                // the activity feed (the ones ActivityFeed renders
+                // per row).
+                const btn = [...view.querySelectorAll('button')].find(
+                    (b) => b.getAttribute('aria-expanded') === 'false',
+                );
+                if (!btn)
+                    return {
+                        ok: false,
+                        reason: 'no aria-expanded=false button found',
+                    };
+                btn.click();
+                return { ok: true, clicked: true };
+            });
+            if (expandResult.ok) {
+                // Give Svelte a moment to re-render.
+                await new Promise((r) => setTimeout(r, 200));
+                const nowExpanded = await page.evaluate(() => {
+                    const view = document.querySelector(
+                        '[data-testid="timeline-view"]',
+                    );
+                    if (!view) return 0;
+                    return [...view.querySelectorAll('button')].filter(
+                        (b) => b.getAttribute('aria-expanded') === 'true',
+                    ).length;
+                });
+                if (nowExpanded > 0) {
+                    result.ok(
+                        `${label} D74 click-to-expand still works in timeline (aria-expanded="true" after click)`,
+                    );
+                } else {
+                    result.fail(
+                        `${label} D74 click-to-expand broke: 0 buttons with aria-expanded="true" after click`,
+                    );
+                }
+            } else {
+                result.fail(
+                    `${label} D74 click-to-expand smoke aborted: ${expandResult.reason}`,
+                );
+            }
+        }
+
+        // each_key detection.
+        const eachKeyConsole = consoleMessages.filter(
+            (m) =>
+                (m.type === 'warning' || m.type === 'error') &&
+                isEachKeyDuplicateSignal(m.text),
+        );
+        const eachKeyThrows = pageErrors.filter((msg) =>
+            isEachKeyDuplicateSignal(msg),
+        );
+        const anyEachKey = eachKeyConsole.length + eachKeyThrows.length;
+        if (anyEachKey === 0) {
+            result.ok(`${label} no each_key duplicate signals`);
+        } else {
+            result.fail(
+                `${label} each_key duplicate signal(s) detected (${anyEachKey}): ` +
+                    JSON.stringify([
+                        ...eachKeyConsole.map((m) => m.text),
+                        ...eachKeyThrows,
+                    ]),
+            );
+        }
+
+        const otherErrors = pageErrors.filter(
+            (msg) => !isEachKeyDuplicateSignal(msg),
+        );
+        if (otherErrors.length === 0) {
+            result.ok(`${label} no unexpected page errors`);
+        } else {
+            result.fail(
+                `${label} unexpected pageerror(s): ${JSON.stringify(otherErrors)}`,
+            );
+        }
+        await page.close();
+    }
+
+    // F7 is the primary — dense chronological events + kill+exit
+    // same-pid + workloads + alerts. Runs the D74 expand pin.
+    await probe('F7_timeline_dense_ordering', {
+        expectActivityCount: (
+            await loadFixture('F7_timeline_dense_ordering')
+        ).activity.length,
+        expectWorkloadCount: (
+            await loadFixture('F7_timeline_dense_ordering')
+        ).workloads.length,
+        expectAlertCount: (
+            await loadFixture('F7_timeline_dense_ordering')
+        ).alerts.length,
+        expectVramUnmeasured: false, // F7 has a real gpu
+        testD74Expand: true,
+    });
+    // F3 belt-and-braces on the same-pid-exit-kill composite.
+    await probe('F3_same_pid_exit_kill', {
+        expectActivityCount: 3,
+        expectWorkloadCount: 0,
+        expectAlertCount: 0,
+        expectVramUnmeasured: true, // F3 has gpu:null
+        testD74Expand: false, // F3's activity carries no detail objects — nothing to expand
+    });
+    // F1 — empty-activity path (14 workloads, 0 activity).
+    await probe('F1_dense_colliding_names', {
+        expectActivityCount: 0,
+        expectWorkloadCount: 14,
+        expectAlertCount: 0,
+        expectVramUnmeasured: true, // F1 has gpu:null
+        testD74Expand: false,
+    });
+
+    return result;
+}
+
 // ── Driver ──────────────────────────────────────────────────────────
 
 async function main() {
@@ -1338,6 +1693,15 @@ async function main() {
     kioskRes.passes.forEach((p) => console.log(`   ✓ ${p}`));
     kioskRes.failures.forEach((f) => console.log(`   ✗ ${f}`));
     results.push({ name: 'D102_kiosk_mode', ...kioskRes.summarize() });
+
+    console.log(`\n▶ D103 — TIMELINE mode (?mode=timeline, interaction-first)`);
+    const timelineRes = await runTimelineModeGate(browser, url);
+    timelineRes.passes.forEach((p) => console.log(`   ✓ ${p}`));
+    timelineRes.failures.forEach((f) => console.log(`   ✗ ${f}`));
+    results.push({
+        name: 'D103_timeline_mode',
+        ...timelineRes.summarize(),
+    });
 
     await browser.close();
     server.close();

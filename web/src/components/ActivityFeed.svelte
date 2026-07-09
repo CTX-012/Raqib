@@ -157,7 +157,10 @@
     }
 </script>
 
-<div class="rounded border border-fg-muted/30 p-4 bg-bg-raised/40">
+<div
+    class="rounded border border-fg-muted/30 p-4 bg-bg-raised/40"
+    data-testid="activity-feed"
+>
     <h2 class="text-fg-muted text-sm font-bold mb-3">Activity</h2>
 
     {#if activity.length === 0}

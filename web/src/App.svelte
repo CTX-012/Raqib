@@ -41,16 +41,20 @@
     // + alerts + activity + workloads side rail. Interaction-
     // first (distinct from kiosk's glance-only).
     import TimelineView from './views/TimelineView.svelte';
-    import ModePlaceholder from './components/ModePlaceholder.svelte';
+    // v1.3.2 / DISPATCH 104 / PHASE 5 display modes step 5 —
+    // FOCUS view. Single-workload deep-dive with client-buffered
+    // live sparklines. Reuses the D95 TrajectoryChart for the
+    // rolling trajectory; no new endpoint (§5.1 / §8).
+    import FocusView from './views/FocusView.svelte';
 
     // v1.3.2 / DISPATCH 100 — the step each placeholder mode's real
     // view lands in (per PHASE5_DISPLAY_MODES_DESIGN.md §7).
-    // v1.3.2 / DISPATCH 103 — `timeline` dropped from this map;
-    // TimelineView lands in this step. Only `focus` remains a
-    // placeholder (step 5).
-    const PLACEHOLDER_STEP: Record<'focus', string> = {
-        focus: 'step 5',
-    };
+    // v1.3.2 / DISPATCH 104 — PLACEHOLDER_STEP retired. Every
+    // mode from §7 (dashboard/history/kiosk/timeline/focus) now
+    // has its real view landed. ModePlaceholder.svelte remains
+    // in the components/ directory as unused code because rip-
+    // out is a separate cleanup dispatch (Chesterton's fence:
+    // future scope-6 modes might reuse the placeholder pattern).
 
     let modeUrlCleanup: (() => void) | null = null;
 
@@ -188,7 +192,7 @@
     {:else if $mode === 'timeline'}
         <TimelineView />
     {:else if $mode === 'focus'}
-        <ModePlaceholder mode="focus" step={PLACEHOLDER_STEP.focus} />
+        <FocusView />
     {/if}
 </div>
 

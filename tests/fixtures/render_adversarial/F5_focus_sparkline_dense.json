@@ -1,0 +1,101 @@
+{
+  "tick": 55555,
+  "server_time": "2026-06-17T22:30:00Z",
+  "mission": {
+    "workloads": 4,
+    "degraded": 0
+  },
+  "vitals": {
+    "memory_pct": 42.0,
+    "memory_used_mb": 8400,
+    "memory_total_mb": 20000,
+    "load_average": [1.8, 1.5, 1.2],
+    "cpu_count": 12,
+    "process_count": 240,
+    "gpu": {
+      "vram_pct": 22.0,
+      "vram_used_mb": 2640,
+      "vram_total_mb": 12000,
+      "device_count": 1
+    },
+    "thermal_zones": [
+      { "label": "acpitz", "temp_celsius": 62.0, "severity": "nominal" }
+    ]
+  },
+  "workloads": [
+    {
+      "pid": 5555,
+      "name": "vllm_serve",
+      "model_name": "phi3-mini",
+      "category": "AI",
+      "workload_category": "llm",
+      "cpu_pct": 220.0,
+      "rss_mb": 6400,
+      "ram_pct": 32.0,
+      "vram_mb": 2400,
+      "tokens_per_sec": 42.1,
+      "fps": null,
+      "activity_state": "active",
+      "first_observed_at_secs_ago": 1800,
+      "vram_unmeasured": false,
+      "status": "healthy",
+      "alerts": []
+    },
+    {
+      "pid": 5556,
+      "name": "ollama_serve",
+      "model_name": "llama3-8b",
+      "category": "AI",
+      "workload_category": "llm",
+      "cpu_pct": 120.0,
+      "rss_mb": 3200,
+      "ram_pct": 16.0,
+      "vram_mb": 240,
+      "tokens_per_sec": 15.2,
+      "fps": null,
+      "activity_state": "idle",
+      "first_observed_at_secs_ago": 900,
+      "vram_unmeasured": false,
+      "status": "healthy",
+      "alerts": []
+    },
+    {
+      "pid": 5557,
+      "name": "yolo_infer",
+      "model_name": "yolov8n",
+      "category": "AI",
+      "workload_category": "vision",
+      "cpu_pct": 45.0,
+      "rss_mb": 1100,
+      "ram_pct": 5.5,
+      "vram_mb": null,
+      "tokens_per_sec": null,
+      "fps": 24.0,
+      "activity_state": "active",
+      "first_observed_at_secs_ago": 400,
+      "vram_unmeasured": true,
+      "status": "healthy",
+      "alerts": []
+    },
+    {
+      "pid": 5558,
+      "name": "ros2_bridge",
+      "model_name": null,
+      "category": "AI",
+      "workload_category": "ros2",
+      "cpu_pct": 8.0,
+      "rss_mb": 320,
+      "ram_pct": 1.6,
+      "vram_mb": null,
+      "tokens_per_sec": null,
+      "fps": null,
+      "activity_state": "idle",
+      "first_observed_at_secs_ago": 3600,
+      "vram_unmeasured": true,
+      "status": "healthy",
+      "alerts": []
+    }
+  ],
+  "activity": [],
+  "alerts": []
+}

@@ -1612,6 +1612,465 @@ async function runTimelineModeGate(browser, url) {
     return result;
 }
 
+// ── D104 — FOCUS mode gate ──────────────────────────────────────────
+//
+// Loads `?mode=focus&pid=N` against the F5 fixture and asserts:
+//   * FocusView renders the header + tiles + chart for the selected
+//     workload
+//   * Client-buffered sparkline grows with successive polls (a
+//     second load ~1.2s later has ≥1 sample; short probe stays
+//     realistic — the SPA polls at 1 Hz)
+//   * VRAM UNMEASURED discriminator at the tile scale ("—" +
+//     data-testid-unmeasured, not "0 MB") when the fixture's
+//     focused workload has vram_mb=null (PID 5557 in F5)
+//   * PID-gone graceful (?mode=focus&pid=999999) → the
+//     `focus-notfound` block, not a crash
+//   * No-pid graceful (?mode=focus with no &pid=) → the `focus-nopid`
+//     block, picker still shown
+//   * Picker side rail lists live workloads with per-row testids
+//   * No each_key_duplicate signals anywhere
+//   * No unexpected pageerrors
+
+async function runFocusModeGate(browser, url) {
+    const result = new GateResult();
+
+    // ── (1) F5 focused on the primary VRAM-measured workload ─────
+    {
+        const fx = await loadFixture('F5_focus_sparkline_dense');
+        const focusedPid = 5555; // vllm_serve, gpu-backed
+        const page = await browser.newPage();
+        const consoleMessages = [];
+        const pageErrors = [];
+        page.on('console', (m) =>
+            consoleMessages.push({ type: m.type(), text: m.text() }),
+        );
+        page.on('pageerror', (err) => pageErrors.push(err.message));
+
+        // Serve a series of snapshots with monotonically-incrementing
+        // ticks so FocusView's rolling buffer sees NEW ticks on each
+        // poll (its de-dup guard bails when snap.tick === lastTick).
+        let serveCount = 0;
+        await page.setRequestInterception(true);
+        page.on('request', (req) => {
+            const u = new URL(req.url());
+            if (!u.pathname.startsWith('/api/')) return req.continue();
+            const j = (obj) =>
+                req.respond({
+                    status: 200,
+                    contentType: 'application/json; charset=utf-8',
+                    body: JSON.stringify(obj),
+                });
+            if (u.pathname === '/api/snapshot') {
+                serveCount += 1;
+                return j({
+                    ...fx,
+                    tick: fx.tick + serveCount,
+                    server_time: new Date(
+                        Date.parse(fx.server_time) + serveCount * 1000,
+                    ).toISOString(),
+                });
+            }
+            if (u.pathname === '/api/health') return j({ ok: true });
+            if (u.pathname === '/api/history')
+                return j({ events: [], dead_pids: [] });
+            req.respond({ status: 404 });
+        });
+
+        await page.goto(`${url}/?mode=focus&pid=${focusedPid}`, {
+            waitUntil: 'networkidle2',
+            timeout: 15000,
+        });
+        // First poll lands on onMount; wait long enough for at least
+        // 2-3 more 1 Hz polls so the buffer has multiple samples.
+        await new Promise((r) => setTimeout(r, 2600));
+
+        const shot = await page.evaluate(() => {
+            const view = document.querySelector('[data-testid="focus-view"]');
+            const header = document.querySelector(
+                '[data-testid="focus-header"]',
+            );
+            const name = document
+                .querySelector('[data-testid="focus-name"]')
+                ?.textContent.trim();
+            const status = document
+                .querySelector('[data-testid="focus-status"]')
+                ?.textContent.trim();
+            const tiles = document.querySelector(
+                '[data-testid="focus-tiles"]',
+            );
+            const chart = document.querySelector(
+                '[data-testid="focus-chart"]',
+            );
+            const svg = chart?.querySelector('svg[role="img"]');
+            // The D95 chart shows "N samples" in the header when
+            // trajectory has samples; count via its header text.
+            const chartHeaderText = chart
+                ? chart.textContent.trim()
+                : '';
+            const bufferMatch = chartHeaderText.match(/(\d+)\s+sample/);
+            const bufferSampleCount = bufferMatch
+                ? Number(bufferMatch[1])
+                : 0;
+            const vramValue = document
+                .querySelector('[data-testid="focus-vram-value"]')
+                ?.textContent.trim();
+            const vramUnmeasured = document
+                .querySelector('[data-testid="focus-vram-value"]')
+                ?.getAttribute('data-testid-unmeasured') === 'true';
+            const pickerRows = document.querySelectorAll(
+                '[data-testid="focus-picker-row"]',
+            );
+            const focusedPickerActive = [
+                ...pickerRows,
+            ].filter((el) =>
+                el.className.includes('picker-row--active'),
+            ).length;
+            return {
+                hasView: !!view,
+                hasHeader: !!header,
+                hasName: !!name,
+                nameText: name,
+                statusText: status,
+                hasTiles: !!tiles,
+                hasChart: !!chart,
+                hasSvg: !!svg,
+                bufferSampleCount,
+                vramValue,
+                vramUnmeasured,
+                pickerRowCount: pickerRows.length,
+                focusedPickerActive,
+            };
+        });
+
+        const label = `[focus:F5:pid=${focusedPid}]`;
+
+        if (shot.hasView) result.ok(`${label} FocusView rendered`);
+        else result.fail(`${label} FocusView not in DOM`);
+
+        if (shot.hasHeader && shot.hasTiles && shot.hasChart) {
+            result.ok(
+                `${label} header + tiles + chart all rendered`,
+            );
+        } else {
+            result.fail(
+                `${label} layout regions missing: header=${shot.hasHeader}, tiles=${shot.hasTiles}, chart=${shot.hasChart}`,
+            );
+        }
+
+        if (shot.nameText && shot.nameText.length > 0) {
+            result.ok(
+                `${label} workload name rendered ("${shot.nameText}")`,
+            );
+        } else {
+            result.fail(`${label} workload name blank`);
+        }
+
+        // The focused PID is measured (vram_mb=2400). Tile should
+        // show a real number, not the dash.
+        if (
+            !shot.vramUnmeasured &&
+            /\d+\s*MB/.test(shot.vramValue ?? '')
+        ) {
+            result.ok(
+                `${label} VRAM tile shows measured value ("${shot.vramValue}")`,
+            );
+        } else {
+            result.fail(
+                `${label} VRAM tile should show measured MB — got value="${shot.vramValue}", unmeasured=${shot.vramUnmeasured}`,
+            );
+        }
+
+        // After ~2.6s of polling at 1 Hz the buffer should have
+        // multiple samples. We check ≥2 so a slow CI still passes.
+        if (shot.bufferSampleCount >= 2) {
+            result.ok(
+                `${label} rolling buffer accumulated (${shot.bufferSampleCount} samples after ~2.6s of 1 Hz polling)`,
+            );
+        } else {
+            result.fail(
+                `${label} buffer failed to accumulate: got ${shot.bufferSampleCount} samples after ~2.6s — expected ≥2. Client-buffering (§5.1) may have regressed`,
+            );
+        }
+
+        if (shot.hasSvg) {
+            result.ok(`${label} D95 TrajectoryChart SVG present`);
+        } else {
+            result.fail(
+                `${label} chart SVG missing — buffer had samples but chart didn't render`,
+            );
+        }
+
+        // Picker: F5 has 4 workloads; the focused one gets the
+        // active class.
+        if (shot.pickerRowCount === 4) {
+            result.ok(
+                `${label} picker lists all 4 workloads`,
+            );
+        } else {
+            result.fail(
+                `${label} picker row-count mismatch: DOM ${shot.pickerRowCount} vs fixture 4`,
+            );
+        }
+        if (shot.focusedPickerActive === 1) {
+            result.ok(
+                `${label} picker highlights exactly the focused pid`,
+            );
+        } else {
+            result.fail(
+                `${label} picker active-row count wrong: ${shot.focusedPickerActive}`,
+            );
+        }
+
+        const eachKeyConsole = consoleMessages.filter(
+            (m) =>
+                (m.type === 'warning' || m.type === 'error') &&
+                isEachKeyDuplicateSignal(m.text),
+        );
+        const eachKeyThrows = pageErrors.filter((msg) =>
+            isEachKeyDuplicateSignal(msg),
+        );
+        const anyEachKey = eachKeyConsole.length + eachKeyThrows.length;
+        if (anyEachKey === 0) {
+            result.ok(`${label} no each_key duplicate signals`);
+        } else {
+            result.fail(
+                `${label} each_key duplicate signal(s) detected (${anyEachKey})`,
+            );
+        }
+        const otherErrors = pageErrors.filter(
+            (msg) => !isEachKeyDuplicateSignal(msg),
+        );
+        if (otherErrors.length === 0) {
+            result.ok(`${label} no unexpected page errors`);
+        } else {
+            result.fail(
+                `${label} unexpected pageerror(s): ${JSON.stringify(otherErrors)}`,
+            );
+        }
+        await page.close();
+    }
+
+    // ── (2) F5 focused on an UNMEASURED-VRAM workload ────────────
+    // PID 5557 (yolo_infer) has vram_mb=null. Focus tile should
+    // show "—" with data-testid-unmeasured="true", NOT "0 MB".
+    {
+        const fx = await loadFixture('F5_focus_sparkline_dense');
+        const focusedPid = 5557;
+        const page = await browser.newPage();
+        await page.setRequestInterception(true);
+        page.on('request', (req) => {
+            const u = new URL(req.url());
+            if (!u.pathname.startsWith('/api/')) return req.continue();
+            const j = (obj) =>
+                req.respond({
+                    status: 200,
+                    contentType: 'application/json; charset=utf-8',
+                    body: JSON.stringify(obj),
+                });
+            if (u.pathname === '/api/snapshot') return j(fx);
+            if (u.pathname === '/api/health') return j({ ok: true });
+            if (u.pathname === '/api/history')
+                return j({ events: [], dead_pids: [] });
+            req.respond({ status: 404 });
+        });
+        await page.goto(`${url}/?mode=focus&pid=${focusedPid}`, {
+            waitUntil: 'networkidle2',
+            timeout: 15000,
+        });
+        await new Promise((r) => setTimeout(r, 400));
+        const shot = await page.evaluate(() => {
+            const vramValue = document
+                .querySelector('[data-testid="focus-vram-value"]')
+                ?.textContent.trim();
+            const vramUnmeasured = document
+                .querySelector('[data-testid="focus-vram-value"]')
+                ?.getAttribute('data-testid-unmeasured') === 'true';
+            return { vramValue, vramUnmeasured };
+        });
+        const label = `[focus:F5:pid=${focusedPid}]`;
+        if (shot.vramUnmeasured && shot.vramValue === '—') {
+            result.ok(
+                `${label} VRAM UNMEASURED discriminator at focus tile ("—" + testid-unmeasured, NOT "0 MB")`,
+            );
+        } else {
+            result.fail(
+                `${label} VRAM unmeasured discriminator broke: unmeasured=${shot.vramUnmeasured}, text="${shot.vramValue}"`,
+            );
+        }
+        if (
+            shot.vramValue === '0 MB' ||
+            shot.vramValue === '0' ||
+            shot.vramValue === '0MB'
+        ) {
+            result.fail(
+                `${label} VRAM tile shows "${shot.vramValue}" — the buffered-0 trap forbidden by §C3/§C4`,
+            );
+        }
+        await page.close();
+    }
+
+    // ── (3) PID-gone graceful (?mode=focus&pid=999999) ───────────
+    {
+        const fx = await loadFixture('F5_focus_sparkline_dense');
+        const page = await browser.newPage();
+        const pageErrors = [];
+        page.on('pageerror', (err) => pageErrors.push(err.message));
+        await page.setRequestInterception(true);
+        page.on('request', (req) => {
+            const u = new URL(req.url());
+            if (!u.pathname.startsWith('/api/')) return req.continue();
+            const j = (obj) =>
+                req.respond({
+                    status: 200,
+                    contentType: 'application/json; charset=utf-8',
+                    body: JSON.stringify(obj),
+                });
+            if (u.pathname === '/api/snapshot') return j(fx);
+            if (u.pathname === '/api/health') return j({ ok: true });
+            if (u.pathname === '/api/history')
+                return j({ events: [], dead_pids: [] });
+            req.respond({ status: 404 });
+        });
+        await page.goto(`${url}/?mode=focus&pid=999999`, {
+            waitUntil: 'networkidle2',
+            timeout: 15000,
+        });
+        await new Promise((r) => setTimeout(r, 400));
+        const shot = await page.evaluate(() => {
+            const notfound = document.querySelector(
+                '[data-testid="focus-notfound"]',
+            );
+            const picker = document.querySelector(
+                '[data-testid="focus-picker"]',
+            );
+            const pickerRows = document.querySelectorAll(
+                '[data-testid="focus-picker-row"]',
+            );
+            return {
+                hasNotfound: !!notfound,
+                notfoundText: notfound?.textContent.trim() ?? '',
+                hasPicker: !!picker,
+                pickerRowCount: pickerRows.length,
+            };
+        });
+        const label = `[focus:pid=999999:not-found]`;
+        if (shot.hasNotfound) {
+            result.ok(
+                `${label} graceful not-found block rendered`,
+            );
+        } else {
+            result.fail(
+                `${label} not-found block missing — the pid-gone case regressed to crash/blank`,
+            );
+        }
+        if (shot.notfoundText.includes('999999')) {
+            result.ok(
+                `${label} not-found block names the requested pid ("...${shot.notfoundText.slice(-60)}")`,
+            );
+        } else {
+            result.fail(
+                `${label} not-found block missing pid reference`,
+            );
+        }
+        if (shot.hasPicker && shot.pickerRowCount === 4) {
+            result.ok(
+                `${label} picker still shown with live workloads (${shot.pickerRowCount})`,
+            );
+        } else {
+            result.fail(
+                `${label} picker regressed: hasPicker=${shot.hasPicker}, rowCount=${shot.pickerRowCount}`,
+            );
+        }
+        if (pageErrors.length === 0) {
+            result.ok(`${label} no page errors`);
+        } else {
+            result.fail(
+                `${label} pageerror(s) on not-found path: ${JSON.stringify(pageErrors)}`,
+            );
+        }
+        await page.close();
+    }
+
+    // ── (4) NO-PID graceful (?mode=focus, no &pid=) ──────────────
+    {
+        const fx = await loadFixture('F5_focus_sparkline_dense');
+        const page = await browser.newPage();
+        const pageErrors = [];
+        page.on('pageerror', (err) => pageErrors.push(err.message));
+        await page.setRequestInterception(true);
+        page.on('request', (req) => {
+            const u = new URL(req.url());
+            if (!u.pathname.startsWith('/api/')) return req.continue();
+            const j = (obj) =>
+                req.respond({
+                    status: 200,
+                    contentType: 'application/json; charset=utf-8',
+                    body: JSON.stringify(obj),
+                });
+            if (u.pathname === '/api/snapshot') return j(fx);
+            if (u.pathname === '/api/health') return j({ ok: true });
+            if (u.pathname === '/api/history')
+                return j({ events: [], dead_pids: [] });
+            req.respond({ status: 404 });
+        });
+        await page.goto(`${url}/?mode=focus`, {
+            waitUntil: 'networkidle2',
+            timeout: 15000,
+        });
+        await new Promise((r) => setTimeout(r, 400));
+        const shot = await page.evaluate(() => {
+            const nopid = document.querySelector('[data-testid="focus-nopid"]');
+            const picker = document.querySelector(
+                '[data-testid="focus-picker"]',
+            );
+            const pickerRows = document.querySelectorAll(
+                '[data-testid="focus-picker-row"]',
+            );
+            const header = document.querySelector('[data-testid="focus-header"]');
+            return {
+                hasNopid: !!nopid,
+                hasPicker: !!picker,
+                pickerRowCount: pickerRows.length,
+                hasHeader: !!header,
+            };
+        });
+        const label = `[focus:no-pid]`;
+        if (shot.hasNopid) {
+            result.ok(`${label} graceful no-pid prompt rendered`);
+        } else {
+            result.fail(`${label} no-pid prompt missing`);
+        }
+        if (!shot.hasHeader) {
+            result.ok(
+                `${label} deep-dive header suppressed when no pid selected`,
+            );
+        } else {
+            result.fail(
+                `${label} deep-dive header leaked into no-pid state`,
+            );
+        }
+        if (shot.hasPicker && shot.pickerRowCount === 4) {
+            result.ok(
+                `${label} picker still shown so operator can select`,
+            );
+        } else {
+            result.fail(
+                `${label} picker regressed: hasPicker=${shot.hasPicker}, rowCount=${shot.pickerRowCount}`,
+            );
+        }
+        if (pageErrors.length === 0) {
+            result.ok(`${label} no page errors`);
+        } else {
+            result.fail(
+                `${label} pageerror(s) on no-pid path: ${JSON.stringify(pageErrors)}`,
+            );
+        }
+        await page.close();
+    }
+
+    return result;
+}
+
 // ── Driver ──────────────────────────────────────────────────────────
 
 async function main() {
@@ -1701,6 +2160,15 @@ async function main() {
     results.push({
         name: 'D103_timeline_mode',
         ...timelineRes.summarize(),
+    });
+
+    console.log(`\n▶ D104 — FOCUS mode (?mode=focus&pid=N, client-buffered)`);
+    const focusRes = await runFocusModeGate(browser, url);
+    focusRes.passes.forEach((p) => console.log(`   ✓ ${p}`));
+    focusRes.failures.forEach((f) => console.log(`   ✗ ${f}`));
+    results.push({
+        name: 'D104_focus_mode',
+        ...focusRes.summarize(),
     });
 
     await browser.close();

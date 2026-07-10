@@ -6,6 +6,185 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project aims to adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 once `v1.0.0` is tagged. Until then, minor versions may include breaking changes.
 
+## [Unreleased] — Phase 5 web display modes (arc close)
+
+DISPATCH 99-106. The 5-mode web dashboard arc — from a single-page
+dashboard to five URL-switchable views, each answering one distinct
+operator question. Design ratified on operator authority (D99, no
+prior spec), five modes shipped in sequence (D100-D104), the D98
+browser render gate extended to a systematic 5×7 mode×fixture
+matrix (D105, 221 assertions total), and this doc-only close
+(D106).
+
+Companion arc: Phase 5's **History subsystem** (D88-D97) landed
+earlier in this same Unreleased window — the D95 web `HistoryPage`
++ D97 TUI history-events browse are the History mode's underlying
+components. This section covers the *display modes* arc; the
+History subsystem's own entry belongs in a sibling section (not
+part of D106's scope).
+
+**Design doc:** [`docs/PHASE5_DISPLAY_MODES_DESIGN.md`](docs/PHASE5_DISPLAY_MODES_DESIGN.md)
+— promoted to SHIPPED with this release. Records all 9 §7 steps,
+the settings-A decision, and step 9's v-next deferral.
+
+### Added
+
+- **Five web display modes** switchable via `?mode=X` URL query
+  param + a header `<select>` dropdown (mirrors the theme button
+  weight). Selection persists via `history.pushState` — shareable,
+  refresh-safe, bookmark-friendly. No `localStorage` (matches the
+  D68 precedent). Invalid `?mode=X` silently falls back to
+  `dashboard` — same forgiving pattern as the theme store.
+
+  | Mode | URL | Purpose |
+  | --- | --- | --- |
+  | Dashboard | `/` (default) | "What's the whole system doing right now?" — today's grid, unchanged (D100) |
+  | Focus | `?mode=focus&pid=N` | "What's THIS workload doing under load, live?" — deep-dive + client-buffered sparklines (D104) |
+  | Timeline | `?mode=timeline` | "What happened when, in what order?" — chronological alerts + activity + workloads side rail (D103) |
+  | Kiosk | `?mode=kiosk` | "Is anything on fire right now?" — glance-only big-number wall view (D102) |
+  | History | `?mode=history` | "What happened before I got here?" — event archive + dead-PID trajectory drill-in (D101, promotes D95's HistoryPage full-viewport) |
+
+- **`mode: Writable<ModeName>` + `focusPid: Writable<number|null>`
+  stores** ([`web/src/lib/stores.ts`](web/src/lib/stores.ts)) —
+  the reactive routing layer. Ordered `MODES` tuple + `coerceMode()`
+  helper. Header dropdown iterates the tuple; App.svelte's
+  `{#if $mode === '...'}` chain routes to the view. Zero new
+  dependencies (no `svelte-spa-router`).
+
+- **URL ⇄ store sync module**
+  ([`web/src/lib/mode_url.ts`](web/src/lib/mode_url.ts)) — ~30
+  lines of Svelte reactivity: parses `?mode=/?pid=` on mount,
+  writes back via `pushState` on change (only when the URL
+  actually differs — no duplicate history entries),
+  `popstate` listener re-seeds on browser back/forward. Dashboard
+  is written as bare `/` (no redundant `?mode=dashboard`).
+
+- **Views** (~940 LoC new across five files):
+  - [`web/src/views/HistoryView.svelte`](web/src/views/HistoryView.svelte)
+    — thin full-viewport wrapper mounting D95 `HistoryPage` with
+    `alwaysOpen` (the D95 collapsible chrome is hidden; snapshot-on-open
+    fires from `onMount` instead of the toggle click).
+  - [`web/src/views/KioskView.svelte`](web/src/views/KioskView.svelte)
+    — glance-only big-severity readout. Overall severity aggregation
+    from workload / alert / thermal signals. Three big-number tiles
+    (RAM / VRAM / Thermal). Zero `<button>`s inside the view (the
+    "no interaction" invariant is pinned by D102's gate). Auto-hc
+    theme default when the page loads with `?mode=kiosk` in the URL.
+  - [`web/src/views/TimelineView.svelte`](web/src/views/TimelineView.svelte)
+    — chronological alerts + activity + workloads side rail.
+    Interaction-first (mirror of kiosk); preserves D74 click-to-expand
+    on activity entries. Separate sections (alerts + activity) since
+    `WireAlertEntry` carries no timestamp on the wire (honest shape
+    over a fabricated merge).
+  - [`web/src/views/FocusView.svelte`](web/src/views/FocusView.svelte)
+    — single-workload deep-dive with a client-buffered 60-second
+    rolling sparkline. Reuses D95 `TrajectoryChart` for the chart;
+    VRAM-gap-not-buffered-0 invariant carried through (one line:
+    `wire null → sample undefined → chart pen-lift`). Graceful
+    `focus-nopid` / `focus-notfound` / `focus-exited` states, one
+    testid each. Picker side rail with SPA-native click routing.
+  - [`web/src/components/VitalsStrip.svelte`](web/src/components/VitalsStrip.svelte)
+    — compact horizontal vitals bar (RAM · VRAM · Thermal · Load-1m)
+    that TimelineView uses instead of the full `VitalsPanel`.
+    Standalone component per design §3.1's "dedicated strip over
+    `compact` prop" lean.
+
+- **HistoryPage `alwaysOpen` prop**
+  ([`web/src/components/HistoryPage.svelte`](web/src/components/HistoryPage.svelte))
+  — the only internal change to a D95 component. Default `false`
+  keeps the collapsible behavior; `true` hides the toggle button
+  and fires `refresh()` from `onMount`. The D95 collapsible-in-dashboard
+  callsite was removed (History has its own mode now); a regression
+  pin fires if it ever leaks back.
+
+- **`data-testid` attribute on `WorkloadRow`** — one inert
+  attribute for stable D98 selection. Precedent-following (D98
+  calibration #2, established as the durable structural hook
+  across CSS refactors).
+
+- **`data-testid="activity-feed"` on `ActivityFeed`** — one inert
+  attribute so the D103 timeline gate can scope its
+  activity-row-count selector without inflation from AlertsPanel's
+  own `<li>`s.
+
+- **Adversarial fixture set** for the mode-specific browser gate:
+  - `F5_focus_sparkline_dense.json` — 4 workloads (measured +
+    unmeasured VRAM) for focus mode's picker + tile assertions
+    (D104).
+  - `F6_kiosk_all_criticals.json` — every meter at 99%, thermal at
+    95-96°C, 3 critical alerts. Asserts kiosk's aggregation lands
+    on CRITICAL (D102).
+  - `F7_timeline_dense_ordering.json` — 12 activity events (kill+exit
+    same-pid same-timestamp twice — the D71 keying scar), 3 alerts,
+    4 workloads, 2 amber thermals (D103).
+
+- **D98 browser render gate expansion**: `web/tests/browser_render_gate.mjs`
+  now runs 221 assertions across 8 sections. Per-mode probes
+  (D101-D104) test deep properties (VRAM discriminators, interaction
+  pins, snapshot-on-open, buffer accumulation, D74 expand). D105
+  adds a systematic 5×7 = 35-cell mode×fixture matrix — every mode
+  mounted against every fixture, asserting render + no
+  each_key_duplicate + no unexpected page errors. 105 baseline
+  assertions on top of the per-mode 116. Zero cross-mode gaps
+  found. Re-run: `npm --prefix web run test:browser`.
+
+### Deferred
+
+- **`/api/live/trajectory/{pid}`** — the step 9 v-next endpoint for
+  Focus mode's cross-reload sparkline persistence. Requires a
+  `ux_contract` bump (`WireLiveTrajectory`), a `SharedLiveTrajectoryView`
+  cross-thread cell mirroring `SharedHistoryView`, a fixture, and a
+  test. **Explicitly out of scope for this arc.** Ships iff
+  operators report the client-buffer reset-on-reload is unacceptable
+  in practice. CAR through Agent A required.
+
+- **Settings-in-modal (design §3.1 option B)** — the design
+  proposed promoting `SettingsPanel` to a header cog + modal
+  accessible in all modes. **Operator decided: A** — leave the
+  SettingsPanel as a dashboard collapsible. Rationale recorded in
+  the design doc's §3.1: settings = configuration, done from
+  dashboard home; monitoring modes stay monitoring; kiosk
+  correctly has no settings cog (a wall monitor shouldn't offer
+  tunable knobs).
+
+### Changed
+
+- **Dashboard no longer collapses `HistoryPage`** — the D95
+  collapsible HistoryPage was removed from the dashboard grid
+  (D101). History is its own mode now; one home per component.
+  The D100 "byte-identical dashboard" invariant intentionally
+  yielded here — the single visible dashboard diff between D100
+  and D101 is the missing HistoryPage collapsible. Everything
+  else in the dashboard (VitalsPanel / WorkloadsPanel /
+  ActivityFeed / SettingsPanel / footer) stays put.
+
+- **`ModePlaceholder.svelte`** kept in `web/src/components/` as
+  unused code after D104 retired its last consumer. Deleting
+  trailing scaffolds is a separate cleanup dispatch (Chesterton's
+  fence: a future 6th-mode dispatch might reuse the placeholder
+  pattern).
+
+### Discipline
+
+- **Zero new dependencies.** `web/package.json` is bit-identical
+  to pre-D99 aside from the D98 `puppeteer-core` devDep already
+  landed. `svelte-spa-router` explicitly avoided (30 lines of
+  reactive routing was enough).
+- **Zero `ux_contract` bumps.** Steps 1-8 of the arc are pure
+  consumer-side work; step 9 (deferred) is the only planned
+  contract touch.
+- **Zero production behavior change from D105 + D106.** The gate
+  matrix (D105) and this doc close (D106) are test/doc only —
+  `git diff` on `src/` and `web/src/` between D104 and D106 is
+  empty.
+- `cargo test --workspace` unchanged: 1180 pass throughout.
+
+### Not versioned
+
+This arc lands under **Unreleased** — no version bump. A future
+release will roll Phase 5 (History subsystem + Display modes) into
+a numbered version together.
+
 ## [1.3.2] — 2026-06-05 — Phase 4 step 3: per-workload suppression rules + web cache headers
 
 DISPATCH 57. Adds `[[workloads]]` per-workload suppression rules

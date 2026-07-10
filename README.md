@@ -93,6 +93,30 @@ need network access with auth.
 See [`edge_monitor.toml.example`](edge_monitor.toml.example) for a
 commented config file.
 
+### Web display modes
+
+The web dashboard has **five modes**, each answering one distinct
+operator question. Switch via the `mode` dropdown in the header, or
+by setting `?mode=X` in the URL (bookmarkable, refresh-safe).
+
+| Mode | URL | Purpose |
+| --- | --- | --- |
+| **Dashboard** | `/` (default) | "What's the whole system doing?" — the full grid: vitals, workloads, activity, alerts, settings |
+| **Focus** | `?mode=focus&pid=N` | "What's THIS workload doing under load?" — big-number tiles + a rolling 60-second sparkline for one selected PID. Picker side rail lists other live workloads |
+| **Timeline** | `?mode=timeline` | "What happened when?" — chronological alerts + activity feed dominate the viewport, with a compact vitals strip and workloads side rail |
+| **Kiosk** | `?mode=kiosk` | "Is anything on fire right now?" — glance-only wall view with a big overall-severity banner and three big-number tiles. No interactive elements; auto-selects the high-contrast theme on first load |
+| **History** | `?mode=history` | "What happened before I got here?" — full-viewport event archive + dead-PID trajectory drill-in. Snapshot-on-open (not a live poll), reload to re-fetch |
+
+Bookmark `http://<host>:7070/?mode=kiosk` on a wall monitor to
+land straight in the glance view every time. Focus mode carries
+an extra `&pid=N` for deep-linking a specific workload —
+`?mode=focus&pid=42` sends you to workload PID 42's live vitals.
+An invalid or unknown `?mode=X` value silently falls back to
+Dashboard.
+
+Design + full build history in
+[`docs/PHASE5_DISPLAY_MODES_DESIGN.md`](docs/PHASE5_DISPLAY_MODES_DESIGN.md).
+
 ### CLI flags
 
 | Flag                  | Effect                                                       |

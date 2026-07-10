@@ -1,10 +1,59 @@
 # Phase 5 — Web Display Modes Design
 
-> **Status**: **RATIFIED by operator 2026-07-08** — the 5 modes were **inferred** here (not previously spec'd in [`ROADMAP.md`](ROADMAP.md) or [`state/BOARD_AUDIT.md`](state/BOARD_AUDIT.md); those documents named only the *count*, `5 web display modes`, without enumeration). The operator reviewed the inferred set against real usage — kiosk maps to the Orin / lab-wall deploy, focus to single-workload deep-dive, timeline to incident review — and CONFIRMED **Dashboard / Focus / Timeline / Kiosk / History**. **Definition of the mode set is owned by the operator; §1.2 is the ratified spec.**
-> **Target commit**: `v1.3.2-26-ge873051` (HEAD at authoring). DISPATCH 99.
+> **Status**: **SHIPPED — arc closed 2026-07-08** (DISPATCH 106). All five modes landed against the ratified §1.2 spec; all §7 build-sequence steps closed or deferred as noted. The doc is now the historical record of what shipped, not a proposal.
+>
+> Prior status: **RATIFIED by operator 2026-07-08** — the 5 modes were **inferred** here (not previously spec'd in [`ROADMAP.md`](ROADMAP.md) or [`state/BOARD_AUDIT.md`](state/BOARD_AUDIT.md); those documents named only the *count*, `5 web display modes`, without enumeration). The operator reviewed the inferred set against real usage — kiosk maps to the Orin / lab-wall deploy, focus to single-workload deep-dive, timeline to incident review — and CONFIRMED **Dashboard / Focus / Timeline / Kiosk / History**. **Definition of the mode set is owned by the operator; §1.2 is the ratified spec.**
+> **Ship commit range**: `v1.3.2-27-g80b3f9e` (design landing, D99) → `v1.3.2-33-g1b18c5e` (D105, matrix). Dispatches D99-D106. **No version bump** — arc lives under CHANGELOG's `[Unreleased]`.
 > **Position in roadmap**: Phase 5 line item ["5 web display modes"](state/BOARD_AUDIT.md#L32) — the roadmap named the count without defining what the modes are; this doc, ratified above, defines them.
 > **Pattern**: mirrors DISPATCH 88's design-doc-first / gated-steps discipline, but this pass **defined the feature** (with operator ratification) rather than planning a known one.
 > **Sibling docs**: [`PHASE5_HISTORY_DESIGN.md`](PHASE5_HISTORY_DESIGN.md) (shipped as HistoryPage in D95 — one of the modes below reuses it).
+
+## What actually shipped (2026-07-08 close)
+
+The arc landed exactly as designed. Summary of dispatches by §7 step:
+
+| §7 Step | Dispatch | Landed | Notes |
+| --- | --- | --- | --- |
+| 1. Mode scaffold | D100 | ✅ `v1.3.2-28-g98a6d68` | `mode` store + URL sync + header dropdown + reactive routing. Dashboard branch byte-identical to pre-D100 (before D101's intentional HistoryPage removal). |
+| 2. HISTORY mode | D101 | ✅ `v1.3.2-29-gfccec5e` | `HistoryView` mounts `HistoryPage` with `alwaysOpen`. D95 collapsible removed from dashboard grid. |
+| 3. KIOSK mode | D102 | ✅ `v1.3.2-30-gbfb4a5b` | `KioskView` — glance-only, auto-hc on fresh `?mode=kiosk` load. F6 fixture landed. |
+| 4. TIMELINE mode | D103 | ✅ `v1.3.2-31-g7ec80a6` | `TimelineView` + `VitalsStrip`. Reuses AlertsPanel + ActivityFeed + WorkloadRow. F7 fixture landed. |
+| 5. FOCUS mode | D104 | ✅ `v1.3.2-32-g0fb3dab` | `FocusView` with client-buffered rolling sparkline (D95 chart reuse). F5 fixture landed. `?mode=focus&pid=N`. |
+| 6. Settings access A/B/C | D106 (this doc) | ✅ **Decision: A** (see §3.1 below) | No build required — SettingsPanel stays as-is in the dashboard collapsible. |
+| 7. D98 gate extension | D105 | ✅ `v1.3.2-33-g1b18c5e` | 5×7 mode×fixture matrix, 105 baseline assertions on top of per-mode probes. Gate total: **221 passed, 0 failed**. Zero cross-mode gaps found. |
+| 8. Docs + close | D106 | ✅ 2026-07-08 | This section, README "Web display modes" section, CHANGELOG `[Unreleased]` entry, `BOARD_AUDIT.md` line marked done. |
+| 9. `/api/live/trajectory/{pid}` (v-next) | — | ⏳ **DEFERRED** to v1.4.x candidate | Focus's client-buffered sparkline resets on reload — acceptable per §5.1 "watch this NOW" mental model. Backend endpoint + `WireLiveTrajectory` contract type ships iff operators report the reset is a problem in practice. Requires a CAR through Agent A. Explicitly out of this arc's scope. |
+
+**Delivery metrics vs the design's estimates:**
+
+| | Estimated (§11) | Actual |
+| --- | --- | --- |
+| New LoC (frontend) | ~690 across 5 views + VitalsStrip | ~940 (larger FocusView + KioskView than estimated) |
+| Existing LoC reused | 1828 | 1828 (unchanged — every existing component reused verbatim aside from the one HistoryPage `alwaysOpen` prop) |
+| New endpoints | 0 for steps 1-8 | 0 ✅ |
+| Contract bumps | 0 for steps 1-8 | 0 ✅ |
+| Fixtures added | 3 (F5/F6/F7) | 3 ✅ |
+| Wire-gate tests | 3 new (Rust-side) | 0 new Rust tests; instead the browser gate carries the coverage (D101-D105) |
+| Browser-gate assertions | ~25 (§6.3 estimate) | **221 total** (105 matrix + 116 per-mode/per-fixture) |
+| Build sequence | 8 mandatory + 1 optional v-next | 8 landed, 1 deferred ✅ |
+
+**Settings A/B/C decision (§3.1 open question, closed here):**
+
+The design surfaced three options for where SettingsPanel lives once History has its own mode:
+
+- **A** — keep as a collapsible in Dashboard mode only. Operator switches to Dashboard to change settings.
+- **B** — promote to a header cog + modal, available in all modes.
+- **C** — make Settings a 6th mode. (Design already rejected as scope creep.)
+
+**Decision: A.** SettingsPanel stays as a dashboard collapsible. Rationale:
+
+- Settings is *configuration*, not *monitoring*. It belongs on the "home" surface (Dashboard), not on every monitoring viewport.
+- Monitoring modes stay monitoring — no cog-icon chrome distracting from the operator's chosen view.
+- Kiosk *correctly* has no settings cog — a wall monitor should not offer tunable knobs. Option B would either need a per-mode suppression (special-case for kiosk) or a leak of controls onto the wall view. Option A avoids that decision entirely.
+- Dashboard is the default landing view (`/` with no query param), so settings remain one URL change away from every other mode.
+- No build required for option A. Zero-cost close on this open item.
+
+Should the operator later find "changing settings while in Timeline/Focus is friction," Option B lands as a follow-up dispatch (promote `SettingsPanel` to a modal, header cog trigger, per-mode visibility flag). Reversible.
 
 ---
 
@@ -442,8 +491,9 @@ Things that surfaced while reading the codebase and are worth an operator eyebal
 | **Browser-gate expansion** | 25+ (5 modes × 5+ fixtures) assertions in step 7's Playwright harness |
 | **Bisectable steps** | 8 mandatory + 1 optional v-next |
 | **Sequenced ship order** | scaffold → HISTORY → KIOSK → TIMELINE → FOCUS → settings-decision → D98 gate → docs → (v-next endpoint) |
-| **Ratified 2026-07-08** | ✅ mode set (5, as enumerated in §1.2), ✅ switch mechanism (URL param + header dropdown per §2.1), ⚠ settings access A/B/C — deferred to step 6 |
+| **Ratified 2026-07-08** | ✅ mode set (5, as enumerated in §1.2), ✅ switch mechanism (URL param + header dropdown per §2.1), ✅ settings access — **Option A** (see promoted §3.1 above): SettingsPanel stays as the Dashboard collapsible |
+| **Shipped 2026-07-08** | ✅ all 5 modes (D100-D104), ✅ browser gate 5×7 matrix + per-mode probes = 221 assertions (D105), ✅ docs + arc close (D106). ⏳ Step 9 (`/api/live/trajectory/{pid}`) deferred to v-next / v1.4.x candidate. |
 
 ---
 
-*Mode set ratified 2026-07-08. Sub-dispatches for steps 1–5 fire against §1.2 as written. Step 6 (settings access A/B/C) is the only remaining operator-decision item — carries into that step's dispatch. If the mode set is later expanded (a "REPORT" mode, a "COMPACT" mode, etc.), that reopens §1.2 in this same file before the affected step re-fires.*
+*Arc closed 2026-07-08. All 5 modes ratified in §1.2 shipped; §7 steps 1-8 complete; step 9 deferred to v-next per §5.1. Design decisions from §2 (URL + dropdown switching, `history.pushState`, no localStorage), §4 (kiosk auto-hc default, per-mode state persistence rules), §5 (zero new endpoints, zero contract touches), and §6 (D98 gate coverage) all landed as written. The `WireAlertEntry.timestamp` limitation surfaced during D103 was resolved honestly (Timeline renders separate Alerts + Activity sections rather than a fabricated merged stream) and remains a candidate for a future CAR if operator investigation calls for unified chronology. This doc now serves as historical record; further changes ship as follow-up dispatches with their own commits.*

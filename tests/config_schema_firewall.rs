@@ -66,10 +66,26 @@
 use std::fs;
 use std::path::PathBuf;
 
-/// Schema source files scanned by this guard. Add to this list when
-/// new schema-bearing files appear (e.g. a future
-/// `src/config/workload_rules.rs` when v1.3.2 splits the schema).
-const SCHEMA_PATHS: &[&str] = &["src/config.rs"];
+/// Schema source files scanned by this guard.
+///
+/// v1.3.2 / DISPATCH 108 ITEM 3 — extended from the pre-D108
+/// single-entry list. The completeness pin
+/// `schema_paths_covers_every_schema_defining_file` walks `src/`,
+/// finds every file that defines a schema-shaped struct
+/// (Deserialize + a `*Config` name or a known schema type), and
+/// asserts each is registered here. Broadening the coverage (vs.
+/// narrowing the pin) is the safer robustness call — the
+/// forbidden-token scan on a file that has no forbidden tokens is
+/// a no-op; the scan on a file that WOULD have grown one is the
+/// win. `src/config.rs` remains the load-bearing entry (the TOML
+/// root); the others are Config-suffixed structs that participate
+/// in serialization surfaces.
+const SCHEMA_PATHS: &[&str] = &[
+    "src/config.rs",
+    "src/analysis/compare.rs",
+    "src/storage/run_store.rs",
+    "src/web/settings.rs",
+];
 
 /// Names that, if they appear as Rust code tokens (i.e. NOT inside a
 /// comment or string literal) in any [`SCHEMA_PATHS`] file, indicate
@@ -85,11 +101,108 @@ const FORBIDDEN_TOKENS: &[&str] = &[
     "then_kill",
 ];
 
+/// v1.3.2 / DISPATCH 108 ITEM 3 — completeness pin for
+/// `SCHEMA_PATHS`. Pre-D108 the list was a hardcoded single-entry
+/// array; if the schema split into multiple files (a scenario the
+/// module doc-comment explicitly anticipates), a future author
+/// forgetting to extend the list would silently miss forbidden-
+/// token drift in the new file. Robustness fix: walk `src/`, find
+/// every `.rs` file that DEFINES a schema-shaped Rust struct
+/// (`#[derive(...Deserialize...)]` + `pub struct <Name>Config` or a
+/// known schema type name like `WorkloadRule`), and assert every
+/// such file is in `SCHEMA_PATHS`. If a new schema-bearing file
+/// appears without being registered, this test fires with a clear
+/// "extend `SCHEMA_PATHS` to cover N" message.
+///
+/// This does NOT weaken the firewall — the forbidden-token scan
+/// still runs against everything in `SCHEMA_PATHS`. This test is a
+/// SEPARATE robustness pin that keeps the LIST honest.
+#[test]
+fn schema_paths_covers_every_schema_defining_file() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let src = root.join("src");
+    let mut discovered: Vec<String> = Vec::new();
+    walk_rs_dir(&src, &src, &mut discovered);
+    // A "schema-shaped" file: contains a `#[derive(...Deserialize...)]`
+    // attribute AND a `pub struct <Name>Config` OR a known-schema
+    // struct name. Deserialize-only structs (e.g. wire types) are
+    // NOT schema; they don't drive TOML config parsing.
+    let known_schema_names: &[&str] = &["WorkloadRule"];
+    let mut schema_files: Vec<String> = Vec::new();
+    for rel_path in &discovered {
+        let source = match fs::read_to_string(root.join(rel_path)) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        // Cheap heuristic — parse-free. A false positive here means
+        // an already-scanned file is required to appear in
+        // SCHEMA_PATHS, which fails LOUD (the operator adds it or
+        // adjusts the heuristic).
+        if !source.contains("Deserialize") {
+            continue;
+        }
+        let has_config_struct = source.contains("pub struct ")
+            && (source.contains("Config {") || source.contains("Config<"));
+        let has_known_schema = known_schema_names
+            .iter()
+            .any(|n| source.contains(&format!("pub struct {n}")));
+        if has_config_struct || has_known_schema {
+            schema_files.push(rel_path.clone());
+        }
+    }
+    let known: std::collections::HashSet<&&str> = SCHEMA_PATHS.iter().collect();
+    let missing: Vec<&String> = schema_files
+        .iter()
+        .filter(|p| !known.contains(&p.as_str()))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "SCHEMA_PATHS is out of date — the following files define \
+         schema-shaped structs (Deserialize + a `*Config` struct or a \
+         known schema type name) but are NOT registered:\n{}\n\
+         Extend `SCHEMA_PATHS` in tests/config_schema_firewall.rs so \
+         the forbidden-token scan covers them; a silently-uncovered \
+         schema file is exactly the 62-G fragility this pin closes.",
+        missing
+            .iter()
+            .map(|p| format!("  - {p}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    );
+}
+
+/// Walk `dir` recursively and push relative paths (relative to
+/// `src_root`) of every `.rs` file into `out`. Skips hidden dirs
+/// and target/ paths for hygiene; the whole walk stays inside
+/// `src/` so those exclusions are defensive not load-bearing.
+fn walk_rs_dir(src_root: &std::path::Path, dir: &std::path::Path, out: &mut Vec<String>) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            walk_rs_dir(src_root, &path, out);
+        } else if path.extension().and_then(|e| e.to_str()) == Some("rs")
+            && let Ok(rel) = path.strip_prefix(src_root)
+        {
+            // Store as "src/<rel>" so it matches SCHEMA_PATHS entries.
+            out.push(format!("src/{}", rel.display()));
+        }
+    }
+}
+
 #[test]
 fn config_schema_has_no_action_verb_fields() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let mut violations: Vec<(String, usize, &'static str)> = Vec::new();
 
+    // D108 ITEM 3 — additionally assert each SCHEMA_PATHS entry
+    // exists on disk. The pre-D108 code panicked with a helpful
+    // message via `.unwrap_or_else`, but only if the entry was
+    // read; a typoed entry that resolved to a nonexistent path
+    // still surfaced there. Loop entry: same behavior, kept
+    // explicit for clarity.
     for rel in SCHEMA_PATHS {
         let path = root.join(rel);
         let source = fs::read_to_string(&path).unwrap_or_else(|e| {

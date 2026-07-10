@@ -36,6 +36,22 @@ __pycache__/
 edge_monitor.toml
 audit.log
 
+# v1.3.2 / DISPATCH 108 ITEM 5 — session investigation dirs under
+# tests/empirical/ that use a date-suffix naming convention (e.g.
+# `activity_feed_empty_2026-06-08/`, `each_key_audit_2026-06-08/`)
+# are transient — evidence captured for one investigation, not
+# meant to accumulate in git. Historical evidence dirs (versioned
+# `v1_x_y/` prefixes) stay tracked; this pattern only catches the
+# `<something>_YYYY-MM-DD/` shape at the tests/empirical/ ROOT
+# (deeper `run-store/runs/2026-XX-XX/` fixtures inside tracked
+# gates aren't matched — the pattern is anchored to direct
+# children of tests/empirical/).
+/tests/empirical/*_2026-*/
+/tests/empirical/*_2027-*/
+
+# Scratch log from local web-companion runs
+scratch_web.log
+
 # Local hardware fixtures at repo root (not meant to be committed or packaged)
 /bus.jpg
 /q.py

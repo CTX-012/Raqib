@@ -2343,7 +2343,7 @@ wire-schema break.
 
 ## [1.0.1] — 2026-05-21
 
-Hotfix release closing twelve Inspector-surfaced bugs found
+Hotfix release closing 11 Inspector-surfaced bugs found
 post-`v1.0.0`. No new features and no wire-schema breaks; only
 behavioural corrections and one additive wire field (`ram_pct`).
 

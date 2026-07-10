@@ -240,15 +240,18 @@ fn render_default(
     vitals::render(f, layout[1], state, theme);
     // layout[2] is the B7 spacer — intentionally unrendered.
 
-    // L22 / §12 Wide tier — split workloads into two columns when
-    // there are 4+ workloads; single-column otherwise (Narrow /
-    // Standard tiers always use single-column).
-    let workload_count = state.ai_processes().count();
-    if tier == SizeTier::Wide && workload_count >= 4 {
-        render_workloads_two_col(f, layout[3], state, app, theme);
-    } else {
-        workloads::render(f, layout[3], state, app, theme);
-    }
+    // v1.3.2 / DISPATCH 107 FIX 1 — the pre-D107 "Wide tier + 4+
+    // workloads → two-column split" branch produced a DUPLICATE
+    // panel titled "AI Workloads" (both halves called
+    // `workloads::render`, which emits the same panel_block title).
+    // Confirmed live at Wide + 5 workloads unconditionally; also
+    // carried a known selection-mapping bug (comment on the removed
+    // `render_workloads_two_col` fn explicitly noted the highlight
+    // could render in both halves at the same local index because
+    // `App::selected_index` was global with no two-column awareness).
+    // Reverted to single-column always. The BOARD_AUDIT §2.2 line
+    // "duplicate 'AI Workloads' panel" is now closed.
+    workloads::render(f, layout[3], state, app, theme);
     // layout[4] is the FIX-1 spacer (workloads → next) — unrendered.
 
     if tier == SizeTier::Narrow {
@@ -261,49 +264,6 @@ fn render_default(
         activity::render(f, layout[7], state, app, theme);
         render_footer(f, layout[8], app, theme);
     }
-}
-
-/// L22 / §12 Wide tier — split the workloads area into two columns
-/// when there are 4+ workloads. Done by cloning `state` into two
-/// narrow views, each retaining a contiguous half of the
-/// AI-classified workloads (RuntimeState's doc-comment says it's
-/// "cheap to clone for the UI to render between samples"; we pay
-/// that cost only at Wide tier with 4+ workloads).
-///
-/// **Known limitation:** the selection highlight may render in both
-/// halves at the same local index because `App::selected_index` is
-/// a global pointer with no two-column awareness. Mapping the global
-/// selection cleanly into one half is deferred to a follow-up — the
-/// L22 commit owns the layout gate, not the input-mapping rewrite.
-fn render_workloads_two_col(
-    f: &mut Frame,
-    area: Rect,
-    state: &RuntimeState,
-    app: &App,
-    theme: &UiTheme,
-) {
-    let halves = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(area);
-
-    // First-half / second-half partition of the AI subset only.
-    // Non-AI entries in `annotated` are dropped from each clone for
-    // free because `workloads::render` filters via
-    // `state.ai_processes()` anyway, but explicitly retaining only
-    // the AI PIDs in each half keeps the partition exact.
-    let ai_pids: Vec<u32> = state.ai_processes().map(|p| p.pid).collect();
-    let mid = ai_pids.len().div_ceil(2);
-    let left_pids: std::collections::HashSet<u32> =
-        ai_pids[..mid].iter().copied().collect();
-
-    let mut left = state.clone();
-    left.annotated.retain(|p| left_pids.contains(&p.pid));
-    let mut right = state.clone();
-    right.annotated.retain(|p| !left_pids.contains(&p.pid));
-
-    workloads::render(f, halves[0], &left, app, theme);
-    workloads::render(f, halves[1], &right, app, theme);
 }
 
 fn render_footer(f: &mut Frame, area: Rect, app: &App, theme: &UiTheme) {

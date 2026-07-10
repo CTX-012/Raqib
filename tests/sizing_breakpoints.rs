@@ -165,22 +165,24 @@ fn at_120x40_tier_is_standard_and_all_default_panels_render() {
 fn at_160x50_tier_is_wide_and_renders_without_panic() {
     assert_eq!(SizeTier::classify(160, 50), SizeTier::Wide);
 
-    // Wide tier with 4+ workloads exercises the two-column workload
-    // codepath in `render_workloads_two_col`.
+    // v1.3.2 / DISPATCH 107 FIX 1 — the pre-D107 test expected
+    // ≥2 occurrences of "AI Workloads" because `render_workloads_two_col`
+    // split the workloads area into two panels at Wide tier + 4+
+    // workloads, each rendering its own titled block. FIX 1 removed
+    // that duplication (BOARD_AUDIT §2.2 "duplicate 'AI Workloads'
+    // panel" closed): Wide tier now renders a SINGLE panel titled
+    // once, matching the operator's mental model. This test flipped
+    // in D107 to pin the single-render property.
     let state = state_with_workloads(4);
     let app = App::default();
     let buf = render_at(160, 50, &state, &app);
 
-    // Both halves of the workload panel render the "AI Workloads"
-    // block, so the title appears twice. We assert ≥2 occurrences to
-    // pin the two-column layout shape without over-specifying the
-    // exact column count.
     let title_occurrences = buf.matches("AI Workloads").count();
-    assert!(
-        title_occurrences >= 2,
-        "expected the AI Workloads panel title to appear at least \
-         twice (one per column) at Wide tier with 4+ workloads, got \
-         {title_occurrences}:\n{buf}"
+    assert_eq!(
+        title_occurrences, 1,
+        "expected the AI Workloads panel title to appear EXACTLY ONCE \
+         at Wide tier with 4+ workloads (post-D107 single-column render); \
+         got {title_occurrences}:\n{buf}"
     );
     // The §1 region map below the workloads area is unchanged from
     // Standard tier.

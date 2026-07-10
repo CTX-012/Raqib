@@ -85,6 +85,57 @@ fn category_header(category: WorkloadCategory) -> &'static str {
     }
 }
 
+/// v1.3.2 / DISPATCH 107 FIX 2 — column-header row for the AI
+/// Workloads panel. The column widths mirror the per-row `format!`
+/// call sites in `render` exactly, so labels sit above their
+/// columns (a leading space stands in for the status dot; the
+/// header itself is styled muted at the call site). The layout
+/// branches on `narrow` + `show_model` + `show_activity` because
+/// the row `format!` does too — any drift would misalign the
+/// header, so this fn IS the single source of truth for the
+/// header labels and must be edited in lockstep with the row
+/// `format!` calls in `render`.
+fn column_header_line(narrow: bool, show_model: bool, show_activity: bool) -> String {
+    // Wide row shape (row `format!` at the wide branch):
+    //   " {:<22}{}{} {:<14} {:<14} cpu {:>5.1}% rss {:>5}M {:>4}M"
+    // Narrow row shape (row `format!` at the narrow branch):
+    //   " {:<16}{} {:<8} cpu {:>4.0}% rss {:>4}M {:>4}M"
+    //
+    // The `cpu/rss/vram` labels re-use the same `cpu ... rss ...`
+    // literal so the header shows "CPU %" / "RSS MB" / "VRAM"
+    // sitting above the numeric slots.
+    let model_hdr = if show_model {
+        format!(" {:<width$}", "MODEL", width = MODEL_COL_WIDTH)
+    } else {
+        String::new()
+    };
+    let activity_hdr = if show_activity && !narrow {
+        format!(" {:<width$}", "STATE", width = ACTIVITY_COL_WIDTH)
+    } else {
+        String::new()
+    };
+    if narrow {
+        // Narrow drops the primary-metric column to fit inside the
+        // 80-col §12 floor; header follows.
+        format!(
+            " {:<16}{} {:<8} {:>5} {:>6} {:>5}",
+            "NAME", model_hdr, "STARTED", "CPU %", "RSS MB", "VRAM",
+        )
+    } else {
+        format!(
+            " {:<22}{}{} {:<14} {:<14} {:>5} {:>7} {:>5}",
+            "NAME",
+            model_hdr,
+            activity_hdr,
+            "PRIMARY",
+            "STARTED",
+            "CPU %",
+            "RSS MB",
+            "VRAM",
+        )
+    }
+}
+
 /// L11b — assemble alert/status inputs for one workload from the
 /// runtime snapshot. Pure: takes everything it needs by reference.
 /// Mirrors the L6 alert-observation logic so a single workload's
@@ -476,6 +527,17 @@ pub fn render(f: &mut Frame, area: Rect, state: &RuntimeState, app: &App, theme:
     let symbols = app.symbol_set();
     let mut items: Vec<ListItem<'_>> = Vec::with_capacity(rows.len() + 5);
     let mut row_index_to_list_index: Vec<usize> = Vec::with_capacity(rows.len());
+
+    // v1.3.2 / DISPATCH 107 FIX 2 — column-header row. Rendered ONCE
+    // at the top of the panel, styled muted so it reads as
+    // structure not content. The column widths mirror the per-row
+    // format below so labels sit above their columns; a `_` prefix
+    // takes the place of the status-dot slot each data row uses.
+    // BOARD_AUDIT §2.2 "no column headers" line closed here.
+    items.push(ListItem::new(Line::from(Span::styled(
+        column_header_line(narrow, show_model, show_activity),
+        Style::default().fg(theme.muted),
+    ))));
 
     for category in WorkloadCategory::all_in_order() {
         let group: Vec<&Row> = rows.iter().filter(|r| r.category == category).collect();

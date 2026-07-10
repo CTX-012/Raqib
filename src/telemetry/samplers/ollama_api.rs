@@ -350,10 +350,35 @@ impl TelemetrySource for OllamaApiSource {
                 self.per_model_last_state.remove(my_model);
                 ActivityState::NotDetected
             };
+            // v1.3.2 / DISPATCH 107 FIX 3 — emit the friendly
+            // name from `/api/ps` as the model_name_hint whenever
+            // it's unambiguous. Pre-D107 this always emitted the
+            // sha256 blob digest (`my_model`), which then leaked
+            // into the workloads panel's model column via
+            // AnnotatedProcess.model_name (BOARD_AUDIT §2.2).
+            //
+            // `loaded.len() == 1`: 1 runner ↔ 1 loaded model is
+            // the normal case; safe to use the friendly name.
+            // `loaded.len() > 1`: multiple loaded models means
+            // multiple runners; we can't disambiguate which
+            // runner corresponds to which name without a digest
+            // match. Falling back to the digest keeps the runner
+            // ↔ record link stable — the model column will show
+            // the truncated sha256 in that rare case, which is no
+            // worse than the pre-D107 behavior.
+            // `loaded.is_empty()`: the activity path above already
+            // decided NotDetected; the hint doesn't matter, but
+            // emit the digest so RunRecord still gets a stable
+            // per-model key.
+            let hint = if loaded.len() == 1 {
+                loaded.first().cloned()
+            } else {
+                Some(my_model.to_string())
+            };
             Ok(TelemetryFrame {
                 pid: proc.pid,
                 activity_state: Some(activity),
-                model_name_hint: Some(my_model.to_string()),
+                model_name_hint: hint,
                 ..TelemetryFrame::new(proc.pid)
             })
         } else {

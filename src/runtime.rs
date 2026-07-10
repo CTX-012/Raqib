@@ -971,7 +971,7 @@ impl Runtime {
         // by index. `None` entries mean "do not feed into the rolling
         // average."
         let mut cpu_for_avg: Vec<Option<f32>> = Vec::with_capacity(snapshot.processes.len());
-        let annotated: Vec<AnnotatedProcess> = snapshot
+        let mut annotated: Vec<AnnotatedProcess> = snapshot
             .processes
             .iter()
             .map(|p| {
@@ -1165,6 +1165,43 @@ impl Runtime {
             d.tick(&live_ai, &all_live);
             d.record_system_power(&live_ai, &snapshot.gpu);
             d.record_disk_io(&live_ai);
+
+            // v1.3.2 / DISPATCH 107 FIX 3 — sha256 blob → friendly
+            // name promotion. The classifier's cmdline-extract path
+            // (`augment_with_model_name`) pulls the `--model
+            // /root/.ollama/models/blobs/sha256-...` argument out of
+            // the ollama runner's cmdline; that's the digest, not a
+            // human-readable model tag. The ollama sampler's
+            // `/api/ps` sees the friendly name (e.g. `smollm:135m`)
+            // and emits it as `model_name_hint`. Promote the hint
+            // onto `AnnotatedProcess.model_name` here, but ONLY when
+            // the current value looks like a raw sha256 blob — good
+            // extractions (llama.cpp `--model /models/foo.gguf` →
+            // `foo`) are left untouched.
+            //
+            // BOARD_AUDIT §2.2 "sha256 name-leak" line closed here.
+            // The RunRecord attribution path (line ~1350 below) also
+            // reads the hint; both surfaces now converge on the
+            // friendly name.
+            for ap in annotated.iter_mut() {
+                let looks_like_sha_blob = ap
+                    .model_name
+                    .as_deref()
+                    .map(|m| m.starts_with("sha256-"))
+                    .unwrap_or(false);
+                if !looks_like_sha_blob {
+                    continue;
+                }
+                if let Some(hint) = d.model_name_hint_for(ap.pid) {
+                    // Only overwrite when the HINT itself isn't
+                    // another sha256 (defensive — an /api/ps that
+                    // somehow only knew the digest wouldn't be an
+                    // improvement).
+                    if !hint.starts_with("sha256-") {
+                        ap.model_name = Some(hint);
+                    }
+                }
+            }
         }
 
         // v1.3.2 / DISPATCH 73 (P1#2) — per-tick dmesg cache. The

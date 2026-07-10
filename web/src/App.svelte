@@ -47,14 +47,11 @@
     // rolling trajectory; no new endpoint (§5.1 / §8).
     import FocusView from './views/FocusView.svelte';
 
-    // v1.3.2 / DISPATCH 100 — the step each placeholder mode's real
-    // view lands in (per PHASE5_DISPLAY_MODES_DESIGN.md §7).
-    // v1.3.2 / DISPATCH 104 — PLACEHOLDER_STEP retired. Every
-    // mode from §7 (dashboard/history/kiosk/timeline/focus) now
-    // has its real view landed. ModePlaceholder.svelte remains
-    // in the components/ directory as unused code because rip-
-    // out is a separate cleanup dispatch (Chesterton's fence:
-    // future scope-6 modes might reuse the placeholder pattern).
+    // v1.3.2 / DISPATCH 107 FIX 5 — `PLACEHOLDER_STEP` and its
+    // `ModePlaceholder.svelte` companion were retired here; every
+    // §7 mode (dashboard/history/kiosk/timeline/focus) has its
+    // real view landed. The scaffold from D100 has fully served
+    // its purpose.
 
     let modeUrlCleanup: (() => void) | null = null;
 
@@ -128,18 +125,14 @@
 
     <!--
         v1.3.2 / DISPATCH 100 / PHASE 5 display modes step 1 — reactive
-        routing. Dashboard branch renders today's exact subtree,
-        BYTE-IDENTICAL to pre-D100 (same components, same order, same
-        markup). The other 4 modes surface ModePlaceholder until
-        steps 2-5 land their real views.
+        routing. The other 4 modes point at their real views
+        (D101-D104); dashboard renders its main-grid subtree here.
 
         Rendered inside {#if} branches (NOT swapped via a store /
         dynamic component) so Svelte's compile-time analysis produces
         an unchanged sub-DOM for the dashboard path — no wrapper
         element around the alerts region / main grid / history /
         settings / footer that could shift layout or class inheritance.
-        Byte-identical-under-dashboard is the load-bearing property
-        for step 1's revert-safety.
     -->
     {#if $mode === 'dashboard'}
         <!-- v1.1.13 / DISPATCH 42 — alert region. Renders above the

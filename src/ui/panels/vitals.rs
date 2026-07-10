@@ -96,8 +96,15 @@ fn render_thermal_summary(
         .first()
         .map(|z| thermal_color(theme, z.temp_celsius, thresholds))
         .unwrap_or(theme.foreground);
+    // v1.3.2 / DISPATCH 107 FIX 4 — align "Thermal" tag with the
+    // 12-char label grid the rest of the vitals panel uses so the
+    // thermal row sits under the same column axis as RAM/CPU/VRAM/
+    // Processes.
     let mut spans: Vec<Span<'static>> = vec![
-        Span::styled("thermal: ", Style::default().fg(theme.muted)),
+        Span::styled(
+            format!("{:<width$}", "Thermal", width = 12),
+            Style::default().fg(theme.muted),
+        ),
         Span::styled(inline, Style::default().fg(dominant)),
     ];
     if total > TUI_TOP_THERMAL_ZONES {
@@ -139,6 +146,19 @@ pub fn render(f: &mut Frame, area: Rect, state: &RuntimeState, theme: &UiTheme) 
         ])
         .split(inner);
 
+    // v1.3.2 / DISPATCH 107 FIX 4 — align every row to a common
+    // left-margin label column (12-char wide "TAG:" prefix) so the
+    // Vitals rows read as a coherent grid rather than freely-placed
+    // widgets. Closes the BOARD_AUDIT §2.1 "no column grid /
+    // stranded RAM" observation. Gauges keep their visual bar (they
+    // fill the area to the right of the label); text rows get the
+    // same label width so the values line up under one another.
+    //
+    // The 12-char label width covers the longest tag ("Processes ")
+    // plus a trailing space. If a new row is added with a longer
+    // tag, bump the width in lockstep across every row here.
+    const LABEL_WIDTH: usize = 12;
+
     let mem_pct = snap.system.memory_usage_percent().clamp(0.0, 100.0);
     let mem_used_mb = snap.system.used_memory / (1024 * 1024);
     let mem_total_mb = snap.system.total_memory / (1024 * 1024);
@@ -146,17 +166,22 @@ pub fn render(f: &mut Frame, area: Rect, state: &RuntimeState, theme: &UiTheme) 
     // attention at 85% and critical at 95%. `theme.bar_color` is
     // the single source of truth for the threshold mapping.
     let mem_gauge = Gauge::default()
-        .label(format!("RAM {}/{} MB", mem_used_mb, mem_total_mb))
+        .label(format!(
+            "{:<width$}{}/{} MB",
+            "RAM", mem_used_mb, mem_total_mb, width = LABEL_WIDTH,
+        ))
         .gauge_style(Style::default().fg(theme.bar_color(mem_pct)))
         .ratio((mem_pct / 100.0).clamp(0.0, 1.0));
     f.render_widget(mem_gauge, cols[0]);
 
     let load_line = Paragraph::new(format!(
-        "load avg: {:.2} {:.2} {:.2}    cpus: {}",
+        "{:<width$}{:.2} {:.2} {:.2}    cpus: {}",
+        "CPU load",
         snap.system.load_average[0],
         snap.system.load_average[1],
         snap.system.load_average[2],
-        snap.system.cpu_count
+        snap.system.cpu_count,
+        width = LABEL_WIDTH,
     ))
     .style(Style::default().fg(theme.foreground));
     f.render_widget(load_line, cols[1]);
@@ -171,24 +196,33 @@ pub fn render(f: &mut Frame, area: Rect, state: &RuntimeState, theme: &UiTheme) 
         };
         let gauge = Gauge::default()
             .label(format!(
-                "VRAM {}/{} MB ({} devices)",
+                "{:<width$}{}/{} MB ({} devices)",
+                "VRAM",
                 used / (1024 * 1024),
                 total / (1024 * 1024),
-                snap.gpu.devices.len()
+                snap.gpu.devices.len(),
+                width = LABEL_WIDTH,
             ))
             .gauge_style(Style::default().fg(theme.bar_color(pct)))
             .ratio((pct / 100.0).clamp(0.0, 1.0));
         f.render_widget(gauge, cols[2]);
     } else {
-        let p = Paragraph::new("No GPU detected").style(Style::default().fg(theme.muted));
+        let p = Paragraph::new(format!(
+            "{:<width$}No GPU detected",
+            "VRAM",
+            width = LABEL_WIDTH,
+        ))
+        .style(Style::default().fg(theme.muted));
         f.render_widget(p, cols[2]);
     }
 
     let ai_count = state.ai_processes().count();
     let proc_line = Paragraph::new(format!(
-        "{} processes   {} AI workloads detected",
+        "{:<width$}{} total   {} AI workloads",
+        "Processes",
         snap.processes.len(),
         ai_count,
+        width = LABEL_WIDTH,
     ))
     .style(Style::default().fg(theme.foreground));
     f.render_widget(proc_line, cols[3]);

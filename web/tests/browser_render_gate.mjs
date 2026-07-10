@@ -2071,6 +2071,245 @@ async function runFocusModeGate(browser, url) {
     return result;
 }
 
+// ── D105 — mode × fixture matrix ────────────────────────────────────
+//
+// Systematic completeness pass: every one of the 5 display modes
+// mounted against every one of the 6 adversarial fixtures. 5 × 6 = 30
+// cells; each cell asserts the BASELINE (renders + no each_key + no
+// unexpected page errors). Deeper property checks stay in the D101-
+// D104 per-mode probes above — the matrix's job is completeness, not
+// depth.
+//
+// The gap combos this dispatch fills — none of these had explicit
+// coverage until now:
+//   dashboard × {F5, F6, F7}       (D87-era probes covered F1-F4)
+//   history   × {F1, F2, F4, F5, F6, F7}  (D101 only F3)
+//   kiosk     × {F3, F5, F7}       (D102 covered F1, F2, F6)
+//   timeline  × {F2, F5, F6}       (D103 covered F1, F3, F7)
+//   focus     × {F1, F2, F3, F6, F7}  (D104 only F5)
+//
+// The matrix is the coverage statement: a future mode or fixture
+// finds its place in the loop below; a gap becomes visible as a
+// missing cell. Re-runnable via `npm run test:browser`.
+//
+// If a cell CRASHES or emits an each_key signal, that's a FINDING —
+// a cross-mode gap the per-mode probes missed. The matrix's whole
+// point is to make such gaps loud.
+
+async function runMatrixGate(browser, url) {
+    const result = new GateResult();
+
+    // Fixture set for the matrix. Deliberately excludes
+    // `_negative_control_colliding_activity` — that fixture is
+    // designed to fire each_key (proves the detector isn't dead)
+    // and would trip every cell in an unhelpful way. Its
+    // completeness lives in the top-level per-fixture probe above.
+    const MATRIX_FIXTURES = [
+        'F1_dense_colliding_names',
+        'F2_duplicate_label_thermals',
+        'F3_same_pid_exit_kill',
+        'F4_combined_worst_case',
+        'F5_focus_sparkline_dense',
+        'F6_kiosk_all_criticals',
+        'F7_timeline_dense_ordering',
+    ];
+    const MATRIX_MODES = [
+        'dashboard',
+        'history',
+        'kiosk',
+        'timeline',
+        'focus',
+    ];
+
+    // Cache fixture bodies once (7 files, not 35 disk reads).
+    const fixtures = {};
+    for (const name of MATRIX_FIXTURES) {
+        fixtures[name] = await loadFixture(name);
+    }
+
+    /**
+     * Build the URL path for a (mode, fixture) cell. Focus mode
+     * takes an extra `&pid=N` — if the fixture has workloads, pick
+     * the first as the focus target so the deep-dive view exercises;
+     * otherwise omit pid and let the no-pid graceful state render
+     * (still a legitimate baseline for the cell — we're asserting
+     * "no crash, no each_key," not "deep-dive was reached").
+     */
+    function pathFor(mode, fx) {
+        if (mode === 'dashboard') return '/';
+        if (mode === 'focus') {
+            if (fx.workloads && fx.workloads.length > 0) {
+                return `/?mode=focus&pid=${fx.workloads[0].pid}`;
+            }
+            return '/?mode=focus';
+        }
+        return `/?mode=${mode}`;
+    }
+
+    /**
+     * "Did the mode render?" — a mode-specific presence check. For
+     * dashboard we look for WorkloadsPanel's "AI Workloads" `<h2>`,
+     * which only surfaces on the dashboard branch. Other modes use
+     * their view's testid.
+     */
+    async function didRender(page, mode) {
+        return await page.evaluate((m) => {
+            switch (m) {
+                case 'dashboard':
+                    return [...document.querySelectorAll('h2')].some(
+                        (h) => h.textContent.trim() === 'AI Workloads',
+                    );
+                case 'history':
+                    return !!document.querySelector(
+                        '[data-testid="history-view"]',
+                    );
+                case 'kiosk':
+                    return !!document.querySelector(
+                        '[data-testid="kiosk-view"]',
+                    );
+                case 'timeline':
+                    return !!document.querySelector(
+                        '[data-testid="timeline-view"]',
+                    );
+                case 'focus':
+                    return !!document.querySelector(
+                        '[data-testid="focus-view"]',
+                    );
+                default:
+                    return false;
+            }
+        }, mode);
+    }
+
+    // Wait cadence: focus with a pid needs one 1 Hz poll to build
+    // its first sparkline sample; every other mode renders on the
+    // initial fetch + a beat of settle.
+    function waitMsFor(mode, fx) {
+        if (mode === 'focus' && fx.workloads?.length > 0) return 1200;
+        return 400;
+    }
+
+    for (const mode of MATRIX_MODES) {
+        for (const fixtureName of MATRIX_FIXTURES) {
+            const fx = fixtures[fixtureName];
+            const path = pathFor(mode, fx);
+            const label = `[matrix ${mode.padEnd(9)} × ${fixtureName}]`;
+
+            const page = await browser.newPage();
+            const consoleMessages = [];
+            const pageErrors = [];
+            page.on('console', (m) =>
+                consoleMessages.push({ type: m.type(), text: m.text() }),
+            );
+            page.on('pageerror', (err) => pageErrors.push(err.message));
+
+            await page.setRequestInterception(true);
+            page.on('request', (req) => {
+                const u = new URL(req.url());
+                if (!u.pathname.startsWith('/api/')) return req.continue();
+                const j = (obj) =>
+                    req.respond({
+                        status: 200,
+                        contentType: 'application/json; charset=utf-8',
+                        body: JSON.stringify(obj),
+                    });
+                if (u.pathname === '/api/snapshot') return j(fx);
+                if (u.pathname === '/api/health') return j({ ok: true });
+                if (u.pathname === '/api/history')
+                    return j({ events: [], dead_pids: [] });
+                if (u.pathname.startsWith('/api/history/trajectory/'))
+                    return req.respond({ status: 404 });
+                if (u.pathname === '/api/settings')
+                    return j({
+                        thresholds: {
+                            thermal_amber_c: 85,
+                            thermal_red_c: 95,
+                            vram_attention_pct: 80,
+                            vram_critical_pct: 90,
+                            ram_attention_pct: 80,
+                            ram_critical_pct: 90,
+                            kv_attention_pct: 80,
+                            kv_critical_pct: 95,
+                            alert_sustain_secs: 30,
+                        },
+                        kill_sustain_secs: 60,
+                        auto_actuate_readonly: false,
+                        default_ai_action_readonly: 'Allow',
+                        config_path: null,
+                    });
+                req.respond({ status: 404 });
+            });
+
+            let gotoErr = null;
+            try {
+                await page.goto(`${url}${path}`, {
+                    waitUntil: 'networkidle2',
+                    timeout: 15000,
+                });
+                await new Promise((r) => setTimeout(r, waitMsFor(mode, fx)));
+            } catch (e) {
+                gotoErr = e;
+            }
+
+            if (gotoErr) {
+                result.fail(
+                    `${label} navigation failed: ${gotoErr.message}`,
+                );
+                await page.close();
+                continue;
+            }
+
+            // Baseline 1 — renders.
+            const rendered = await didRender(page, mode);
+            if (rendered) {
+                result.ok(`${label} renders`);
+            } else {
+                result.fail(
+                    `${label} did NOT render — mode-specific marker missing`,
+                );
+            }
+
+            // Baseline 2 — no each_key duplicate signal.
+            const eachKeyConsole = consoleMessages.filter(
+                (m) =>
+                    (m.type === 'warning' || m.type === 'error') &&
+                    isEachKeyDuplicateSignal(m.text),
+            );
+            const eachKeyThrows = pageErrors.filter((msg) =>
+                isEachKeyDuplicateSignal(msg),
+            );
+            const anyEachKey = eachKeyConsole.length + eachKeyThrows.length;
+            if (anyEachKey === 0) {
+                result.ok(`${label} no each_key signals`);
+            } else {
+                result.fail(
+                    `${label} each_key duplicate signal(s) detected (${anyEachKey}): ` +
+                        JSON.stringify([
+                            ...eachKeyConsole.map((m) => m.text),
+                            ...eachKeyThrows,
+                        ]),
+                );
+            }
+
+            // Baseline 3 — no unexpected page errors.
+            const otherErrors = pageErrors.filter(
+                (msg) => !isEachKeyDuplicateSignal(msg),
+            );
+            if (otherErrors.length === 0) {
+                result.ok(`${label} no unexpected page errors`);
+            } else {
+                result.fail(
+                    `${label} unexpected pageerror(s): ${JSON.stringify(otherErrors)}`,
+                );
+            }
+
+            await page.close();
+        }
+    }
+
+    return result;
+}
+
 // ── Driver ──────────────────────────────────────────────────────────
 
 async function main() {
@@ -2169,6 +2408,17 @@ async function main() {
     results.push({
         name: 'D104_focus_mode',
         ...focusRes.summarize(),
+    });
+
+    console.log(
+        `\n▶ D105 — mode × fixture matrix (5 × 7 = 35 cells, baseline)`,
+    );
+    const matrixRes = await runMatrixGate(browser, url);
+    matrixRes.passes.forEach((p) => console.log(`   ✓ ${p}`));
+    matrixRes.failures.forEach((f) => console.log(`   ✗ ${f}`));
+    results.push({
+        name: 'D105_mode_fixture_matrix',
+        ...matrixRes.summarize(),
     });
 
     await browser.close();

@@ -77,6 +77,49 @@
                         style="width: {Math.min(vitals.gpu.vram_pct, 100)}%"
                     ></div>
                 </div>
+                <!--
+                    v1.3.2 / DISPATCH 109 — GPU temp+power inline
+                    line beneath the VRAM bar. Same VRAM-honesty
+                    rule: `temp_c` / `power_w` are OPTIONAL fields
+                    on the wire (skip_serializing_if collapses
+                    unmeasured `None` to absent). Renderer must
+                    show `—` for absent, NEVER `0°C` / `0W`.
+                    `data-testid-unmeasured` flags both branches
+                    for the D98 gate.
+                -->
+                <div
+                    class="flex justify-between text-xs mt-1 text-fg-muted"
+                    data-testid="vitals-panel-gpu-line"
+                >
+                    <span>GPU</span>
+                    <span>
+                        {#if vitals.gpu.temp_c !== undefined && vitals.gpu.temp_c !== null}
+                            <span data-testid="vitals-panel-gpu-temp"
+                                >{vitals.gpu.temp_c.toFixed(0)}°C</span
+                            >
+                        {:else}
+                            <span
+                                data-testid="vitals-panel-gpu-temp"
+                                data-testid-unmeasured="true"
+                                title="No GPU temperature measurement this tick"
+                                >—</span
+                            >
+                        {/if}
+                        ·
+                        {#if vitals.gpu.power_w !== undefined && vitals.gpu.power_w !== null}
+                            <span data-testid="vitals-panel-gpu-power"
+                                >{vitals.gpu.power_w.toFixed(0)}W</span
+                            >
+                        {:else}
+                            <span
+                                data-testid="vitals-panel-gpu-power"
+                                data-testid-unmeasured="true"
+                                title="No GPU power measurement this tick"
+                                >—</span
+                            >
+                        {/if}
+                    </span>
+                </div>
             </div>
         {:else}
             <div class="text-xs text-fg-muted italic">No GPU detected</div>

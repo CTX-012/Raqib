@@ -189,7 +189,13 @@
         </div>
     </div>
 
-    <div class="kiosk-tiles grid grid-cols-1 md:grid-cols-3 gap-6 w-full max-w-5xl mt-8">
+    <!--
+        v1.3.2 / DISPATCH 109 — extended from 3 to 4 big tiles.
+        RAM · VRAM · GPU (temp+watts combined) · Thermal. The GPU
+        tile inserts between VRAM and Thermal so the two GPU-device
+        signals sit adjacent.
+    -->
+    <div class="kiosk-tiles grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-6 w-full max-w-6xl mt-8">
         <!-- RAM tile -->
         <div class="kiosk-tile" data-testid="kiosk-tile-ram">
             <div class="kiosk-tile-label text-fg-muted">RAM</div>
@@ -231,6 +237,61 @@
                     —
                 </div>
                 <div class="kiosk-tile-hint text-fg-muted">no measurement</div>
+            {/if}
+        </div>
+
+        <!--
+            v1.3.2 / DISPATCH 109 — GPU tile (4th). Combines temp +
+            power on one tile: `62°C · 45W`. Same signal source
+            (NVML gpu_nvidia) so they belong together conceptually.
+            Unmeasured branch shows `—` for each half independently,
+            NEVER `0°C` / `0W` (VRAM honesty rule extended to GPU).
+            `data-testid-unmeasured` on each unmeasured side lets
+            the D98 gate discriminate.
+        -->
+        <div class="kiosk-tile" data-testid="kiosk-tile-gpu">
+            <div class="kiosk-tile-label text-fg-muted">GPU</div>
+            {#if $snapshot.vitals.gpu !== null}
+                {@const gpu = $snapshot.vitals.gpu}
+                {@const tempMeasured = gpu.temp_c !== undefined && gpu.temp_c !== null}
+                {@const powerMeasured = gpu.power_w !== undefined && gpu.power_w !== null}
+                <div class="kiosk-tile-value text-fg" data-testid="kiosk-gpu-value">
+                    {#if tempMeasured}
+                        <span data-testid="kiosk-gpu-temp">{gpu.temp_c.toFixed(0)}°C</span>
+                    {:else}
+                        <span
+                            class="text-fg-muted"
+                            data-testid="kiosk-gpu-temp"
+                            data-testid-unmeasured="true">—</span
+                        >
+                    {/if}
+                    <span class="text-fg-muted"> · </span>
+                    {#if powerMeasured}
+                        <span data-testid="kiosk-gpu-power">{gpu.power_w.toFixed(0)}W</span>
+                    {:else}
+                        <span
+                            class="text-fg-muted"
+                            data-testid="kiosk-gpu-power"
+                            data-testid-unmeasured="true">—</span
+                        >
+                    {/if}
+                </div>
+                <div class="kiosk-tile-hint text-fg-muted">
+                    {#if !tempMeasured && !powerMeasured}
+                        no measurement
+                    {:else}
+                        {gpu.device_count} device{gpu.device_count === 1 ? '' : 's'}
+                    {/if}
+                </div>
+            {:else}
+                <div
+                    class="kiosk-tile-value text-fg-muted"
+                    data-testid="kiosk-gpu-value"
+                    data-testid-unmeasured="true"
+                >
+                    —
+                </div>
+                <div class="kiosk-tile-hint text-fg-muted">no GPU</div>
             {/if}
         </div>
 

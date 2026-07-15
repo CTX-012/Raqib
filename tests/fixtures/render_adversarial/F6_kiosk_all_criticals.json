@@ -16,7 +16,9 @@
       "vram_pct": 99.0,
       "vram_used_mb": 11880,
       "vram_total_mb": 12000,
-      "device_count": 1
+      "device_count": 1,
+      "temp_c": 87.0,
+      "power_w": 175.0
     },
     "thermal_zones": [
       { "label": "acpitz", "temp_celsius": 95.0, "severity": "red" },

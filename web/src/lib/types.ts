@@ -147,6 +147,20 @@ export interface WireGpu {
     vram_used_mb: number;
     vram_total_mb: number;
     device_count: number;
+    /**
+     * v1.3.2 / DISPATCH 109 — aggregated GPU die temperature (MAX
+     * across devices), degrees C. Absent from the wire when no
+     * device reported a measurement — NEVER coerced to 0. The
+     * renderer distinguishes "absent" (`—`) from "measured 0"
+     * (`"0°C"`) per the VRAM honesty rule established in D95/D102.
+     */
+    temp_c?: number;
+    /**
+     * v1.3.2 / DISPATCH 109 — aggregated GPU board power draw
+     * (SUM across devices), watts. Absent under the same
+     * unmeasured-≠-zero rule as `temp_c`.
+     */
+    power_w?: number;
 }
 
 export interface WireWorkload {

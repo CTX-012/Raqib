@@ -1058,6 +1058,26 @@ async function runKioskModeGate(browser, url) {
             const thermalTile = document.querySelector(
                 '[data-testid="kiosk-tile-thermal"]',
             );
+            // D109 — GPU tile (4th, added between VRAM and Thermal).
+            const gpuTile = document.querySelector(
+                '[data-testid="kiosk-tile-gpu"]',
+            );
+            const gpuTempEl = document.querySelector(
+                '[data-testid="kiosk-gpu-temp"]',
+            );
+            const gpuPowerEl = document.querySelector(
+                '[data-testid="kiosk-gpu-power"]',
+            );
+            const gpuTempText = gpuTempEl ? gpuTempEl.textContent.trim() : '';
+            const gpuPowerText = gpuPowerEl
+                ? gpuPowerEl.textContent.trim()
+                : '';
+            const gpuTempUnmeasured = gpuTempEl
+                ? gpuTempEl.getAttribute('data-testid-unmeasured') === 'true'
+                : false;
+            const gpuPowerUnmeasured = gpuPowerEl
+                ? gpuPowerEl.getAttribute('data-testid-unmeasured') === 'true'
+                : false;
             // No-interaction pin: count interactive nodes INSIDE
             // the kiosk view. The app header's mode select is
             // outside the view boundary so it doesn't count.
@@ -1078,6 +1098,11 @@ async function runKioskModeGate(browser, url) {
                 vramUnmeasured,
                 vramText,
                 hasThermalTile: !!thermalTile,
+                hasGpuTile: !!gpuTile,
+                gpuTempText,
+                gpuPowerText,
+                gpuTempUnmeasured,
+                gpuPowerUnmeasured,
                 interactiveNodes,
                 dashLeak: !!dashWorkloadsHead,
             };
@@ -1107,11 +1132,65 @@ async function runKioskModeGate(browser, url) {
             );
         }
 
-        if (shot.hasRamTile && shot.hasVramTile && shot.hasThermalTile) {
-            result.ok(`${label} 3 big-number tiles present (RAM / VRAM / THERMAL)`);
+        // D109 — 4 tiles now (RAM / VRAM / GPU / THERMAL). The GPU
+        // tile was added as landing 4 of the GPU-temp-power dispatch;
+        // the assertion count flips from "3 tiles present" to "4".
+        if (
+            shot.hasRamTile &&
+            shot.hasVramTile &&
+            shot.hasGpuTile &&
+            shot.hasThermalTile
+        ) {
+            result.ok(
+                `${label} 4 big-number tiles present (RAM / VRAM / GPU / THERMAL)`,
+            );
         } else {
             result.fail(
-                `${label} tile(s) missing: RAM=${shot.hasRamTile} VRAM=${shot.hasVramTile} THERMAL=${shot.hasThermalTile}`,
+                `${label} tile(s) missing: RAM=${shot.hasRamTile} VRAM=${shot.hasVramTile} GPU=${shot.hasGpuTile} THERMAL=${shot.hasThermalTile}`,
+            );
+        }
+
+        // D109 — GPU honesty discriminator at kiosk scale. Same
+        // pattern as the VRAM tile check: an unmeasured GPU signal
+        // must show "—" + data-testid-unmeasured, NEVER "0°C" /
+        // "0W". F6 has a real gpu with measured temp/power (both
+        // present). F1/F2/F3 have gpu:null so the tile shows an
+        // aggregate "—" with no per-half discriminator; F5 has a
+        // gpu but no temp_c/power_w on the fixture (should be
+        // unmeasured per half).
+        if (extra && extra.expectGpuTempMeasured) {
+            if (!shot.gpuTempUnmeasured && /\d+°C/.test(shot.gpuTempText)) {
+                result.ok(
+                    `${label} GPU temp measured tile shows numeric ("${shot.gpuTempText}")`,
+                );
+            } else {
+                result.fail(
+                    `${label} GPU temp measured missing: unmeasured=${shot.gpuTempUnmeasured}, text="${shot.gpuTempText}"`,
+                );
+            }
+        }
+        if (extra && extra.expectGpuPowerMeasured) {
+            if (!shot.gpuPowerUnmeasured && /\d+W/.test(shot.gpuPowerText)) {
+                result.ok(
+                    `${label} GPU power measured tile shows numeric ("${shot.gpuPowerText}")`,
+                );
+            } else {
+                result.fail(
+                    `${label} GPU power measured missing: unmeasured=${shot.gpuPowerUnmeasured}, text="${shot.gpuPowerText}"`,
+                );
+            }
+        }
+        // Belt-and-braces: the coerced-zero leak is FORBIDDEN. Even
+        // if the fixture doesn't declare an expectation, "0°C" or
+        // "0W" appearing in the GPU tile is a honesty violation.
+        if (shot.gpuTempText === '0°C' || shot.gpuTempText === '0') {
+            result.fail(
+                `${label} GPU temp shows "${shot.gpuTempText}" — the "0°C on a wall" trap the honesty discriminator forbids`,
+            );
+        }
+        if (shot.gpuPowerText === '0W' || shot.gpuPowerText === '0') {
+            result.fail(
+                `${label} GPU power shows "${shot.gpuPowerText}" — the "0W on a wall" trap the honesty discriminator forbids`,
             );
         }
 
@@ -1193,9 +1272,16 @@ async function runKioskModeGate(browser, url) {
 
     await probe('F6_kiosk_all_criticals', 'critical', {
         expectVramMeasured: true,
+        // D109 — F6 fixture updated with gpu.temp_c=87 gpu.power_w=175
+        // for the measured branch of the new GPU tile.
+        expectGpuTempMeasured: true,
+        expectGpuPowerMeasured: true,
     });
     await probe('F1_dense_colliding_names', 'healthy', {
         expectVramUnmeasured: true,
+        // F1 has gpu:null so the GPU tile aggregate shows "—";
+        // per-half discriminator doesn't apply (no gpu object to
+        // check temp_c/power_w against).
     });
     await probe('F2_duplicate_label_thermals', 'healthy', {
         expectVramUnmeasured: true,

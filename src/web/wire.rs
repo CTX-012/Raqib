@@ -469,6 +469,24 @@ pub struct WireGpu {
     pub vram_used_mb: u64,
     pub vram_total_mb: u64,
     pub device_count: usize,
+    /// v1.3.2 / DISPATCH 109 — aggregated GPU die temperature
+    /// across all devices (MAX). `None` when no device reported a
+    /// temperature this tick — NVML returns `Unsupported` on some
+    /// virtual GPUs, and the driver may be unloaded. `None` → the
+    /// renderer shows the VRAM-honesty-rule "—", NEVER "0°C".
+    ///
+    /// The `skip_serializing_if` keeps the wire honest: absent on
+    /// the wire when unmeasured, not a JSON `null` or a coerced
+    /// `0` (the same discriminator D95 / D102 / D103 established
+    /// for VRAM samples).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub temp_c: Option<f32>,
+    /// v1.3.2 / DISPATCH 109 — aggregated GPU board power draw
+    /// across all devices (SUM). `None` under the same "no device
+    /// reported" condition as `temp_c`. Renderer shows "—", not
+    /// "0W".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub power_w: Option<f32>,
 }
 
 /// One AI workload row.
@@ -860,11 +878,38 @@ impl WireVitals {
             } else {
                 0.0
             };
+            // v1.3.2 / DISPATCH 109 — aggregate temp/power across
+            // devices. MAX temp (hottest device dominates — matches
+            // the TUI thermal panel's "top zone drives the row
+            // color" convention). SUM watts (total board draw is
+            // the operator's power-budget signal). Both `None` when
+            // no device reports the signal — the VRAM honesty
+            // rule for the wire boundary, so the renderer can
+            // discriminate unmeasured from zero.
+            let temp_c = snap
+                .gpu
+                .devices
+                .iter()
+                .filter_map(|d| d.temp_c)
+                .fold(None::<f32>, |acc, t| Some(acc.map_or(t, |a| a.max(t))));
+            let power_w = {
+                let mut sum: f32 = 0.0;
+                let mut any = false;
+                for d in &snap.gpu.devices {
+                    if let Some(w) = d.power_watts {
+                        sum += w;
+                        any = true;
+                    }
+                }
+                any.then_some(sum)
+            };
             Some(WireGpu {
                 vram_pct: pct,
                 vram_used_mb: used / (1024 * 1024),
                 vram_total_mb: total / (1024 * 1024),
                 device_count: snap.gpu.devices.len(),
+                temp_c,
+                power_w,
             })
         } else {
             None
@@ -1425,6 +1470,74 @@ mod tests {
     ///
     /// AUTHORITY LOCK: this test exercises the wire mapping; no
     /// kill / signal / actuation reached.
+    /// v1.3.2 / DISPATCH 109 — the VRAM-honesty rule at the wire
+    /// boundary for `WireGpu.temp_c` / `power_w`. `None` MUST NOT
+    /// appear on the wire (skip_serializing_if collapses it to
+    /// absent), NEVER as JSON `null` OR the coerced `0`. Renderers
+    /// discriminate absent → "—" from measured 0 → "0°C" / "0W"
+    /// on this same boundary; a leak here would coerce every
+    /// unmeasured tick to a lying zero.
+    #[test]
+    fn wire_gpu_temp_and_power_none_omit_fields_from_json() {
+        let unmeasured = WireGpu {
+            vram_pct: 12.5,
+            vram_used_mb: 100,
+            vram_total_mb: 800,
+            device_count: 1,
+            temp_c: None,
+            power_w: None,
+        };
+        let json = serde_json::to_string(&unmeasured).unwrap();
+        assert!(
+            !json.contains("temp_c"),
+            "unmeasured GPU temp MUST be absent from the wire; got {json}",
+        );
+        assert!(
+            !json.contains("power_w"),
+            "unmeasured GPU power MUST be absent from the wire; got {json}",
+        );
+        // Also guard against the coerced-to-zero leak: an object
+        // with `\"temp_c\":0` or `\"power_w\":0` would let a renderer
+        // show a giant "0°C" wall lie. The absent path prevents
+        // that structurally.
+        assert!(!json.contains("\"temp_c\":0"));
+        assert!(!json.contains("\"power_w\":0"));
+    }
+
+    #[test]
+    fn wire_gpu_temp_and_power_some_zero_serialize_as_zero_not_omitted() {
+        // The distinguishability half: a genuine measured `Some(0)`
+        // must serialize AS "0" — the honesty discriminator between
+        // "no measurement" and "measured zero." Same pattern D95's
+        // WireSample.vram_mb test pins.
+        let measured_zero = WireGpu {
+            vram_pct: 0.0,
+            vram_used_mb: 0,
+            vram_total_mb: 12000,
+            device_count: 1,
+            temp_c: Some(0.0),
+            power_w: Some(0.0),
+        };
+        let json = serde_json::to_string(&measured_zero).unwrap();
+        assert!(json.contains("\"temp_c\":0"));
+        assert!(json.contains("\"power_w\":0"));
+    }
+
+    #[test]
+    fn wire_gpu_temp_and_power_some_nonzero_serialize_normally() {
+        let measured = WireGpu {
+            vram_pct: 22.0,
+            vram_used_mb: 2640,
+            vram_total_mb: 12000,
+            device_count: 1,
+            temp_c: Some(62.5),
+            power_w: Some(45.0),
+        };
+        let json = serde_json::to_string(&measured).unwrap();
+        assert!(json.contains("\"temp_c\":62.5"));
+        assert!(json.contains("\"power_w\":45"));
+    }
+
     #[test]
     fn recommendations_project_to_wire() {
         use crate::ui::alerts::WorkloadRef;

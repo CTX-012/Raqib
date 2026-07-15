@@ -128,21 +128,27 @@ pub fn render(f: &mut Frame, area: Rect, state: &RuntimeState, theme: &UiTheme) 
         return;
     };
 
-    // v1.1.12 / CAR-22 — the thermal row is a 5th
-    // `Constraint::Length(1)` row, hidden (rendered as a no-op) when
-    // no zones are discovered. The constraint stays the same so the
-    // layout is identical whether thermal is hidden or shown — the
-    // alternative (conditional row count) would make the panel
-    // resize between ticks if thermal discovery raced the first
-    // sample.
+    // v1.1.12 / CAR-22 — the thermal row is a `Constraint::Length(1)`
+    // row, hidden (rendered as a no-op) when no zones are
+    // discovered. The constraint stays the same so the layout is
+    // identical whether thermal is hidden or shown — the alternative
+    // (conditional row count) would make the panel resize between
+    // ticks if thermal discovery raced the first sample.
+    //
+    // v1.3.2 / DISPATCH 109 — extended from 5 to 6 rows. New row 3
+    // is the GPU temp+power tile, inserted between VRAM and
+    // Processes so the two GPU-device signals sit adjacent. Same
+    // "always allocate; hide-empty via a stable no-op" pattern as
+    // the thermal row.
     let cols = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Length(1),
+            Constraint::Length(1), // [0] RAM gauge
+            Constraint::Length(1), // [1] CPU load
+            Constraint::Length(1), // [2] VRAM gauge / "No GPU"
+            Constraint::Length(1), // [3] D109 — GPU temp+power line
+            Constraint::Length(1), // [4] Processes
+            Constraint::Length(1), // [5] Thermal (hidden when empty)
         ])
         .split(inner);
 
@@ -216,6 +222,52 @@ pub fn render(f: &mut Frame, area: Rect, state: &RuntimeState, theme: &UiTheme) 
         f.render_widget(p, cols[2]);
     }
 
+    // v1.3.2 / DISPATCH 109 — GPU temp+power row. Aggregates across
+    // devices: MAX temp (hottest device drives the row per the
+    // thermal-panel convention), SUM watts (total board draw).
+    // Unmeasured → "—", NEVER "0°C" / "0W" (the VRAM honesty rule
+    // extended to GPU signals). NVML may return `Unsupported` on
+    // virtual GPUs and the driver may be unloaded — both surface
+    // as `Option<f32>::None` at the device layer.
+    let gpu_line = if snap.gpu.has_gpu() {
+        let temp_c = snap
+            .gpu
+            .devices
+            .iter()
+            .filter_map(|d| d.temp_c)
+            .fold(None::<f32>, |acc, t| Some(acc.map_or(t, |a| a.max(t))));
+        let (power_w, any_power) = {
+            let mut sum: f32 = 0.0;
+            let mut any = false;
+            for d in &snap.gpu.devices {
+                if let Some(w) = d.power_watts {
+                    sum += w;
+                    any = true;
+                }
+            }
+            (sum, any)
+        };
+        let temp_str = temp_c.map_or_else(|| "—".to_string(), |t| format!("{t:.0}°C"));
+        let power_str = if any_power {
+            format!("{power_w:.0}W")
+        } else {
+            "—".to_string()
+        };
+        Paragraph::new(format!(
+            "{:<width$}{} · {}",
+            "GPU",
+            temp_str,
+            power_str,
+            width = LABEL_WIDTH,
+        ))
+        .style(Style::default().fg(theme.foreground))
+    } else {
+        // No GPU → the row is empty. Same "hide via no-op paragraph"
+        // pattern the thermal row uses when no zones are discovered.
+        Paragraph::new("")
+    };
+    f.render_widget(gpu_line, cols[3]);
+
     let ai_count = state.ai_processes().count();
     let proc_line = Paragraph::new(format!(
         "{:<width$}{} total   {} AI workloads",
@@ -225,14 +277,17 @@ pub fn render(f: &mut Frame, area: Rect, state: &RuntimeState, theme: &UiTheme) 
         width = LABEL_WIDTH,
     ))
     .style(Style::default().fg(theme.foreground));
-    f.render_widget(proc_line, cols[3]);
+    f.render_widget(proc_line, cols[4]);
 
     // v1.1.12 / CAR-22 — thermal summary row (hidden when no zones).
     // AUTHORITY LOCK: this is display only. No alert fires from this
     // path; the renderer reads `snap.vitals.thermal_zones` (populated
     // by `platform::host_vitals::collect_host_vitals`) and shows
     // values + color. Alert firing on thermal is v1.2.0+ scope.
-    render_thermal_summary(f, cols[4], theme, &snap.vitals.thermal_zones, &state.thresholds);
+    // v1.3.2 / DISPATCH 109 — thermal row moved from cols[4] to
+    // cols[5] to make room for the new GPU row at cols[3]. The
+    // renderer's own hide-when-empty semantic is unchanged.
+    render_thermal_summary(f, cols[5], theme, &snap.vitals.thermal_zones, &state.thresholds);
 }
 
 #[cfg(test)]

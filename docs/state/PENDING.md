@@ -14,6 +14,38 @@
 
 ---
 
+## [FINDING] "TUI essentials-only" is ALREADY DONE as originally scoped — 2026-07-15
+
+**What I was asked to do:** Phase 1's plan called for an investigator-pass on the "TUI essentials-only rework" (the last unstarted Phase-5 item per BOARD.md), then propose a design.
+
+**What I found:** BOARD_AUDIT §3 (the source-of-truth ratified scope for the phrase) enumerates the "TUI-essentials rework" as EXACTLY four defects, all of which shipped in DISPATCH 107:
+
+| BOARD_AUDIT §3 item | D107 FIX | Verifiable at |
+| --- | --- | --- |
+| Duplicate "AI Workloads" panel (unconditional at 5+ workloads) | FIX 1 | `src/ui/panels/mod.rs:249` — `render_workloads_two_col` fn removed, comment explains the change |
+| No column headers on AI Workloads rows | FIX 2 | `src/ui/panels/workloads.rs:98,538` — new `column_header_line()` fn + call site |
+| `sha256-…` digest leaking into workload NAME field | FIX 3 | `src/telemetry/samplers/ollama_api.rs` + `src/runtime.rs` — hint prefers friendly name, runtime promotes onto AnnotatedProcess.model_name |
+| Vitals no aligned column grid / stranded RAM | FIX 4 | `src/ui/panels/vitals.rs` — LABEL_WIDTH=12 grid across every row |
+
+**BOARD.md is stale on this point.** It says the phrase is "unstarted" but the phrase-as-defined shipped 2 dispatches ago. The BOARD update is a small doc landing I'll take as part of Phase 1 (not a HARD STOP).
+
+**No design proposal needed for TUI-essentials-as-defined.** The phrase's originally-ratified scope is closed. Writing a proposal would be scope-invention — inspector's HARD STOP #3 discipline says "if no doc settles it, propose OPTIONS not decide" — but here the doc DOES settle it (BOARD_AUDIT §3), and it says done.
+
+**If you WANT more TUI work — the candidate follow-ons that AREN'T shipped:**
+These would each need their own scope decision (each is HARD STOP #3 if you want me to build any of them — I'd write a proposal per item). Enumerated for your reference; NOT proposing to build without ratification:
+
+- **Hardware identity (`HostInfo`)** — BOARD_AUDIT §2.1 marks this as NEW / v1.4.x. Show GPU name (NVML `nvmlDeviceGetName`), CPU name (`/proc/cpuinfo`, no shellout), RAM identity. Open question: RAM = capacity label (free, procfs) vs DIMM part/speed (needs root `dmidecode` — footgun on an unprivileged tool). Open question: TUI-only vs wire to web.
+- **AlertState raise/ack events into RuntimeState** — BOARD_AUDIT §3 surfacing gap V7. Signal exists internally; not accumulated onto the wire/UI.
+- **Classifier consistency** — BOARD_AUDIT §2.2: "same binary (`claude`) lands in both Agent and Unknown; `bash` shows as a workload. Partial." Not TUI-cosmetic; classifier-logic scope.
+- **Top Processes card on web** — BOARD_AUDIT §2.3 / §2.6: exists on TUI, missing from web. Web-parity gap.
+- **Activity content parity (TUI vs web)** — BOARD_AUDIT §3 "Tester gate to confirm" — needs a diff pass to enumerate.
+
+None of these are "TUI-essentials-only" per the ratified phrase. All are follow-on scope. Your call which (if any) to open.
+
+**Autonomous action I took:** none for this item beyond writing this finding. BOARD update lands in the next commit. No landing 1.x needed.
+
+---
+
 ## [STOP #3 — RESOLVED 2026-07-15] GPU temp/power tile — design ratified
 
 Operator confirmed inspector lean **1c / 2a / 3a**: VitalsPanel + KioskView

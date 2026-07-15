@@ -18,8 +18,9 @@
 - Cleanup: TUI cluster + LOW sweep done.
 
 ## Open items (safe to work on autonomously unless flagged)
-- **TUI essentials-only** — a rework (last unstarted Phase-5 item). Needs a design pass first if none exists — HARD STOP #3 to get the design ratified, THEN build.
-- ~~GPU temp/power tile~~ — ✅ SHIPPED (D109 landings 3 + 4). VitalsPanel + KioskView both surface the aggregate; F6 fixture updated; gate at 223/0. Unpushed pending operator review.
+- ~~TUI essentials-only~~ — ✅ SHIPPED. Investigator finding 2026-07-15 (see PENDING.md): the phrase-as-ratified in BOARD_AUDIT §3 was exactly 4 defects, all closed by DISPATCH 107 (duplicate panel / column headers / sha256 leak / vitals grid). Any additional TUI work is FOLLOW-ON scope — enumerated as candidates in PENDING.md, each needing its own scope decision.
+- ~~GPU temp/power tile~~ — ✅ SHIPPED (D109 landings 3 + 4). VitalsPanel + KioskView both surface the aggregate; F6 fixture updated; gate at 223/0. Pushed 2026-07-15.
+- **(no open items — everything remaining is human-blocked or hardware-blocked)**
 
 ## Blocked — needs human (do NOT attempt)
 - **Versioning decision** — two Phase-5 arcs under `[Unreleased]`; whether to tag v2.0.0. HUMAN DECISION.
@@ -29,7 +30,7 @@
 - ITEM 2: dead const `KILL_ARM_WINDOW_SECS` in `../ux_contract` — trivial removal but it's the contract crate — CAR (HARD STOP #2), rides the next contract bump.
 
 ## Pending human action (check PENDING.md)
-- **Push authorization** — landings 1 (73857b6, orchestration structure) + 3 (814c1b3, wire+TUI) + 4 (e4772d3, web consumers) sitting locally. Awaiting `git push` at your milestone gate.
+- (none right now — D109 landings pushed 2026-07-15, operator confirmed. `git fetch` in this shell cannot verify remote-tracking-ref sync due to no cached creds — the audit sweep in Phase 2 flags this ceiling explicitly.)
 
 ## Config note
 - The binary reads config from `./edge_monitor.toml` (CWD) or `--config <path>`, NOT `~/.config/`. The repo-root `edge_monitor.toml` has `[web] allow_no_auth = true` (open API, no token for curl/smoke). `--bind 127.0.0.1` for local-only.

@@ -185,6 +185,127 @@ This arc lands under **Unreleased** — no version bump. A future
 release will roll Phase 5 (History subsystem + Display modes) into
 a numbered version together.
 
+---
+
+## Follow-on landings (post-arc-close, under the same [Unreleased])
+
+Three small dispatches after the display-modes arc closed at D106:
+D107 (TUI display cluster), D108 (LOW hygiene sweep), D109 (GPU
+temp/power tile). None touch the governor / kill path. None require
+a `ux_contract` bump. Documented here for the record; each commit
+carries the full detail.
+
+### Added (D109)
+
+- **GPU temp/power tile** — the "NVML signal exists but isn't
+  surfaced" backlog item (BOARD_AUDIT §2.1 / V1 / V2) closed.
+  - `WireGpu` gains `temp_c: Option<f32>` + `power_w: Option<f32>`,
+    both with `#[serde(skip_serializing_if = "Option::is_none")]`
+    so unmeasured → absent (never JSON `null` or coerced `0` — the
+    VRAM honesty rule extended to GPU signals).
+  - Aggregation across devices: MAX temp (hottest drives the row,
+    matches thermal-panel convention), SUM watts (total board
+    draw is the operator's power-budget signal).
+  - TUI vitals grew from 5 → 6 rows; new GPU row `GPU  62°C · 45W`
+    sits between VRAM and Processes on the D107 12-char label grid.
+  - Web dashboard `VitalsPanel` gains an inline GPU line beneath
+    the VRAM bar with the same discriminator handling.
+  - Kiosk mode grew from 3 → 4 big tiles (RAM · VRAM · **GPU** ·
+    Thermal). Per-half unmeasured handling: temp or power can be
+    "—" independently when one NVML query returns Unsupported.
+  - `F6_kiosk_all_criticals.json` fixture updated with the new
+    fields for the D98 gate's measured-branch assertions.
+  - Ratified design lean (1c/2a/3a): VitalsPanel + KioskView
+    surfaces (skip Strip); one combined kiosk tile; MAX / SUM
+    aggregation.
+
+### Fixed (D107 — cosmetic TUI/display cluster)
+
+Five disjoint fixes, none touching the governor or kill path:
+
+- **Duplicate "AI Workloads" panel** at Wide tier + 4+ workloads
+  (BOARD_AUDIT §2.2). `render_workloads_two_col` split the area
+  into halves and each half emitted its own titled `panel_block`.
+  Removed the two-col branch AND the fn entirely; every tier now
+  single-column. `at_160x50_tier_is_wide_and_renders_without_panic`
+  test flipped from `≥2 occurrences` (pinning the bug) to
+  `==1 occurrence` (pinning the fix).
+- **No column headers on the workloads panel** (BOARD_AUDIT §2.2).
+  New `column_header_line(narrow, show_model, show_activity)` fn
+  emits a muted header line at the top of the panel; column widths
+  mirror the row `format!` sites exactly.
+- **sha256 blob → friendly model name** (BOARD_AUDIT §2.2, root at
+  `ollama_api.rs:356`). The runner's cmdline-extracted
+  `sha256-<hex>` was leaking into the workloads panel's model
+  column. Two-part fix: sampler emits the friendly name from
+  `/api/ps` when unambiguous (`loaded.len() == 1`); runtime
+  promotes the hint onto `AnnotatedProcess.model_name` when the
+  current value looks like a raw sha256 blob.
+- **Vitals no-grid / stranded RAM** (BOARD_AUDIT §2.1). Every row
+  now leads with a fixed-width 12-char label so RAM / CPU load /
+  VRAM / Processes / Thermal share one left-column axis.
+- **ModePlaceholder.svelte dead-code sweep** (D106 follow-up).
+  Deleted the placeholder file (already tree-shaken from the
+  D104-onward bundle); pure source cleanup.
+
+### Chore (D108 — LOW hygiene sweep)
+
+- **CHANGELOG typo** — `[1.0.1]` said "closing twelve Inspector-
+  surfaced bugs" where the actual count is 11 (B-NEW-1..B-NEW-11).
+  Fixed.
+- **SCHEMA firewall robustness** — the pre-D108
+  `SCHEMA_PATHS = &["src/config.rs"]` was a single-entry array
+  that would silently miss forbidden-token drift if the schema
+  split into multiple files. Added
+  `schema_paths_covers_every_schema_defining_file` — a
+  completeness pin that walks `src/`, finds every file with
+  `#[derive(Deserialize)]` + a `*Config` struct name or known
+  schema type, and asserts each is registered. Surfaced 3
+  additional files; added them (broader coverage = STRONGER
+  firewall). Test count 4 → 5.
+- **v1.1.5 retro-tag** — the `v1.1.5` release was committed +
+  merged (DISPATCH 16) but never tagged. Tagged commit `e7020bb`
+  matching the tag-the-merge convention of adjacent tags. Sequence
+  now closes cleanly between v1.1.4 and v1.1.6.
+- **Gitignore hygiene** — new pattern
+  `/tests/empirical/*_2026-*/` ignores date-suffixed session
+  investigation dirs (tracked historical evidence under
+  versioned prefixes stays intact). `scratch_web.log` added.
+  `edge_monitor.toml` was already ignored (no-op noted).
+- **KILL_ARM_WINDOW_SECS removal** ⏳ **DEFERRED** to a CAR.
+  Confirmed dead in Rust code (zero refs; only doc mentions and
+  the definition at `~/ux_contract/src/lib.rs:164`). Removal
+  requires editing `~/ux_contract`; HARD STOP #2 fires — a CAR
+  rides the next contract bump.
+
+### Changed (D107 dashboard note)
+
+- **TUI vitals grew from 5 to 6 rows** at D109 (see Added above).
+  The D107 12-char label grid remains the load-bearing invariant;
+  the new GPU row respects it in lockstep.
+
+### Discipline
+
+- Zero governor / kill-path touch across D107 + D108 + D109.
+- Zero `ux_contract` bumps (D108 ITEM 2 explicitly deferred to a
+  CAR; D109 wire fields live entirely in `src/web/wire.rs` per
+  contract-locality — additive consumer-side change, no CAR
+  needed).
+- Zero new dependencies.
+- Test progression across the three dispatches:
+  1180 → 1180 (D107) → 1181 (D108, +1 SCHEMA completeness pin) →
+  1184 (D109 landing 3, +3 GPU wire-honesty tests).
+- Browser render-gate progression:
+  221 → 221 (D107 — bundle bit-identical, dead-code was already
+  tree-shaken) → 221 (D108 — test-only) → 223 (D109 landing 4,
+  +2 GPU-measured-half assertions on the F6 kiosk probe).
+- Bundle etag: `f3715c48...` (pre-D107) → `f3715c48...` (D107
+  no bundle change) → `f3715c48...` (D108 no bundle change) →
+  `be2dcacf...` (D109 landing 4). *Rust-embed rebuild note:
+  release-binary rebuild needs a `touch src/web/assets.rs` when
+  only `web/dist/` changed — cargo doesn't always re-invalidate
+  otherwise.*
+
 ## [1.3.2] — 2026-06-05 — Phase 4 step 3: per-workload suppression rules + web cache headers
 
 DISPATCH 57. Adds `[[workloads]]` per-workload suppression rules

@@ -4,9 +4,9 @@
 
 ## HEAD
 - Branch: `l14-top-processes-sort`
-- Last tag baseline: `v1.3.2-36-g729bdf7`
-- Rust tests: 1181 / 0 fail
-- Browser render-gate: 221 / 0 (`npm --prefix web run test:browser`)
+- Last tag baseline: `v1.3.2-39-ge4772d3` (unpushed — landings 1 + 3 + 4 sitting locally)
+- Rust tests: 1184 / 0 fail
+- Browser render-gate: 223 / 0 (`npm --prefix web run test:browser`)
 - SCHEMA firewall: 5 / 5
 - ux_contract: v0.3.21 (sibling repo `../ux_contract` — DO NOT EDIT)
 
@@ -19,7 +19,7 @@
 
 ## Open items (safe to work on autonomously unless flagged)
 - **TUI essentials-only** — a rework (last unstarted Phase-5 item). Needs a design pass first if none exists — HARD STOP #3 to get the design ratified, THEN build.
-- GPU temp/power — a TUI/web tile (read + Prometheus exist, not surfaced). Low-risk, buildable.
+- ~~GPU temp/power tile~~ — ✅ SHIPPED (D109 landings 3 + 4). VitalsPanel + KioskView both surface the aggregate; F6 fixture updated; gate at 223/0. Unpushed pending operator review.
 
 ## Blocked — needs human (do NOT attempt)
 - **Versioning decision** — two Phase-5 arcs under `[Unreleased]`; whether to tag v2.0.0. HUMAN DECISION.
@@ -29,7 +29,7 @@
 - ITEM 2: dead const `KILL_ARM_WINDOW_SECS` in `../ux_contract` — trivial removal but it's the contract crate — CAR (HARD STOP #2), rides the next contract bump.
 
 ## Pending human action (check PENDING.md)
-- (none right now)
+- **Push authorization** — landings 1 (73857b6, orchestration structure) + 3 (814c1b3, wire+TUI) + 4 (e4772d3, web consumers) sitting locally. Awaiting `git push` at your milestone gate.
 
 ## Config note
 - The binary reads config from `./edge_monitor.toml` (CWD) or `--config <path>`, NOT `~/.config/`. The repo-root `edge_monitor.toml` has `[web] allow_no_auth = true` (open API, no token for curl/smoke). `--bind 127.0.0.1` for local-only.

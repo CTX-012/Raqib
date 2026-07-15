@@ -1,267 +1,56 @@
-# CLAUDE.md
+# CLAUDE.md — edge_monitor operating rules
 
-> Read this every session. If it conflicts with what the user (or the
-> orchestrator running a multi-agent session) says, surface the conflict —
-> do not silently drift.
->
-> **Locked source of truth: [DESIGN_HANDOFF.md](DESIGN_HANDOFF.md).**
-> UX_CONTRACT.md v0.3 lives inside it (§0–§15). The Linux implementation
-> plan (L1–L26) lives there too. Read both before editing user-visible
-> code.
+You are operating **autonomously** on edge_monitor. The human checks in at milestones, not every step. That trust is conditional on the rules below. Follow them exactly.
 
 ## What this project is
+A Rust TUI + Svelte web monitor/governor for AI workloads (ollama, claude agents, ROS2, vLLM) on a shared RTX 3060 Ubuntu host. It can autonomously KILL processes. The web companion serves on :7070. Repo layout: Rust in `src/`, web in `web/`, the contract crate is a SIBLING repo at `../ux_contract` (you may NOT edit it — see below).
 
-Model-aware resource monitor and governor for edge AI workloads.
-Linux-first. Target: Ubuntu 22.04+ and JetPack 6 on Jetson Orin.
+## The prime directive: dormant-before-live, verify-before-trust
+Every capability ships **dormant first** (gated off, invisible), gets **proven**, then is **exposed deliberately**. Never wire a live consumer to unproven machinery. This is how the whole project was built and why it never thrashed.
 
-A sibling Windows binary lives in a separate repo and shares the same
-UX contract; this repo is the Linux reference implementation.
+## 🛑 HARD STOPS — surface to the human, do NOT auto-proceed, even though permissions allow it
 
-## Scope
+Permissions guard destructive *shell*. These rules guard dangerous *judgment*. When any of these is true, STOP and write a note to the human in `docs/state/PENDING.md`, then wait:
 
-Current scope is whatever the locked UX_CONTRACT.md v0.3 (in
-`DESIGN_HANDOFF.md`) describes. Out-of-scope items are listed in
-UX_CONTRACT.md §0 — push back on requests for them rather than
-silently expanding scope.
+1. **The governor / kill / actuation path.** ANY change under `src/governor/`, or to `send_sigterm`/`send_sigkill`/`execute_after_grace`/`libc::kill`/threshold-evaluation/auto_actuate logic, or to the kill decision, sustain gates, or identity guards. Even a "cosmetic" edit there. The kill path is NEVER touched autonomously — it is the one thing that can do irreversible harm. Surface, describe the change, wait.
+2. **A contract change is needed.** If the work needs a new wire type, a new `/api` endpoint, or any edit to `../ux_contract`, you CANNOT do it (permissions deny it, correctly). Write a Contract Amendment Request (CAR) to `docs/state/PENDING.md` describing the exact types/constants needed, and STOP. The human routes it.
+3. **A design decision that isn't already ratified.** If the task requires choosing between materially different approaches that a doc doesn't already settle (e.g. "which 5 modes", "settings in dashboard vs modal", "merge these two data streams or keep separate"), STOP. Write the options + your recommendation to `docs/state/PENDING.md`. Do not pick a product/UX direction on your own authority — propose, don't decide.
+4. **A destructive or irreversible action** the permissions somehow didn't catch (deleting tracked data, rewriting history, anything you can't `git revert`).
+5. **You're about to enable auto_actuate=true, arm the killer, or make a kill actually fire.** Never. This requires explicit human action at the console with a verified VRAM signal and a disposable target. Surface.
 
-## Multi-agent workflow
+## Enabled autonomy — do these freely (within the permission allowlist)
+- Read/grep/explore the codebase (no limit — explore before acting)
+- Write/edit files under `src/`, `tests/`, `web/src/`
+- `cargo build`, `cargo test`, `cargo clippy` — run them, read the output, iterate on errors until green
+- `npm --prefix web run build`, `npm --prefix web run test:browser` — build the bundle, run the browser render-gate
+- Run the binary (`./target/release/edge_monitor`) for smoke checks
+- Web search for current information
+- `git status/diff/log/add` freely; `git commit`/`push` will prompt (ask rule) — that's the milestone checkpoint
 
-This repo is currently being driven by a parallel-agent workflow
-coordinated by an orchestrator:
+## The build loop (follow this shape for every task)
+1. **Read first.** Read `docs/state/BOARD.md` (current state), the relevant design doc in `docs/`, and the code you're about to touch. Read the SKILL/tripwire tests that guard the area.
+2. **Design-first for anything non-trivial.** If there's no design doc for the feature, that's a HARD STOP #3 — surface, don't design-and-build in one shot. If a design doc exists, follow it exactly; deviations surface back to the doc.
+3. **Build dormant.** New capability lands gated-off / consumer-less first. Add the machinery, don't wire the live consumer yet.
+4. **Test hard.** Write tests that pin the behavior AND the invariant (a "nothing-wired-yet" or "still-gated" tripwire, like the existing ones). Run `cargo test` + `test:browser`. Green before proceeding.
+5. **Convert tripwires, don't delete them.** When an invariant evolves (e.g. a read path opens that was forbidden), CONVERT the guarding test to pin the NEW shape (reads-only-here), never delete it. See `history_capture_is_wired_exactly_once_in_runtime` for the pattern.
+6. **Verify live when it's a behavior/render change.** Build the release binary, run it, confirm the actual behavior. Web render changes especially: the `test:browser` gate (currently 221 assertions) must stay green AND the change should render correctly. Note: the human milestone-verifies; you self-verify first and report what you saw.
+7. **One landing = one commit, revert-safe.** Keep each change atomic. The commit prompt is the human's milestone gate — write a clear commit message describing what shipped, what's still dormant, and what (if anything) is pending human action.
+8. **Update the journal.** After each landing, append to `docs/state/JOURNAL.md` and update `docs/state/BOARD.md`. This is how context survives between your sessions — WRITE IT DOWN, incrementally, because you won't remember next session.
 
-- **Agent A** owns the shared `ux_contract` crate at `~/ux_contract`.
-- **Agent B** (this repo) consumes `ux_contract` via path dependency
-  and ships the Linux L1–L26 plan, one PR per row.
-- **Agent C** owns the Windows repo and the W1–W49 plan.
+## Invariants that must never break (the firewalls + tripwires)
+Run `cargo test` — these must stay green. If a change would break one, either the change is wrong or the invariant genuinely evolved (convert the tripwire, HARD STOP if it's kill-path):
+- SCHEMA firewall (config has no action-verb fields) — 5 tests
+- The governor observe-only + kill-gating tripwires (`send_sigterm_actuation_site_is_auto_actuate_gated`, `send_sigkill_callers_are_gated`, etc.) — **if these change, HARD STOP #1**
+- History capture wiring (`history_capture_is_wired_exactly_once_in_runtime`)
+- The browser render-gate (`npm --prefix web run test:browser`, 221 assertions) — must stay green through any web change; extend it when you add render surface
 
-**No UX changes without a contract amendment.** If implementing a row
-reveals a string template, alert ID, threshold, action, theme, or sizing
-constant that v0.3.0 of `ux_contract` does not provide, do **not** edit
-`~/ux_contract` from this repo — file a "Contract Amendment Request" in
-the status report and stop. Agent A is the only writer for that crate.
+## The VRAM honesty rule (load-bearing on this host — the GPU driver is unloaded, so "unmeasured" is the COMMON case)
+"No VRAM measurement" is NOT "0 MB". Everywhere — captured samples, wire serialization, charts, big kiosk tiles, sparklines — unmeasured VRAM must render as a gap / "—" / absent, NEVER a 0 or 0-line. A giant "0% VRAM" on a wall monitor is a lie (reads as "GPU idle"). This discriminator has survived every layer of the codebase; do not collapse it to a lying zero.
 
-**Plan ordering is strict.** L1 lands first; subsequent rows depend on
-the foundation L1–L4 establishes. Do not chain rows without explicit
-"ship it" approval from the orchestrator.
+## Contract discipline (even though you can't edit the contract)
+When a CAR is needed (HARD STOP #2): the human/Agent A edits `../ux_contract`, bumps the version, tags AND pushes it (no orphan tags — a committed-but-unpushed tag was a past bug). You consume the new symbols after they land (path-dep picks them up on next `cargo build`). Never assume a contract symbol exists before it's tagged.
 
-## Architecture
-
-```
-Platform → Classifier → Lifecycle → Governor → UI
-            (annotate)    (track)    (decide)   (render)
-```
-
-One tick per second by default. UI renders at 10 Hz with cached data.
-
-`Platform` is an enum, not a trait — two backends in v1 (Linux,
-Jetson). Refactor to `Box<dyn PlatformMetrics>` at 4+ backends, not
-before.
-
-## Coding conventions
-
-- `thiserror` for typed error enums per module
-- `anyhow` for error propagation at `main.rs` boundary only
-- `tracing` for logs — never `println!` or `eprintln!` in library code
-- Comments explain WHY, not WHAT
-- After any non-trivial block, the code must make one of these visible:
-  key decision, baked-in assumption, or what breaks if the assumption is
-  wrong
-- Every external dependency call (file I/O, NVML, signals) must have
-  explicit error handling — no silent `.ok()` swallowing
-- No blocking I/O in the tick loop
-- No `std::thread::sleep` — use `std::time::Instant` and elapsed checks,
-  or `mpsc::Receiver::recv_timeout` as the TUI/headless park points
-- User-visible strings come from `ux_contract::{status,empty,confirm,
-  errors,alerts}::*`. Hardcoded literals in `src/ui/` are caught by
-  `tests/copy_strings_via_contract.rs` (added in L1).
-
-### `unwrap()` and `expect()` rules
-
-- No `unwrap()` outside tests.
-- No `expect()` outside tests **except for documented invariants
-  equivalent to "the binary is malformed (or its baseline runtime
-  environment is broken beyond recovery) if this fails"**. Each such
-  call **must** be preceded by an `// ok: expect — <one-line reason>`
-  comment so reviewers and auditors can skip them, and
-  `rg 'expect\(' src/` outside `#[cfg(test)]` must show only annotated
-  lines. Accepted patterns:
-  1. **Mutex-poison recovery** on a writer whose corruption is worse
-     than a crash (e.g. the audit writer in `governor/audit.rs`, the
-     lifecycle log store).
-  2. **`Regex::new` inside `OnceLock`-initialised statics** where the
-     pattern is a compile-time constant.
-  3. **`reqwest::Client::builder().build()` in a sampler constructor**
-     where the only failure mode is "the system's TLS / DNS resolver
-     stack is broken" — at that point we cannot run anyway.
-
-  Any new pattern beyond these requires updating this list (and
-  reviewer signoff) — a one-off `// ok: expect` comment is not a
-  licence to invent a new exemption.
-
-## Safety rules (never violate)
-
-1. Governor never kills allowlisted processes via automated policy
-2. SIGTERM before SIGKILL, always, with a configurable grace period
-3. Rate limit: max 3 automated kills per 60-second window
-4. Every kill logged with reason, PID, name, model, timestamp to a
-   persistent JSONL audit trail
-
-## Historical note: dry-run mode removed in Sprint 1 lead (d8d7897)
-
-Earlier versions had a dry-run / enforce policy mode in the governor.
-Removed in favor of the `kill_confirm` card pattern (CAR-17 in
-ux_contract v0.3.8) — the card overlay IS the kill safety surface
-now. No more dry-run. If you see references to dry-run in commits or
-comments older than `d8d7897`, treat them as historical context, not
-current behavior.
-
-## Historical note: Grafana integration removed in Sprint 5
-
-The `g` keybinding, `[dashboard]` config section, WP5 TCP preflight
-probe (`src/dashboard_preflight.rs`), and the `webbrowser` Cargo
-dependency were all hard-deleted from v1.0 in Sprint 5. Rationale: the
-integration was broken in practice and the v2 web companion (separate
-repo) handles the dashboard story. The contract symbols
-(`ux_contract::Action::OpenGrafana`, `ux_contract::status::
-GRAFANA_UNREACHABLE`, `DASHBOARD_OPENED`, `DASHBOARD_FAILED`) remain
-in the contract crate as orphans pending Agent A cleanup — the
-dispatch arm for `Action::OpenGrafana` is a documented no-op in
-`src/ui/mod.rs`. If you see code or commits referencing `handle_open
-_dashboard` or `dashboard_preflight::probe`, treat them as historical
-context.
-
-## Environment
-
-- **Dev + test host (primary):** bare Ubuntu 22.04.5 LTS on Gigabyte
-  B560M H V2, kernel 6.8, x86_64. NOT WSL.
-- **GPU:** NVIDIA GeForce RTX 3060 12GB, driver 595.58.03, CUDA 13.2.
-  NVML is fully functional (`libnvidia-ml.so.595.58.03` installed).
-- **ROS:** ROS Humble at `/opt/ros/humble`, RMW=Cyclone DDS
-  (`rmw_cyclonedds_cpp`). Multiple workspaces sourced into shell
-  (palb_ws, thesis_ws, yo_ws, turtlebot3_ws).
-- **Production target (deployment, separate device):** Jetson AGX
-  Orin via SSH. Hardware-touching features verified here before
-  release.
-- **NVML works on primary dev host**, but code must still handle
-  `Option<GpuSnapshot>` gracefully — NVML can fail on environments
-  WITHOUT NVIDIA hardware (CPU-only systems, certain containers,
-  some WSL configurations). The graceful-degradation requirement
-  is general, not WSL-specific.
-
-## Known limitations
-
-- **(RESOLVED in v1.0.3.)** ~~B-EMPIRICAL surfaced 2026-05-22:
-  RunStore records show `peak_vram_mb=0` on this NVML-working
-  host.~~ Root cause: `gpu_nvidia.rs::read_device_metrics`
-  queried only NVML's graphics-process API, never the
-  compute-process API where every CUDA workload lives. Fixed in
-  v1.0.3 by adding a parallel `running_compute_processes()` call;
-  see CHANGELOG.md [1.0.3] B-VRAM-ZERO.
-- **(RESOLVED in v1.0.3.)** ~~B-EMPIRICAL-4 surfaced 2026-05-22:
-  rclpy Python ROS2 nodes invisible to classifier on default
-  Humble + Cyclone DDS.~~ Root cause: the library marker list
-  hard-coded a non-existent `librclpy.so`. Fixed in v1.0.3 by
-  replacing it with the real markers `librcl.so`,
-  `librmw_implementation.so`, and `_rclpy_pybind11`; see
-  CHANGELOG.md [1.0.3] B-EMPIRICAL-4.
-- **Automated governor disabled by default (v1.0.1).** The
-  `policy.default_ai_action` for AI workloads is `Allow`, not `Kill`.
-  Inspector #1 caught a phantom-kill audit-trail bug in v1.0.0 where
-  the governor logged automated kills without sending a signal; the
-  v1.0.1 fix is to leave the default at Allow and require an explicit
-  opt-in (`default_ai_action = "Kill"` in `edge_monitor.toml`) to
-  enable automated kills. Manual kills via the `k` keybinding /
-  `kill_confirm` card still work regardless. Surfaced in the `?` help
-  overlay. Re-enabling automated kills also requires wiring
-  `send_sigterm` into the executor — until that lands, opting in
-  produces audit lines without real kills.
-- **Ollama tokens/sec only available via `edge_monitor exec`**, not via
-  passive monitoring. Ollama embeds tokens/sec in the per-request JSON
-  response with no exposed Prometheus endpoint or log file — the only
-  capture path is the exec wrapper's stdout parser (Tier 1.2d). A user
-  who starts `ollama run …` independently and then watches it with
-  edge_monitor will see "running actively" on the workload row,
-  forever. Documented in the `?` help overlay and confirmed by the B4
-  Sprint-2 investigation.
-- vLLM and llama.cpp expose Prometheus and ARE scraped passively;
-  tokens/sec for those flows through `LiveTelemetry` to the workloads
-  panel within a tick or two of first sample.
-- **(RESOLVED in Sprint 7 Item 3.)** ~~Workload start-time column
-  reads "first observed", not OS spawn time~~ — the platform layer
-  now reads `/proc/<pid>/stat` field 22 (`starttime`) plus
-  `/proc/stat`'s `btime` to compute the real OS spawn timestamp, and
-  the lifecycle tracker prefers that value when populated. The
-  `first_observed_at` stamp survives as a fallback for processes
-  whose `/proc` read fails (alien `/proc`, fakeproc, permission
-  denied).
-- **Grafana integration removed** (Sprint 5). The `g` keybinding is
-  unbound and the v2 web companion (separate repo) handles the
-  dashboard story. See "Historical note: Grafana integration removed
-  in Sprint 5" above for the contract-orphan situation.
-- **Windows binary on indefinite halt.** The sibling Windows repo (W1–
-  W49 plan) is on hold pending operator-team scoping. Linux is the
-  reference implementation; Windows parity catches up post-v1.0.
-- **Web UI binds `0.0.0.0:7070` by default with NO AUTH.** The
-  dashboard is reachable from any host on the same LAN; the v1.0
-  design assumes a trusted-LAN posture (workstation / lab / robot
-  dev fleet). On untrusted networks, pass `--bind 127.0.0.1` to
-  restrict to localhost. A future release will add auth so the
-  wider bind is safe by default. Documented in README "Web UI
-  security" and surfaced as a startup `tracing::warn!` when the
-  bind isn't a loopback address.
-
-## Known gotchas
-
-### `ros2 launch` propagates SIGTERM out of its session
-
-`ros2 launch` does NOT call `setsid()` before spawning its child
-nodes, so the launched processes share a session group with the
-shell that invoked them. A SIGTERM (or Ctrl-C / Ctrl-Backslash)
-delivered to `ros2 launch` propagates to every process in that
-session — including `edge_monitor` if both were started from the
-same terminal. The operator stops their ROS graph and silently
-takes the monitor down with it.
-
-Workaround: wrap `ros2 launch` in `setsid`:
-
-```bash
-setsid ros2 launch <package> <launch_file>
-```
-
-`setsid` creates a fresh session group so SIGTERM to `ros2 launch`
-stays contained. Alternatively, run `ros2 launch` in a separate
-terminal / tmux pane / background session — anything that puts it
-in a different controlling-tty session from `edge_monitor` works.
-
-This applies **only to `ros2 launch`**. `ros2 run` does not
-exhibit the same propagation pattern: it spawns a single child
-process that doesn't try to terminate sibling processes on
-shutdown. `edge_monitor_demo.sh` uses `ros2 run rclcpp_components
-component_container`, not `ros2 launch`, so the demo is unaffected
-and does not need a setsid wrap.
-
-Surfaced by Tester-A during v1.0.3 validation (F2).
-
-## When the user pushes for shortcuts
-
-The user's system prompt asks for mentor-style pushback, not
-convenience. If asked to:
-
-- Skip tests → refuse, write tests first
-- Merge or skip a row in the L1–L26 plan → refuse, cite the
-  one-row-one-PR rule in the orchestrator instructions
-- Edit `~/ux_contract` from this repo → refuse, file a Contract
-  Amendment Request instead (Agent A owns it)
-- Change UX behavior without amending v0.3 → refuse, cite the locked
-  contract; the user can ask for an amendment if they want a change
-- Stub hardware calls "for later" → refuse, handle errors now
-
-## Session rhythm
-
-- Start of session: re-read this file + the relevant clause(s) of
-  UX_CONTRACT.md and the relevant L-row in DESIGN_HANDOFF.md.
-- End of each non-trivial change: run
-  `cargo test --workspace && cargo clippy --all-targets -- -D warnings`.
-- Before opening a PR: confirm the row's "Test" column is satisfied,
-  the binary still launches, and the diff stays inside the row's
-  declared "Files to change" set.
+## Style
+- Terse, direct. The operator prefers immediate execution and all-caps emphasis on what matters.
+- When you finish a task, report: what changed, tests delta, what's dormant, what's pending human action. Don't over-explain.
+- When you hit a HARD STOP, be LOUD about it in PENDING.md — that's the whole safety mechanism.

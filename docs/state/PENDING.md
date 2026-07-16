@@ -1,5 +1,91 @@
 # PENDING — things waiting on the human
 
+## [COMPLETION SUMMARY — Autonomous Completion + Hardening run] 2026-07-16
+
+The **completion+hardening** run finished. All autonomously-completable
+work is landed; the branch is green across all three gates and ready
+for the operator's next milestone check-in.
+
+### What shipped this run (7 commits on `l14-top-processes-sort`)
+
+| Commit | Phase | What |
+| --- | --- | --- |
+| `344b184` | 1.1-1.3 | Phase 1: TUI-essentials FINDING (D107 already closed it) + CHANGELOG catch-up (D107/D108/D109) + post-hoc `docs/GPU_TILE_DESIGN.md` design record. |
+| `b676b1c` | 2.5 | Phase 2: full-project audit sweep → `docs/state/AUDIT.md`. 0 blockers; 11 SHOULD-FIX (fixed below); 7 DEFERRED (all human/hardware/CAR-blocked). |
+| `b7dc630` | 3.1 | Phase 3.1: 5 doc-drift fixes surfaced by AUDIT §§4.3-4.5 — PHASE5_HISTORY / PHASE4_AUTOKILL / PHASE4_DESIGN status headers + BOARD_AUDIT §2.6 numeric drifts + PENDING STOP #3 stale text. |
+| `7057844` | 3.2A | Phase 3.2 landing A: 4 tests pinning `column_header_line` (D107 FIX 2) + `LABEL_WIDTH` (D107 FIX 4). Bonus: `render_thermal_summary` no longer hard-codes 12 — uses the module `LABEL_WIDTH` const. |
+| `968ccc8` | 3.2B | Phase 3.2 landing B: 12 tests pinning ollama runner friendly-name preference (D107 FIX 3) + runtime `promote_sha_blob_hints` promotion (D107 FIX 3) + D109 TUI GPU row honesty + aggregation. Two extractions (`promote_sha_blob_hints`, `format_gpu_vitals_line`) make the load-bearing invariants directly testable. |
+| `f91742a` | 3.3 | Phase 3 re-sweep lint fix — clippy caught a `collapsible_if` in the new helper (converted to let-chain, rustc 1.95) and a `doc_lazy_continuation` in a doc-comment (reflowed to prose). Behavior identical. |
+| (this) | EXIT | Completion summary + BOARD HEAD update. |
+
+### Gate state at EXIT
+
+- `cargo test --workspace` — **1200 passed / 0 failed** (was 1184 at
+  Phase-2 audit baseline; +16 tests, all coverage additions).
+- `cargo clippy --workspace --all-targets -- -D warnings` — **clean**.
+- `npm --prefix web run test:browser` — **223 passed / 0 failed**
+  (unchanged — no web-facing changes this run).
+- All 11 named invariant tripwires green (verified individually
+  in Phase 2 and left green through Phase 3 by construction —
+  the Phase-3 landings are docs / tests / behavior-neutral extractions).
+
+### AUDIT categories, resolved
+
+- **BLOCKER — 0**: unchanged; nothing was ever red.
+- **SHOULD-FIX — 11**: all closed in Phase 3.
+  - 5 doc-drift findings → `b7dc630`.
+  - 2 D107 FIX 2/4 coverage → `7057844`.
+  - 4 D107 FIX 3 + D109 coverage → `968ccc8` (2 ollama tests + 5 runtime
+    promotion tests + 5 GPU-line tests).
+- **DEFERRED — 7**: all still deferred; none are autonomously fixable:
+  1. Versioning tag (v2.0.0 vs v1.4.x) — HUMAN DECISION.
+  2. observer→supervisor decision — HUMAN DECISION.
+  3. Auto-kill tiebreaker — HARD STOP #1 (governor).
+  4. `KILL_ARM_WINDOW_SECS` const removal — HARD STOP #2 (CAR).
+  5. Unmeasured VRAM/GPU live-verification — needs driver reload
+     (hardware). Still pinned by wire-honesty tests + D98 gate
+     `data-testid-unmeasured` assertions on F1/F2/F3.
+  6. Follow-on TUI candidates — HARD STOP #3 (each needs its own
+     ratification): hardware identity, AlertState-on-wire, classifier
+     consistency, top-processes on web, activity content parity.
+  7. `WireAlertEntry.timestamp` — potential future CAR.
+
+### Two honest disclosures
+
+1. **Unmeasured VRAM/GPU path is NOT live-verified this session.**
+   The NVML driver is loaded on the dev host so every smoke shows
+   the measured branch. Test layers pin the unmeasured branch — the
+   three wire honesty tests + D98 gate assertions on `data-testid-
+   unmeasured` — but a real-data live-verification awaits a driver
+   reload. AUDIT.md §3.4 states exactly this.
+2. **Origin sync verification ceiling.** `git fetch` failed with
+   "could not read Username for 'https://github.com'" — the audit
+   shell has no cached credentials. Local `origin/l14-top-processes-
+   sort` shows `729bdf7` (pre-D109). Operator confirmed the D109 push
+   happened; the Phase-1/2/3 work sitting on top (`344b184` through
+   `f91742a`) is unpushed and needs to be pushed manually. AUDIT.md
+   §4.2 records the ceiling.
+
+### What the operator sees on next open
+
+- 7 unpushed commits on `l14-top-processes-sort` (D109 pushed;
+  everything after it is local).
+- BOARD.md shows "no open items — everything remaining is
+  human-blocked or hardware-blocked."
+- No hot HARD STOPs. STOP #3 remains marked RESOLVED with a full
+  ship-record + design doc pointer. This EXIT block is above it.
+- Test count 1184 → 1200; gate count unchanged at 223.
+
+### What's safe to work on next (if the operator opens another loop)
+
+Everything remaining is either human-decision or hardware-blocked
+(see DEFERRED list above). Any of the follow-on TUI candidates would
+be HARD STOP #3 — the loop would immediately propose options and
+stop for ratification.
+
+---
+
+
 *When you (the agent) hit a HARD STOP, write it here LOUDLY and stop. The human reads this at milestone check-ins. Clear an item when it's resolved (move the resolution to JOURNAL.md).*
 
 *Format:*

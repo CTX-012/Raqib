@@ -19,6 +19,14 @@ use super::panel_block;
 /// without growing the panel.
 const TUI_TOP_THERMAL_ZONES: usize = 3;
 
+/// v1.1.12 / DISPATCH 107 FIX 4 — vitals-row label column width.
+/// Covers the longest tag ("Processes ", 10 chars) plus trailing
+/// padding so numeric slots on every row (RAM / CPU load / VRAM /
+/// GPU / Processes / Thermal) line up under one another. If a new
+/// row is added with a longer label, bump this in lockstep with the
+/// pinning test `label_width_fits_every_row_label`.
+const LABEL_WIDTH: usize = 12;
+
 /// v1.1.12 / CAR-22 — map a raw zone temperature to a TUI color.
 /// Mirrors the web wire's `classify_thermal` semantics with the
 /// SAME `ux_contract::thresholds` constants — no drift mode where
@@ -99,10 +107,12 @@ fn render_thermal_summary(
     // v1.3.2 / DISPATCH 107 FIX 4 — align "Thermal" tag with the
     // 12-char label grid the rest of the vitals panel uses so the
     // thermal row sits under the same column axis as RAM/CPU/VRAM/
-    // Processes.
+    // Processes. Shares the same `LABEL_WIDTH` module const so the
+    // grid can never drift between the vitals rows and this thermal
+    // header.
     let mut spans: Vec<Span<'static>> = vec![
         Span::styled(
-            format!("{:<width$}", "Thermal", width = 12),
+            format!("{:<width$}", "Thermal", width = LABEL_WIDTH),
             Style::default().fg(theme.muted),
         ),
         Span::styled(inline, Style::default().fg(dominant)),
@@ -162,8 +172,8 @@ pub fn render(f: &mut Frame, area: Rect, state: &RuntimeState, theme: &UiTheme) 
     //
     // The 12-char label width covers the longest tag ("Processes ")
     // plus a trailing space. If a new row is added with a longer
-    // tag, bump the width in lockstep across every row here.
-    const LABEL_WIDTH: usize = 12;
+    // tag, bump `LABEL_WIDTH` (module scope) — pinned by the
+    // `label_width_fits_every_row_label` test.
 
     let mem_pct = snap.system.memory_usage_percent().clamp(0.0, 100.0);
     let mem_used_mb = snap.system.used_memory / (1024 * 1024);
@@ -377,5 +387,28 @@ mod tests {
             theme.critical,
         );
         assert_eq!(thermal_color(&theme, 105.0, &EffectiveThresholds::default()), theme.critical);
+    }
+
+    /// DISPATCH 107 FIX 4 — LABEL_WIDTH pins the vitals-panel column
+    /// grid: every row's numeric slot sits at the SAME horizontal
+    /// offset because every row's label is left-padded to
+    /// `LABEL_WIDTH` chars. If a new row is added with a label
+    /// longer than the width (or if `LABEL_WIDTH` is shrunk below
+    /// the longest label + one space of padding), the grid breaks
+    /// silently at render — the RAM row shows aligned numbers but
+    /// the new row's numbers hang off to the right. This test fails
+    /// early, before the next release binary ships mis-aligned.
+    #[test]
+    fn label_width_fits_every_row_label() {
+        // Every label rendered in `render_vitals_panel` — kept in
+        // lockstep with the row `format!` calls above. "Processes"
+        // is the longest at 9 chars; LABEL_WIDTH must leave at
+        // least one trailing space for readability.
+        let labels = ["RAM", "CPU load", "VRAM", "GPU", "Processes", "Thermal"];
+        let longest = labels.iter().map(|l| l.len()).max().unwrap();
+        assert!(
+            LABEL_WIDTH > longest,
+            "LABEL_WIDTH ({LABEL_WIDTH}) must be > longest label ({longest}) so every row has at least one space of padding before its value; adjust in lockstep if a new row is added",
+        );
     }
 }

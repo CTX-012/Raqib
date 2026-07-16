@@ -1497,4 +1497,59 @@ mod tests {
             GROUP_HEADER_UNKNOWN
         );
     }
+
+    /// DISPATCH 107 FIX 2 — `column_header_line` is the single
+    /// source of truth for the AI Workloads panel's column labels.
+    /// The doc-comment on the fn states it must be edited "in
+    /// lockstep with the row `format!` calls in `render`" — if the
+    /// header format drifts from the row format, the "NAME MODEL
+    /// STATE PRIMARY..." labels stop sitting above their columns
+    /// and the panel looks scrambled.
+    ///
+    /// These tests pin the header text for each of the three
+    /// render-tier shapes (narrow, wide-no-optional, wide-full).
+    /// A drift in either the header fn OR the row `format!` calls
+    /// will fail one of these OR the visual test — forcing the
+    /// operator to reconcile both before the panel renders wrong.
+    #[test]
+    fn column_header_line_wide_shows_all_column_labels() {
+        let header = column_header_line(false, true, true);
+        // Wide + model + activity: NAME, MODEL, STATE, PRIMARY, STARTED, CPU %, RSS MB, VRAM.
+        for label in ["NAME", "MODEL", "STATE", "PRIMARY", "STARTED", "CPU %", "RSS MB", "VRAM"] {
+            assert!(
+                header.contains(label),
+                "wide-full header must show {label:?}; got {header:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn column_header_line_wide_no_optionals_drops_model_and_state() {
+        // When the panel has no model column or no activity column
+        // (nothing to show), the header must drop those slots too —
+        // otherwise the trailing PRIMARY/STARTED slots land at the
+        // wrong offset.
+        let header = column_header_line(false, false, false);
+        assert!(header.contains("NAME"), "NAME always present");
+        assert!(header.contains("PRIMARY"), "PRIMARY always present on wide");
+        assert!(!header.contains("MODEL"), "MODEL dropped when show_model=false; got {header:?}");
+        assert!(!header.contains("STATE"), "STATE dropped when show_activity=false; got {header:?}");
+    }
+
+    #[test]
+    fn column_header_line_narrow_drops_primary() {
+        // Narrow tier drops the PRIMARY column to fit inside the
+        // 80-col §12 floor. Same reason the row `format!` at the
+        // narrow branch omits it — if header drifts and keeps
+        // PRIMARY here, the header overflows.
+        let header = column_header_line(true, true, true);
+        assert!(header.contains("NAME"));
+        assert!(header.contains("MODEL"));
+        assert!(header.contains("STARTED"));
+        assert!(header.contains("CPU %"));
+        assert!(header.contains("RSS MB"));
+        assert!(header.contains("VRAM"));
+        assert!(!header.contains("PRIMARY"), "narrow tier must drop PRIMARY; got {header:?}");
+        assert!(!header.contains("STATE"), "narrow tier drops STATE (activity col wide-only per Inspector #8 V1); got {header:?}");
+    }
 }

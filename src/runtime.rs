@@ -2713,10 +2713,10 @@ where
         if !looks_like_sha_blob {
             continue;
         }
-        if let Some(hint) = get_hint(ap.pid) {
-            if !hint.starts_with("sha256-") {
-                ap.model_name = Some(hint);
-            }
+        if let Some(hint) = get_hint(ap.pid)
+            && !hint.starts_with("sha256-")
+        {
+            ap.model_name = Some(hint);
         }
     }
 }

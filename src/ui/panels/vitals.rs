@@ -460,10 +460,10 @@ mod tests {
     }
 
     /// DISPATCH 109 — aggregation invariant. Two GPUs at (60°C, 40W)
-    /// + (75°C, 55W): MAX temp → 75°C (hottest device drives the
-    /// thermal row); SUM watts → 95W (total board draw). If the
-    /// aggregation swaps to MIN or AVG, the tile lies about the
-    /// hottest device / total draw.
+    /// and (75°C, 55W) must render as 75°C (MAX; hottest device
+    /// drives the thermal row) and 95W (SUM; total board draw). A
+    /// regression that flips the aggregation to MIN or AVG would
+    /// silently lie about the hottest device / total draw.
     #[test]
     fn gpu_line_two_devices_max_temp_sum_watts() {
         let devices = vec![

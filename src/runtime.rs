@@ -1183,25 +1183,7 @@ impl Runtime {
             // The RunRecord attribution path (line ~1350 below) also
             // reads the hint; both surfaces now converge on the
             // friendly name.
-            for ap in annotated.iter_mut() {
-                let looks_like_sha_blob = ap
-                    .model_name
-                    .as_deref()
-                    .map(|m| m.starts_with("sha256-"))
-                    .unwrap_or(false);
-                if !looks_like_sha_blob {
-                    continue;
-                }
-                if let Some(hint) = d.model_name_hint_for(ap.pid) {
-                    // Only overwrite when the HINT itself isn't
-                    // another sha256 (defensive — an /api/ps that
-                    // somehow only knew the digest wouldn't be an
-                    // improvement).
-                    if !hint.starts_with("sha256-") {
-                        ap.model_name = Some(hint);
-                    }
-                }
-            }
+            promote_sha_blob_hints(&mut annotated, |pid| d.model_name_hint_for(pid));
         }
 
         // v1.3.2 / DISPATCH 73 (P1#2) — per-tick dmesg cache. The
@@ -2700,6 +2682,45 @@ fn check_regressions(
 /// Reads `sysconf(_SC_CLK_TCK)`. Returns 100 on failure — that's the Linux
 /// kernel's compiled-in default on every distribution shipped since 2008, so
 /// the fallback is strictly better than panicking.
+/// v1.3.2 / DISPATCH 107 FIX 3 — promote a friendly `model_name_hint`
+/// (e.g. `"smollm:135m"`) onto `AnnotatedProcess.model_name` when the
+/// current value looks like a raw sha256 blob path (`sha256-...`).
+///
+/// Load-bearing invariants (pinned by the tests below):
+/// * ONLY promotes when the current name starts with `sha256-` — the
+///   classifier's llama.cpp `--model /models/foo.gguf → "foo"` path
+///   already produces a good name, and we must not overwrite it.
+/// * ONLY promotes when the hint ITSELF isn't another `sha256-` —
+///   defensive fallback: a hint that still holds the digest wouldn't
+///   be an improvement.
+/// * The predicate is `starts_with("sha256-")`, NOT a full sha256
+///   regex — the goal is "the blob-path shape ollama emits," not
+///   "any 71-char hex string." Cheap, no false negatives on the
+///   real cmdline shape, no false positives on a friendly name.
+///
+/// Extracted from the runtime tick loop so the invariant can be
+/// exercised without spinning up a full `RuntimeState`.
+fn promote_sha_blob_hints<F>(annotated: &mut [AnnotatedProcess], get_hint: F)
+where
+    F: Fn(u32) -> Option<String>,
+{
+    for ap in annotated.iter_mut() {
+        let looks_like_sha_blob = ap
+            .model_name
+            .as_deref()
+            .map(|m| m.starts_with("sha256-"))
+            .unwrap_or(false);
+        if !looks_like_sha_blob {
+            continue;
+        }
+        if let Some(hint) = get_hint(ap.pid) {
+            if !hint.starts_with("sha256-") {
+                ap.model_name = Some(hint);
+            }
+        }
+    }
+}
+
 fn read_clk_tck() -> u64 {
     // SAFETY: sysconf is a pure POSIX C function with no preconditions.
     let raw = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
@@ -5358,6 +5379,114 @@ mod tests {
             "V4b FAILURE: after draining all {N} PIDs, HashMap should be \
              empty; got {}. LEAK.",
             rt.history.live_pid_count(),
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // DISPATCH 107 FIX 3 — promote_sha_blob_hints tests.
+    //
+    // The tick-loop promotion at runtime.rs:1186 is thin business
+    // logic but load-bearing on the workloads panel: a regression
+    // would re-leak sha256 blob digests into the model column
+    // (BOARD_AUDIT §2.2). Tests exercise the extracted helper
+    // directly so the enclosing tick fn stays test-free.
+    // ─────────────────────────────────────────────────────────────
+
+    fn ap_with_model(pid: u32, model: Option<&str>) -> AnnotatedProcess {
+        AnnotatedProcess {
+            pid,
+            name: "ollama".into(),
+            category: crate::model::AICategory::Inference,
+            workload_category: crate::model::WorkloadCategory::Unknown,
+            evidence: String::new(),
+            model_name: model.map(String::from),
+            cpu_pct: 0.0,
+            rss_mb: 0,
+            vram_bytes: None,
+            first_observed_at: Instant::now(),
+        }
+    }
+
+    #[test]
+    fn promote_sha_blob_hints_replaces_blob_with_friendly_name() {
+        // Runner arrived with a sha256 blob path in model_name
+        // (classifier's cmdline-extract path). The hint carries the
+        // friendly name from /api/ps. Promotion should fire.
+        let mut annotated = vec![ap_with_model(
+            42,
+            Some("sha256-eb2c714d40d437a45a9c2a8a3e8ddc15"),
+        )];
+        promote_sha_blob_hints(&mut annotated, |pid| {
+            if pid == 42 {
+                Some("smollm:135m".to_string())
+            } else {
+                None
+            }
+        });
+        assert_eq!(
+            annotated[0].model_name.as_deref(),
+            Some("smollm:135m"),
+            "sha256- blob path must be replaced by the friendly hint",
+        );
+    }
+
+    #[test]
+    fn promote_sha_blob_hints_leaves_good_extractions_alone() {
+        // llama.cpp `--model /models/foo.gguf → "foo"` shape: NOT a
+        // sha256 blob. The promotion path must not overwrite it,
+        // even if a hint is available.
+        let mut annotated = vec![ap_with_model(7, Some("qwen2.5-0.5b-instruct-q8_0"))];
+        promote_sha_blob_hints(&mut annotated, |_| {
+            Some("this-should-not-be-applied".to_string())
+        });
+        assert_eq!(
+            annotated[0].model_name.as_deref(),
+            Some("qwen2.5-0.5b-instruct-q8_0"),
+            "non-sha256 model_name must never be overwritten by promotion",
+        );
+    }
+
+    #[test]
+    fn promote_sha_blob_hints_refuses_hint_that_is_also_sha_blob() {
+        // Defensive: an /api/ps that somehow returned only the digest
+        // wouldn't be an improvement — keep the current blob name.
+        let mut annotated = vec![ap_with_model(9, Some("sha256-abcdef1234"))];
+        promote_sha_blob_hints(&mut annotated, |_| {
+            Some("sha256-fedcba0987".to_string())
+        });
+        assert_eq!(
+            annotated[0].model_name.as_deref(),
+            Some("sha256-abcdef1234"),
+            "when the hint itself is a blob digest, the promotion must not fire",
+        );
+    }
+
+    #[test]
+    fn promote_sha_blob_hints_no_hint_leaves_blob_in_place() {
+        // Hint lookup returns None → nothing to promote; the blob
+        // name stays (worse than the friendly name, but stable
+        // per-model attribution for RunRecord).
+        let mut annotated = vec![ap_with_model(11, Some("sha256-abc"))];
+        promote_sha_blob_hints(&mut annotated, |_| None);
+        assert_eq!(annotated[0].model_name.as_deref(), Some("sha256-abc"));
+    }
+
+    #[test]
+    fn promote_sha_blob_hints_none_model_name_untouched() {
+        // Non-model rows (Nav2 nodes, ROS2 supervisors, etc.) have
+        // model_name = None. Promotion must skip them without a hint
+        // lookup so the hint predicate never has to disambiguate.
+        let mut annotated = vec![ap_with_model(15, None)];
+        let hint_lookups = std::cell::Cell::new(0u32);
+        promote_sha_blob_hints(&mut annotated, |_| {
+            hint_lookups.set(hint_lookups.get() + 1);
+            Some("some-hint".to_string())
+        });
+        assert!(annotated[0].model_name.is_none());
+        assert_eq!(
+            hint_lookups.get(),
+            0,
+            "get_hint must not be called when model_name is None",
         );
     }
 }

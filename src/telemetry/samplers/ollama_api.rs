@@ -799,4 +799,95 @@ mod tests {
         // Daemon row: no activity_state (runner row carries that).
         assert!(frame.activity_state.is_none());
     }
+
+    /// DISPATCH 107 FIX 3 — runner path with exactly one loaded model:
+    /// the sampler must emit the friendly name from `/api/ps` as
+    /// `model_name_hint`, NOT the sha256 blob digest carried on
+    /// `proc.model_name`. This is the fix that stopped the digest
+    /// from leaking into the workloads panel's model column
+    /// (BOARD_AUDIT §2.2).
+    #[tokio::test]
+    async fn runner_hint_prefers_friendly_name_when_single_loaded_model() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let body = r#"{"models":[{"name":"smollm:135m"}]}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            if let Ok((mut sock, _)) = listener.accept().await {
+                let mut buf = [0u8; 1024];
+                let _ = sock.read(&mut buf).await;
+                let _ = sock.write_all(response.as_bytes()).await;
+                let _ = sock.shutdown().await;
+            }
+        });
+
+        let mut s = OllamaApiSource::new();
+        // Runner PID; endpoint cache primed with the test server.
+        let runner_pid = 42;
+        s.endpoint_cache
+            .insert(runner_pid, format!("http://127.0.0.1:{}/api/ps", port));
+        let runner_digest = "sha256-eb2c714d40d437a45a9c2a8a3e8ddc15";
+        let mut runner = runner_snap(runner_digest, 100.0);
+        runner.pid = runner_pid;
+
+        let frame = s.sample(&runner).await.expect("scrape should succeed");
+        assert_eq!(
+            frame.model_name_hint.as_deref(),
+            Some("smollm:135m"),
+            "with loaded.len()==1, hint must be the friendly name from /api/ps, NOT the sha256 blob digest carried on proc.model_name",
+        );
+        // Runner row: activity_state present.
+        assert!(frame.activity_state.is_some());
+    }
+
+    /// DISPATCH 107 FIX 3 — runner path with multiple loaded models:
+    /// the sampler CANNOT disambiguate which runner corresponds to
+    /// which friendly name, so it MUST fall back to the runner's
+    /// blob digest (`my_model`) to keep the runner ↔ RunRecord link
+    /// stable. Rare case; documented in the fn's comment at
+    /// ollama_api.rs:362-368.
+    #[tokio::test]
+    async fn runner_hint_falls_back_to_digest_when_multiple_loaded_models() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let body = r#"{"models":[{"name":"smollm:135m"},{"name":"phi3:mini"}]}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            if let Ok((mut sock, _)) = listener.accept().await {
+                let mut buf = [0u8; 1024];
+                let _ = sock.read(&mut buf).await;
+                let _ = sock.write_all(response.as_bytes()).await;
+                let _ = sock.shutdown().await;
+            }
+        });
+
+        let mut s = OllamaApiSource::new();
+        let runner_pid = 43;
+        s.endpoint_cache
+            .insert(runner_pid, format!("http://127.0.0.1:{}/api/ps", port));
+        let runner_digest = "sha256-eb2c714d40d437a45a9c2a8a3e8ddc15";
+        let mut runner = runner_snap(runner_digest, 100.0);
+        runner.pid = runner_pid;
+
+        let frame = s.sample(&runner).await.expect("scrape should succeed");
+        assert_eq!(
+            frame.model_name_hint.as_deref(),
+            Some(runner_digest),
+            "with loaded.len()>1, hint must fall back to the digest so runner↔RunRecord identity stays stable",
+        );
+    }
 }

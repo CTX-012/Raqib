@@ -4,6 +4,7 @@ use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Gauge, Paragraph};
 
+use crate::platform::GpuDeviceMetrics;
 use crate::runtime::RuntimeState;
 use crate::thresholds::EffectiveThresholds;
 use crate::ui::theme::UiTheme;
@@ -26,6 +27,59 @@ const TUI_TOP_THERMAL_ZONES: usize = 3;
 /// row is added with a longer label, bump this in lockstep with the
 /// pinning test `label_width_fits_every_row_label`.
 const LABEL_WIDTH: usize = 12;
+
+/// v1.3.2 / DISPATCH 109 — build the GPU temp+power line for the
+/// Vitals panel's row 3.
+///
+/// Aggregation invariants (pinned by tests):
+/// * Temperature aggregates as MAX across all devices — the hottest
+///   device drives the row, matching the thermal-panel convention.
+/// * Power aggregates as SUM across all devices — total board draw.
+///
+/// Honesty invariants (the VRAM honesty rule extended to GPU
+/// signals — pinned by tests):
+/// * When NO device reports a temperature, the temp field renders
+///   as `—`, NEVER `0°C`. A giant `0°C` on a kiosk would read as
+///   "GPU is at freezing" instead of "we don't know."
+/// * Same for power: no device reports → `—`, NEVER `0W`.
+/// * A device with a genuine measured `0.0` value (rare — power
+///   floor / off state) does render as `0°C` / `0W`, because that
+///   IS a measurement.
+///
+/// Extracted from the `render` fn so the honesty rule can be
+/// exercised without a `Frame`. The label prefix uses `LABEL_WIDTH`
+/// so this row lines up with the other Vitals rows on the same
+/// column grid.
+fn format_gpu_vitals_line(devices: &[GpuDeviceMetrics]) -> String {
+    let temp_c = devices
+        .iter()
+        .filter_map(|d| d.temp_c)
+        .fold(None::<f32>, |acc, t| Some(acc.map_or(t, |a| a.max(t))));
+    let (power_w_sum, any_power) = {
+        let mut sum: f32 = 0.0;
+        let mut any = false;
+        for d in devices {
+            if let Some(w) = d.power_watts {
+                sum += w;
+                any = true;
+            }
+        }
+        (sum, any)
+    };
+    let temp_str = temp_c.map_or_else(|| "—".to_string(), |t| format!("{t:.0}°C"));
+    let power_str = if any_power {
+        format!("{power_w_sum:.0}W")
+    } else {
+        "—".to_string()
+    };
+    format!(
+        "{:<width$}{} · {}",
+        "GPU",
+        temp_str,
+        power_str,
+        width = LABEL_WIDTH,
+    )
+}
 
 /// v1.1.12 / CAR-22 — map a raw zone temperature to a TUI color.
 /// Mirrors the web wire's `classify_thermal` semantics with the
@@ -232,45 +286,11 @@ pub fn render(f: &mut Frame, area: Rect, state: &RuntimeState, theme: &UiTheme) 
         f.render_widget(p, cols[2]);
     }
 
-    // v1.3.2 / DISPATCH 109 — GPU temp+power row. Aggregates across
-    // devices: MAX temp (hottest device drives the row per the
-    // thermal-panel convention), SUM watts (total board draw).
-    // Unmeasured → "—", NEVER "0°C" / "0W" (the VRAM honesty rule
-    // extended to GPU signals). NVML may return `Unsupported` on
-    // virtual GPUs and the driver may be unloaded — both surface
-    // as `Option<f32>::None` at the device layer.
+    // v1.3.2 / DISPATCH 109 — GPU temp+power row. See
+    // `format_gpu_vitals_line` for the aggregation + honesty rule.
     let gpu_line = if snap.gpu.has_gpu() {
-        let temp_c = snap
-            .gpu
-            .devices
-            .iter()
-            .filter_map(|d| d.temp_c)
-            .fold(None::<f32>, |acc, t| Some(acc.map_or(t, |a| a.max(t))));
-        let (power_w, any_power) = {
-            let mut sum: f32 = 0.0;
-            let mut any = false;
-            for d in &snap.gpu.devices {
-                if let Some(w) = d.power_watts {
-                    sum += w;
-                    any = true;
-                }
-            }
-            (sum, any)
-        };
-        let temp_str = temp_c.map_or_else(|| "—".to_string(), |t| format!("{t:.0}°C"));
-        let power_str = if any_power {
-            format!("{power_w:.0}W")
-        } else {
-            "—".to_string()
-        };
-        Paragraph::new(format!(
-            "{:<width$}{} · {}",
-            "GPU",
-            temp_str,
-            power_str,
-            width = LABEL_WIDTH,
-        ))
-        .style(Style::default().fg(theme.foreground))
+        Paragraph::new(format_gpu_vitals_line(&snap.gpu.devices))
+            .style(Style::default().fg(theme.foreground))
     } else {
         // No GPU → the row is empty. Same "hide via no-op paragraph"
         // pattern the thermal row uses when no zones are discovered.
@@ -387,6 +407,114 @@ mod tests {
             theme.critical,
         );
         assert_eq!(thermal_color(&theme, 105.0, &EffectiveThresholds::default()), theme.critical);
+    }
+
+    fn gpu_dev(id: u32, temp_c: Option<f32>, power_w: Option<f32>) -> GpuDeviceMetrics {
+        GpuDeviceMetrics {
+            device_id: id,
+            device_name: format!("test-gpu-{id}"),
+            total_vram: 0,
+            used_vram: 0,
+            free_vram: 0,
+            per_process_vram: std::collections::HashMap::new(),
+            power_watts: power_w,
+            temp_c,
+        }
+    }
+
+    /// DISPATCH 109 — the honesty invariant for the TUI GPU row:
+    /// when the driver isn't loaded (device.temp_c and .power_watts
+    /// both `None`), the row must render `—` for both fields, NEVER
+    /// `0°C` / `0W`. A giant `0°C` on a wall-monitor kiosk reads as
+    /// "GPU is at freezing" — a lie. This is the VRAM honesty rule
+    /// applied to GPU temp+power (BOARD_AUDIT §2.1).
+    #[test]
+    fn gpu_line_unmeasured_renders_dash_not_zero() {
+        let devices = vec![gpu_dev(0, None, None)];
+        let line = format_gpu_vitals_line(&devices);
+        assert!(
+            line.contains("—"),
+            "unmeasured GPU row must render `—` for both fields; got {line:?}",
+        );
+        assert!(
+            !line.contains("0°C") && !line.contains("0W"),
+            "unmeasured GPU row must NEVER show `0°C` / `0W` (lying-zero); got {line:?}",
+        );
+        // The label + separator " · " shape stays stable so the row
+        // remains recognisable even fully unmeasured.
+        assert!(line.starts_with("GPU"));
+        assert!(line.contains(" · "));
+    }
+
+    /// DISPATCH 109 — measured single-device path renders both
+    /// fields with `°C` / `W` suffix, integer precision. Sanity
+    /// check on the format-string (a drift in `format!("{t:.0}°C")`
+    /// or the surrounding template would fail here).
+    #[test]
+    fn gpu_line_single_device_measured_renders_both_fields() {
+        let devices = vec![gpu_dev(0, Some(62.0), Some(45.0))];
+        let line = format_gpu_vitals_line(&devices);
+        assert!(line.contains("62°C"), "temp missing/mis-formatted; got {line:?}");
+        assert!(line.contains("45W"), "power missing/mis-formatted; got {line:?}");
+        assert!(line.contains(" · "), "combining separator missing; got {line:?}");
+    }
+
+    /// DISPATCH 109 — aggregation invariant. Two GPUs at (60°C, 40W)
+    /// + (75°C, 55W): MAX temp → 75°C (hottest device drives the
+    /// thermal row); SUM watts → 95W (total board draw). If the
+    /// aggregation swaps to MIN or AVG, the tile lies about the
+    /// hottest device / total draw.
+    #[test]
+    fn gpu_line_two_devices_max_temp_sum_watts() {
+        let devices = vec![
+            gpu_dev(0, Some(60.0), Some(40.0)),
+            gpu_dev(1, Some(75.0), Some(55.0)),
+        ];
+        let line = format_gpu_vitals_line(&devices);
+        assert!(
+            line.contains("75°C"),
+            "temp must be MAX across devices (hottest drives the row); got {line:?}",
+        );
+        assert!(
+            line.contains("95W"),
+            "power must be SUM across devices (total draw); got {line:?}",
+        );
+    }
+
+    /// DISPATCH 109 — asymmetric coverage: one device measured, one
+    /// unmeasured. The measured device's values still surface (temp
+    /// = MAX of what's present, power = SUM of what's present);
+    /// unmeasured devices don't drag the aggregate to `0` or `—`
+    /// (as they would under a naive `iter().min()/sum()` on an
+    /// `Option::unwrap_or(0.0)` fold).
+    #[test]
+    fn gpu_line_partial_measurement_aggregates_over_measured_only() {
+        let devices = vec![
+            gpu_dev(0, Some(60.0), None),
+            gpu_dev(1, None, Some(50.0)),
+        ];
+        let line = format_gpu_vitals_line(&devices);
+        assert!(line.contains("60°C"), "measured temp must surface; got {line:?}");
+        assert!(line.contains("50W"), "measured power must surface; got {line:?}");
+    }
+
+    /// DISPATCH 109 — measured genuine `0.0` renders as `0°C` /
+    /// `0W`, NOT `—`. This is the flip side of the honesty rule:
+    /// a real "device idle at 0 W" IS a measurement and must be
+    /// distinguishable from "no measurement." The tests above pin
+    /// `None → —`; this test pins `Some(0.0) → 0°C / 0W`.
+    #[test]
+    fn gpu_line_measured_zero_serializes_as_zero_not_dash() {
+        let devices = vec![gpu_dev(0, Some(0.0), Some(0.0))];
+        let line = format_gpu_vitals_line(&devices);
+        assert!(
+            line.contains("0°C"),
+            "Some(0.0) is a valid measurement and must render as `0°C`, not `—`; got {line:?}",
+        );
+        assert!(
+            line.contains("0W"),
+            "Some(0.0) is a valid measurement and must render as `0W`, not `—`; got {line:?}",
+        );
     }
 
     /// DISPATCH 107 FIX 4 — LABEL_WIDTH pins the vitals-panel column

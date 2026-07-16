@@ -1,6 +1,6 @@
 # edge_monitor — Auto-Kill Actuation Design (Phase 4 frontier)
 
-**Status:** design locked 2026-06-05 · promotes to a `docs/PHASE4_DESIGN.md` sub-section at sign-off
+**Status:** **SHIPPED — dormant + hardware-verified inert (AUDIT sweep 2026-07-15).** Auto-kill actuation completed across DISPATCH 59-81: gated SIGTERM (D80), gated SIGKILL escalation with `sigterm_grace_secs` activation (D81), `pending_kills` lifecycle drain, tripwires `send_sigterm_actuation_site_is_auto_actuate_gated` + `send_sigkill_callers_are_gated` + `default_off_emits_no_sigterm_and_no_sigkill` all green. `auto_actuate` defaults FALSE (schema-firewalled). C4 (Manual-k force-SIGKILL UX) **deferred** — see §"HARD-BLOCKING follow-up" below; it remains a HARD STOP #1 review item, not autonomously actionable. Prior status: "design locked 2026-06-05 · promotes to a `docs/PHASE4_DESIGN.md` sub-section at sign-off" (DISPATCH 59 Inspector pre-pass).
 **Basis:** DISPATCH 59 Inspector pre-pass (read-only against v1.3.1 / HEAD `f3e7607`)
 **Authority change:** this is the **deliberate crossing of the observe-only line** (held as a lock 9×). It is gated, off-by-default, and lands incrementally.
 

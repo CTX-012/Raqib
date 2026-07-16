@@ -46,12 +46,14 @@ None of these are "TUI-essentials-only" per the ratified phrase. All are follow-
 
 ---
 
-## [STOP #3 — RESOLVED 2026-07-15] GPU temp/power tile — design ratified
+## [STOP #3 — RESOLVED 2026-07-15] GPU temp/power tile — design ratified + SHIPPED
 
 Operator confirmed inspector lean **1c / 2a / 3a**: VitalsPanel + KioskView
 (skip Strip); one combined kiosk tile `62°C · 45W`; MAX temp / SUM watts
 across devices. Backend + wire honesty landed in commit `814c1b3` (landing 3).
-Landing 4 (web consumers) in progress. Resolution recorded in JOURNAL.md.
+Web consumers landed in `e4772d3` (landing 4). Post-hoc design record at
+[`docs/GPU_TILE_DESIGN.md`](../GPU_TILE_DESIGN.md). Resolution recorded in
+JOURNAL.md.
 
 ---
 

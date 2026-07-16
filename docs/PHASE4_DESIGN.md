@@ -1,5 +1,14 @@
 # Phase 4 Design — config-driven policy + INA3221 + Jetson pass
 
+> **Status: SHIPPED (Phase 4 arc closed).** Config-driven policy
+> landed across v1.2.x. Auto-kill actuation shipped dormant per
+> [`PHASE4_AUTOKILL_DESIGN.md`](PHASE4_AUTOKILL_DESIGN.md).
+> Detailed per-landing history in [`CHANGELOG.md`](../CHANGELOG.md)
+> `[1.2.0]` through `[1.3.2]`. INA3221 rail population + Jetson
+> pass remain hardware-blocked (deferred; noted in
+> [`docs/state/BOARD.md`](state/BOARD.md)). This doc is now the
+> historical scoping record for the arc.
+
 > **Canonical Phase 4 scope.** Promoted to `docs/` per the
 > [`docs/ROADMAP.md`](ROADMAP.md) "plan-doc discipline" standing rule —
 > the design source survives in version control, not in ephemeral

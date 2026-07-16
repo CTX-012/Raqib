@@ -29,7 +29,7 @@ Items previously tagged **[VERIFY]** were inferred from screenshots/chat; **DISP
 | 2 | v1.1.x | Per-category samplers + activity-field separation (+ classifier, `ActivityState` → ux_contract v0.3.12) | ✅ shipped |
 | 3 | v1.2.0 | Vitals + Governor-finish + **cancel-countdown** + config-file settings (**Adopt-C**: config pulled forward) | ✅ shipped (governor observe-only) |
 | 4 | v1.3.x | **Web SPA + settings UI + auth** (reads TOML) — **+ auto-kill management (new scope)** | ⏳ in progress (v1.3.1 → v1.3.2) |
-| 5 | v2.0.0 | **History data-model rebuild + 5 web display modes + TUI essentials-only** | ⏳ in progress — History subsystem (D88-D97) + 5 web display modes (D99-D106) ✅ shipped under `[Unreleased]`; TUI essentials-only pass NOT started |
+| 5 | v2.0.0 | **History data-model rebuild + 5 web display modes + TUI essentials-only** | ⏳ arc all-shipped under `[Unreleased]` — History subsystem (D88-D97) ✅; 5 web display modes (D99-D106) ✅; TUI essentials-only (D107, the 4 defects enumerated in §3) ✅ (2026-07-15 AUDIT: original phrase-as-defined scope closed; any additional TUI work is FOLLOW-ON scope). Version tag (v2.0.0? v1.4.x?) is a HUMAN DECISION per BOARD.md |
 
 **Drift notes (reconciled):**
 - Phase 3 was re-anchored (DISPATCH 35) to **2 subsystems: Vitals + Governor-finish**, config *deferred*. The June 3 digest then shows **Adopt-C pulling config forward into Phase 3** — which is why v1.3.2 can do per-workload config rules (the TOML layer already exists).
@@ -108,13 +108,13 @@ Items previously tagged **[VERIFY]** were inferred from screenshots/chat; **DISP
 
 **Planned:** Phase 4 = **web SPA + settings UI + auth** (reads TOML from Phase 3). **New scope:** auto-kill management — web toggles it on, sets temp/VRAM/RAM thresholds, system auto-SIGTERMs to prevent OOM. Phase 5 = **5 web display modes + TUI essentials-only**.
 
-**Shipped:** read-only dashboard (localhost:7070): System / AI Workloads / Activity cards; thermal renders (2.1); footer "web companion (read-only) · use the TUI for control"; live tick. v1.3.0 ✅, v1.3.1 ✅ validated, v1.3.2 in progress.
+**Shipped:** read-only dashboard (localhost:7070): System / AI Workloads / Activity cards; thermal renders (2.1); footer "web companion (read-only) · use the TUI for control"; live tick. v1.3.0 ✅, v1.3.1 ✅ validated, v1.3.2 ✅ tagged 2026-06-05.
 
 **Left:**
 - **Settings UI** — not built.
 - **Auth** — currently unauthenticated (read-only today; becomes a real security gap the moment mutation/auto-kill lands).
 - **Auto-kill actuation + safety pre-pass** — *the frontier.* Owes: opt-in/off-by-default (v1.0.1 phantom-kill scar), where SIGTERM executes (local tick-loop vs network handler — network-in-kill-path is the open safety question), kill tiebreaker (lowest-PID 50% → least-recent-activity; the activity sampler it needs **exists**, 2.2), sustain gate, web-mutation auth, and deliberate teardown of the 3 observe-only firewalls (type/wiring/config). **[58]** thermal trigger only needs governor-side wiring of the existing NVML signal.
-- **5 web display modes** — ✅ **SHIPPED** (D99-D106, under `[Unreleased]`). Five URL-switchable modes (Dashboard / History / Kiosk / Timeline / Focus); design + build history in [`PHASE5_DISPLAY_MODES_DESIGN.md`](../PHASE5_DISPLAY_MODES_DESIGN.md). D98 browser render gate expanded to 221 assertions (5×7 mode×fixture matrix + per-mode probes). Zero new endpoints, zero contract touches. Step 9 (`/api/live/trajectory/{pid}`) explicitly deferred to v-next / v1.4.x candidate.
+- **5 web display modes** — ✅ **SHIPPED** (D99-D106, under `[Unreleased]`). Five URL-switchable modes (Dashboard / History / Kiosk / Timeline / Focus); design + build history in [`PHASE5_DISPLAY_MODES_DESIGN.md`](../PHASE5_DISPLAY_MODES_DESIGN.md). D98 browser render gate stands at 223 assertions after D109 (+2 F6 GPU measured-half assertions on landing 4). Zero new endpoints, zero contract touches. Step 9 (`/api/live/trajectory/{pid}`) explicitly deferred to v-next / v1.4.x candidate.
 - **Top Processes card** — missing from web (2.3).
 - **Cache-header durable fix** — folding into v1.3.2 (the web-zero root: `serve_asset` sends no `Cache-Control`/`ETag`, so browsers never revalidate after a rebuild).
 

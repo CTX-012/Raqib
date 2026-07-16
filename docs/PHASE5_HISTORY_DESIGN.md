@@ -1,6 +1,6 @@
 # edge_monitor — History Subsystem Design (Phase 5)
 
-**Status:** design draft 2026-06-23 · promotes to a `docs/PHASE5_DESIGN.md` sub-section at sign-off
+**Status:** **SHIPPED — closed 2026-07-15 (AUDIT sweep confirmed).** History subsystem landed across DISPATCH 88-97: in-memory ring + per-PID trajectories + cross-PID event archive (D89-D91), web endpoints `/api/history` + `/api/history/trajectory/{pid}` (D94), web `HistoryPage` + `TrajectoryChart` (D95), post-mortem shape-B expand (D96), TUI history-events browse (`H` key, D97). Consumed by the D101 History display mode. This doc is now historical record. Prior status: "design draft 2026-06-23 · promotes to a `docs/PHASE5_DESIGN.md` sub-section at sign-off" (DISPATCH 88 Inspector pass).
 **Basis:** DISPATCH 88 Inspector read-only pass against HEAD `v1.3.2-15-g7bba388`
 **Scope (operator-ratified):** in-memory ring + per-PID trajectories + cross-PID event timeline. No disk persistence beyond what `RunStore` already does. First consumer: a history view (web-first, TUI follow-up).
 

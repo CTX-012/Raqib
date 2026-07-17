@@ -2182,6 +2182,166 @@ async function runFocusModeGate(browser, url) {
 // a cross-mode gap the per-mode probes missed. The matrix's whole
 // point is to make such gaps loud.
 
+// ── D110 — SettingsPanel body-is-never-blank invariant ──────────────
+//
+// Regression backstop for a 2026-07-16 report: an operator saw the
+// dashboard's Settings toggle expand into a BLANK body. Root cause
+// was a 3-state template (loading / error / loaded) that only
+// rendered 2 states — the loading branch was implicit and rendered
+// nothing. A `view === null && loadError === null` state (fetch
+// pending, or a silently-swallowed rejection) therefore looked
+// identical to "settings failed to load."
+//
+// The hardened SettingsPanel exposes 3 testids:
+//   * data-testid="settings-loading"     — loading state
+//   * data-testid="settings-load-error"  — error state
+//   * data-testid="settings-loaded"      — loaded state
+//
+// Invariant this gate pins: when the panel is expanded, EXACTLY
+// ONE of the three testids is present. Blank body must be
+// impossible. Two probes cover the two states we can drive from
+// the harness: loaded (200 response) and error (500 response). The
+// loading state is time-dependent and skipped here (visible in
+// human smoke).
+async function runSettingsPanelGate(browser, url) {
+    const result = new GateResult();
+
+    async function probe(mode, mockSettings) {
+        const page = await browser.newPage();
+        const pageErrors = [];
+        page.on('pageerror', (err) => pageErrors.push(err.message));
+        await page.setRequestInterception(true);
+        page.on('request', (req) => {
+            const u = new URL(req.url());
+            if (!u.pathname.startsWith('/api/')) return req.continue();
+            const j = (obj, status = 200) =>
+                req.respond({
+                    status,
+                    contentType: 'application/json; charset=utf-8',
+                    body: JSON.stringify(obj),
+                });
+            if (u.pathname === '/api/snapshot')
+                return j({
+                    tick: 1,
+                    schema_version: '1',
+                    vitals: {},
+                    workloads: [],
+                    activity: [],
+                    alerts: [],
+                    recommendations: [],
+                });
+            if (u.pathname === '/api/health') return j({ ok: true });
+            if (u.pathname === '/api/history')
+                return j({ events: [], dead_pids: [] });
+            if (u.pathname === '/api/settings') {
+                if (mode === 'error') {
+                    return req.respond({ status: 500, body: 'boom' });
+                }
+                return j(mockSettings);
+            }
+            req.respond({ status: 404 });
+        });
+        await page.goto(`${url}/`, {
+            waitUntil: 'networkidle2',
+            timeout: 15000,
+        });
+        // Click the Settings toggle to enter `expanded=true`.
+        await page.evaluate(() => {
+            document.querySelector('.settings-toggle')?.click();
+        });
+        // Give onMount/refresh + Svelte tick a beat.
+        await new Promise((r) => setTimeout(r, 600));
+        const shot = await page.evaluate(() => {
+            const panel = document.querySelector('.settings-panel');
+            const body = panel?.querySelector('.settings-body');
+            return {
+                hasPanel: !!panel,
+                hasBody: !!body,
+                bodyTextLength: (body?.textContent ?? '').trim().length,
+                loaded: !!panel?.querySelector('[data-testid="settings-loaded"]'),
+                loading: !!panel?.querySelector('[data-testid="settings-loading"]'),
+                error: !!panel?.querySelector('[data-testid="settings-load-error"]'),
+                inputCount: panel?.querySelectorAll('input').length ?? 0,
+                firstInputValue:
+                    panel?.querySelector('input')?.value ?? null,
+            };
+        });
+        await page.close();
+        return { shot, pageErrors };
+    }
+
+    // Probe 1 — happy path (loaded state).
+    {
+        const { shot, pageErrors } = await probe('loaded', {
+            thresholds: {
+                thermal_amber_c: 85,
+                thermal_red_c: 95,
+                vram_attention_pct: 85,
+                vram_critical_pct: 95,
+                ram_attention_pct: 90,
+                ram_critical_pct: 95,
+                kv_attention_pct: 80,
+                kv_critical_pct: 95,
+                alert_sustain_secs: 5,
+            },
+            kill_sustain_secs: 10,
+            auto_actuate_readonly: false,
+            default_ai_action_readonly: 'Allow',
+            config_path: 'test/edge_monitor.toml',
+        });
+        const label = 'D110.loaded';
+        if (shot.hasPanel && shot.hasBody)
+            result.ok(`${label}: expanded panel body is present`);
+        else
+            result.fail(`${label}: expanded panel body missing`);
+        if (shot.loaded && !shot.loading && !shot.error)
+            result.ok(`${label}: exactly the LOADED state is visible`);
+        else
+            result.fail(
+                `${label}: state discriminator wrong (loaded=${shot.loaded}, loading=${shot.loading}, error=${shot.error})`,
+            );
+        if (shot.inputCount === 6 && shot.firstInputValue === '95')
+            result.ok(
+                `${label}: 6 inputs render with populated values (first=${shot.firstInputValue})`,
+            );
+        else
+            result.fail(
+                `${label}: inputs missing/blank (count=${shot.inputCount}, first=${JSON.stringify(shot.firstInputValue)})`,
+            );
+        // Filter out errors originating from unrelated dashboard
+        // fetches (WebSocket / other endpoints this minimal mock
+        // doesn't stub). The point of this probe is the settings
+        // panel's own state, not the surrounding page.
+        const settingsErrs = pageErrors.filter((e) =>
+            /settings/i.test(e),
+        );
+        if (settingsErrs.length === 0)
+            result.ok(`${label}: no settings-related page errors`);
+        else
+            result.fail(
+                `${label}: got ${settingsErrs.length} settings-related error(s): ${settingsErrs.join('; ')}`,
+            );
+    }
+
+    // Probe 2 — /api/settings 500 (error state).
+    {
+        const { shot } = await probe('error', null);
+        const label = 'D110.error';
+        if (shot.error && !shot.loaded && !shot.loading)
+            result.ok(`${label}: exactly the ERROR state is visible`);
+        else
+            result.fail(
+                `${label}: state discriminator wrong (loaded=${shot.loaded}, loading=${shot.loading}, error=${shot.error})`,
+            );
+        if (shot.bodyTextLength > 0)
+            result.ok(`${label}: body is not visually blank (has error text)`);
+        else
+            result.fail(`${label}: body is visually blank on 500`);
+    }
+
+    return result;
+}
+
 async function runMatrixGate(browser, url) {
     const result = new GateResult();
 
@@ -2505,6 +2665,15 @@ async function main() {
     results.push({
         name: 'D105_mode_fixture_matrix',
         ...matrixRes.summarize(),
+    });
+
+    console.log(`\n▶ D110 — Settings panel body-is-never-blank invariant`);
+    const settingsRes = await runSettingsPanelGate(browser, url);
+    settingsRes.passes.forEach((p) => console.log(`   ✓ ${p}`));
+    settingsRes.failures.forEach((f) => console.log(`   ✗ ${f}`));
+    results.push({
+        name: 'D110_settings_panel_never_blank',
+        ...settingsRes.summarize(),
     });
 
     await browser.close();

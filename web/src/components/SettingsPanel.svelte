@@ -95,7 +95,9 @@
     {#if expanded}
         <div class="settings-body">
             {#if loadError}
-                <div class="error">Failed to load settings: {loadError}</div>
+                <div class="error" data-testid="settings-load-error">
+                    Failed to load settings: {loadError}
+                </div>
             {/if}
 
             {#if view}
@@ -105,7 +107,7 @@
                     The text explicitly tells the operator where to
                     change these.
                 -->
-                <div class="readonly-block" aria-label="Read-only status">
+                <div class="readonly-block" aria-label="Read-only status" data-testid="settings-loaded">
                     <div class="readonly-row">
                         <span class="label">Auto-actuate (autonomous kills):</span>
                         <span
@@ -205,6 +207,20 @@
                         <div class="error">{saveError}</div>
                     {/if}
                 </fieldset>
+            {:else if !loadError}
+                <!--
+                    Loading state — before the D-hardening fix this
+                    branch didn't exist, so a `view === null &&
+                    loadError === null` state (fetch pending, or a
+                    silently-swallowed rejection) rendered the body
+                    as VISUALLY BLANK. Operators reported it as
+                    "settings is empty," which was ambiguous between
+                    "loading" and "broken." Now the panel is always
+                    in a legible state: loading / error / loaded.
+                -->
+                <div class="loading" data-testid="settings-loading">
+                    Loading settings…
+                </div>
             {/if}
         </div>
     {/if}
@@ -318,5 +334,10 @@
         grid-column: 1 / -1;
         color: rgb(var(--em-critical));
         margin-top: 0.4rem;
+    }
+    .loading {
+        color: rgb(var(--em-muted));
+        font-style: italic;
+        padding: 0.2rem 0;
     }
 </style>

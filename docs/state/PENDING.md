@@ -100,6 +100,76 @@ stop for ratification.
 
 ---
 
+## [FINDING] Connectivity indicator — "derive endpoint ourselves" is FEASIBLE for exactly the workload types that have HTTP endpoints; recommend hybrid — 2026-07-16
+
+**What I was asked to do:** determine whether we can derive per-workload health-probe endpoints from what the classifier + samplers already know, for each detected workload type, and recommend an approach for the connectivity indicator build.
+
+**Short answer:** **YES for ollama / vLLM / llama.cpp** — the derivation code ALREADY EXISTS as `discover_port()` + `endpoint_for()` helpers on the corresponding samplers. **NO endpoint exists for embeddings / agent / ROS2** — those are structurally non-HTTP and should be EXCLUDED from the probe (rendering nothing, not "DOWN"). The "derive ourselves" path is not fragile — it's a reuse of shipped, tested code — for the ~3 workload types where an HTTP endpoint is even a coherent concept. **Recommend: (a) derive-only for those 3 types, (b) show N/A (no chip) for the others.** No config knob needed. No CAR needed.
+
+### Q1 — Per workload type, CAN we know the endpoint?
+
+Verified against the shipped sampler code:
+
+| Workload type | Has HTTP endpoint? | Derivation available? | Cite | Verdict |
+|---|---|---|---|---|
+| **ollama** | ✅ yes, `http://127.0.0.1:{port}/api/ps` | ✅ [`OllamaSource::endpoint_for(cmdline, environ)`](../../src/telemetry/samplers/ollama_api.rs#L169-L174) — honors `OLLAMA_HOST` env var + `--host` cmdline flag; default 11434 | [`ollama_api.rs:145-174`](../../src/telemetry/samplers/ollama_api.rs#L145-L174) | **derive** |
+| **vLLM** | ✅ yes, `http://127.0.0.1:{port}/metrics` | ✅ [`VllmPrometheusSource::endpoint_for(cmdline)`](../../src/telemetry/samplers/vllm_prometheus.rs#L80-L82) — parses `--port` / `--port=`; default 8000 | [`vllm_prometheus.rs:58-82`](../../src/telemetry/samplers/vllm_prometheus.rs#L58-L82) | **derive** |
+| **llama.cpp** (`llama-server`) | ✅ yes, `http://127.0.0.1:{port}/metrics` | ✅ [`LlamaCppServerSource::endpoint_for(cmdline)`](../../src/telemetry/samplers/llama_cpp_server.rs#L78-L80) — same `--port` parser as vLLM; default 8080 | [`llama_cpp_server.rs:61-80`](../../src/telemetry/samplers/llama_cpp_server.rs#L61-L80) | **derive** |
+| **embeddings** (sentence-transformers, BGE, GTE, E5, nomic, MiniLM, jina) | ❌ no HTTP endpoint | n/a — embeddings sampler is CPU-signal-only per [`embeddings_cpu.rs:1-8`](../../src/telemetry/samplers/embeddings_cpu.rs#L1-L8): *"Embeddings workloads don't expose a Prometheus endpoint and don't have a daemon-style API to poll."* | [`embeddings_cpu.rs:1-8`](../../src/telemetry/samplers/embeddings_cpu.rs#L1-L8) | **exclude** — no chip |
+| **agent** (claude, cursor, aider, continue) | ❌ no HTTP endpoint | n/a — these are CLI processes that TALK to a remote LLM; they have no local server to probe | [`agent_claude.rs`](../../src/telemetry/samplers/agent_claude.rs) — sampler detects via ppid + bash-child observation, not by scraping the agent | **exclude** — no chip |
+| **ROS2** | ❌ no HTTP endpoint | n/a — ROS2 uses DDS (multicast pub/sub), sampler shells out to `ros2 topic echo --once` per [`ros2_shellout.rs:1-25`](../../src/telemetry/samplers/ros2_shellout.rs#L1-L25). There is nothing to `GET` | [`ros2_shellout.rs:1-25`](../../src/telemetry/samplers/ros2_shellout.rs#L1-L25) | **exclude** — no chip |
+| **Vision** (whisper-server, ComfyUI, YOLO, stable-diffusion) | ⚠️ mixed | whisper-server / ComfyUI DO expose HTTP but no `discover_port()` shipped; YOLO / SD are Python scripts (usually no server) | — | **exclude for v1** (add per-server derivation in a later dispatch if operator asks) |
+| **Triton / TorchServe** | ⚠️ HTTP but complex (multi-endpoint) | no shipped derivation | — | **exclude for v1** |
+| **Training** (torchrun, deepspeed, accelerate) | ❌ no HTTP endpoint | n/a — batch jobs | — | **exclude — no chip** |
+
+**Score**: 3 workload types have shipped derivation + defined endpoints (ollama, vLLM, llama.cpp). Every other workload type is either structurally non-HTTP (embeddings, agent, ROS2, training) or has HTTP but needs a fresh derivation function per server (Vision variants, Triton) — **defer those**.
+
+### Q2 — What does the classifier already capture?
+
+`ProcessSample` at [`src/model.rs:8-38`](../../src/model.rs#L8-L38) carries **`cmdline: Vec<String>`** AND **`environ: HashMap<String, String>`** — every field the three `discover_port()` functions need.
+
+BUT — and this is the ONE gap worth flagging — **`AnnotatedProcess` (the wire-side per-tick shape) does NOT carry cmdline/environ.** [`src/runtime.rs:49-82`](../../src/runtime.rs#L49-L82) drops them. So the derivation cannot happen at wire-build time from `AnnotatedProcess` alone; it needs to happen either (a) at classification time and be stored, or (b) re-read from `/proc/<pid>/cmdline` at probe time. The current samplers use (a) via a per-PID `endpoint_cache: HashMap<u32, Option<String>>` (see [`vllm_prometheus.rs:40`](../../src/telemetry/samplers/vllm_prometheus.rs#L40)) — cache the endpoint on first classification, reuse.
+
+**Fix shape (for the eventual build):** add `probe_endpoint: Option<String>` to `AnnotatedProcess`, populated at classification/annotation time via `endpoint_for()` for the 3 supported types, `None` for everything else. Wire it through to `WireWorkload`. Frontend renders a chip only when `probe_endpoint.is_some()`.
+
+Estimated cost: ~40 LoC on the runtime side (add field + wire it via a `pub fn endpoint_for_workload(sample) -> Option<String>` dispatcher in `src/telemetry/` that matches on `WorkloadCategory` + name and calls into the existing samplers), ~30 LoC on the wire side (add field + serde), ~20 LoC of TS mirror, ~100 LoC for the frontend chip component + probe loop.
+
+### Q3 — Recommended approach: **DERIVE ONLY (option a)**, no config
+
+Ranked options from the dispatch, honestly assessed:
+
+- **(a) Derive where cleanly possible; exclude non-HTTP types.** ✅ **RECOMMENDED.** Reuses already-shipped, already-tested `discover_port()` / `endpoint_for()` helpers. Zero fragility for the 3 supported types (the samplers themselves rely on this derivation working — if it were fragile, tokens/sec scraping would already be broken). Non-HTTP types render no chip — honest.
+- **(b) Hybrid derive + config override.** REJECTED unless operator specifically asks for it. YAGNI — the derivation already handles `OLLAMA_HOST`, `--port`, `--host` cmdline forms. The only case config would help is *"I ran ollama behind a reverse proxy on a weird port"* — an edge case not worth the config surface. If it appears, revisit; don't build it now.
+- **(c) Hardcode ollama + config override for the rest.** REJECTED. The dispatch flagged this as the fallback "if derivation isn't cleanly possible" — but derivation IS cleanly possible for the 3 types we care about. Hardcoding when we have a working parser would be regression, not simplification.
+
+### Q4 — Probe mechanics (design notes for the eventual build)
+
+- **Interval**: probe every **5 seconds**, NOT every 1 Hz tick. Rationale: an HTTP GET to a stalled ollama can block 500 ms (the samplers set 500 ms timeouts — see [`vllm_prometheus.rs:33`](../../src/telemetry/samplers/vllm_prometheus.rs#L33)). Multiply by N workloads at 1 Hz and you're melting the tick loop. 5 s is empirically fine for a "backend reachable" signal (a 5-second dead-server delay before UI update is acceptable — this is a monitor, not a load balancer).
+- **Startup state**: `"checking..."` for the first probe, THEN either `"ok"` or `"unreachable"`. **NEVER show "DOWN" before the first probe completes.** Match the daemon-status pattern the ollama sampler already uses at [`ollama_api.rs:176-194`](../../src/telemetry/samplers/ollama_api.rs#L176-L194) — log-once on transition, don't spam.
+- **Debounce**: two consecutive failures before flipping to `unreachable` (matches the sampler's "poison after 2 failures" pattern at [`vllm_prometheus.rs:39-40`](../../src/telemetry/samplers/vllm_prometheus.rs#L39-L40)). Prevents a single dropped packet from flashing the chip red.
+- **Timeout**: 500 ms per probe (match the sampler timeouts).
+- **Cache key**: per PID. Reuses the sampler cache pattern.
+- **Where the probe LOOP runs**: NOT the tick loop. Spawn a dedicated async task at `Runtime::new` (or reuse the existing telemetry-dispatcher's task pool) — the 5 s cadence + probe I/O are async-native and belong on tokio, not on the sync tick loop.
+- **Reachability state on the wire**: add `probe_status: Option<"ok" | "checking" | "unreachable">` to `WireWorkload` alongside `probe_endpoint`. Frontend renders a small color chip next to the workload row (green / neutral / red). `None` for excluded types = no chip.
+
+### Verdict — is "derive ourselves" achievable?
+
+**Yes, for the 3 HTTP workload types operators actually deploy in this project's target scope.** Not because we invent complex derivation, but because the *samplers already do this correctly and have tests to prove it* — the connectivity chip reuses their `endpoint_for()` output. For the other types (embeddings, agent, ROS2, training) — no chip at all is the honest answer. Showing "DOWN" for a ROS2 node that publishes at 10 Hz would be a lie in exactly the shape the CLAUDE.md VRAM-honesty rule forbids: *"NEVER a 0 or 0-line ... reads as 'GPU idle'"* — same principle, same restraint.
+
+**Contract impact**: adding `probe_endpoint: Option<String>` + `probe_status: Option<String>` to `WireWorkload` — the wire type lives ENTIRELY in `src/web/wire.rs` (`WireWorkload` at [`wire.rs:476-514`](../../src/web/wire.rs#L476-L514) is NOT in `../ux_contract`, same as `WireGpu` per the GPU-tile design record). **No CAR needed** — additive consumer-side change, mirrors D109's precedent.
+
+**HARD STOP status**: this is a design decision (Q3 asks operator to pick derive / hybrid / hardcode). The recommendation is clear and low-risk, but the CHOICE belongs to the human per HARD STOP #3. Also flags a decision on the 5-second probe cadence and the exclusion list (embeddings / agent / ROS2 / training / Vision / Triton).
+
+**What I need from the operator to build it:**
+1. Ratify **(a) derive-only** (my lean) vs **(b) hybrid** vs **(c) hardcode+config** for the endpoint discovery approach.
+2. Ratify **5-second probe cadence + 500 ms timeout + 2-failure debounce** (matches shipped sampler patterns).
+3. Ratify **exclusion list**: no chip for embeddings / agent / ROS2 / training / Vision-variants / Triton. Only ollama / vLLM / llama.cpp get chips in v1.
+4. Ratify the wire additions (`probe_endpoint`, `probe_status`) — additive to `WireWorkload`, no CAR.
+
+**What's safe to do meanwhile:** nothing on this specific arc without operator ratification (HARD STOP #3). Other work: the AUDIT DEFERRED items in the completion summary above are still human/hardware-blocked, and the loop is at EXIT until operator opens the next milestone.
+
+---
+
 ## [FINDING] "TUI essentials-only" is ALREADY DONE as originally scoped — 2026-07-15
 
 **What I was asked to do:** Phase 1's plan called for an investigator-pass on the "TUI essentials-only rework" (the last unstarted Phase-5 item per BOARD.md), then propose a design.

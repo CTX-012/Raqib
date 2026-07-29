@@ -1,5 +1,5 @@
 <script lang="ts">
-    import type { ActivityState, WireWorkload, WorkloadStatus } from '../lib/types';
+    import type { ActivityState, ProbeStatus, WireWorkload, WorkloadStatus } from '../lib/types';
     export let workload: WireWorkload;
 
     const STATUS_GLYPH: Record<WorkloadStatus, string> = {
@@ -13,6 +13,22 @@
         attention: 'text-attention',
         critical: 'text-critical',
         loading: 'text-fg-muted',
+    };
+
+    // DISPATCH connectivity — chip label + color mapping for the
+    // right-side reachability dot. Rendered ONLY when
+    // `workload.probe_endpoint` is present — non-HTTP workloads
+    // (agents, ROS2, embeddings) get no chip at all per the honesty
+    // rule ("showing a `?` for a healthy ROS2 node would lie").
+    const PROBE_LABEL: Record<ProbeStatus, string> = {
+        ok: 'net',
+        checking: '…',
+        unreachable: 'down',
+    };
+    const PROBE_CLASS: Record<ProbeStatus, string> = {
+        ok: 'text-healthy',
+        checking: 'text-fg-muted',
+        unreachable: 'text-critical',
     };
 
     // Phase 2 / DISPATCH 1 — activity-state label. Mirrors the TUI's
@@ -60,16 +76,13 @@
     harness selector in lockstep.
 -->
 <!--
-    v1.3.2 / DISPATCH thermal+VRAM — the grid grew from 6 to 7 cells.
-    Layout: status · name · primary · activity · CPU · RSS · VRAM.
-    The VRAM cell was previously crammed into the RSS cell as a
-    trailing `· NNNM GPU` suffix that operators reported as invisible
-    next to the TUI's aligned column. Promoting to its own cell
-    matches the TUI's shape (`vram_label` at src/ui/panels/workloads.rs:558)
-    and gives the VRAM-honesty discriminator a stable render slot:
-    unmeasured / zero → `—` (muted), measured → `NNNM` (foreground).
+    v1.3.2 / DISPATCH thermal+VRAM+connectivity — the grid now has
+    8 cells: status · name · primary · activity · CPU · RSS · VRAM ·
+    net-chip. The 8th cell is the connectivity indicator (present
+    only for workloads with a derived HTTP endpoint; nothing renders
+    for non-HTTP workloads per the honesty rule).
 -->
-<div data-testid="workload-row" class="grid grid-cols-[auto_1fr_auto_auto_auto_auto_auto] gap-x-3 py-0.5 items-baseline text-sm">
+<div data-testid="workload-row" class="grid grid-cols-[auto_1fr_auto_auto_auto_auto_auto_auto] gap-x-3 py-0.5 items-baseline text-sm">
     <span class={STATUS_CLASS[workload.status]} aria-label={workload.status}>
         {STATUS_GLYPH[workload.status]}
     </span>
@@ -104,5 +117,27 @@
         <span class="text-fg-muted text-xs tabular-nums" data-testid="workload-vram" data-testid-unmeasured="true">
             — VRAM
         </span>
+    {/if}
+    <!--
+        DISPATCH connectivity — the reachability chip. Rendered only
+        when the workload has a probe_endpoint AND a probe_status
+        (both come from the wire together — if probe_endpoint is
+        undefined, so is probe_status, and no chip renders). The
+        empty span in the else branch preserves the 8-cell grid so
+        every row aligns on the same right edge whether or not it
+        gets a chip. `title` shows the raw endpoint on hover for
+        operator diagnosis without needing DevTools.
+    -->
+    {#if workload.probe_endpoint && workload.probe_status}
+        <span
+            class="text-xs tabular-nums {PROBE_CLASS[workload.probe_status]}"
+            data-testid="workload-probe"
+            data-testid-probe={workload.probe_status}
+            title={`${workload.probe_endpoint} — ${workload.probe_status}`}
+        >
+            ● {PROBE_LABEL[workload.probe_status]}
+        </span>
+    {:else}
+        <span></span>
     {/if}
 </div>

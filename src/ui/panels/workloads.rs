@@ -252,6 +252,14 @@ pub(crate) struct Row {
     /// auto-hides the column when every visible row's `activity` is
     /// `None`.
     pub activity: Option<ux_contract::activity::ActivityState>,
+    /// DISPATCH connectivity — reachability of this workload's
+    /// derived HTTP endpoint. `Some` for ollama / vLLM / llama.cpp
+    /// (the workload has a probe_endpoint AND the tick loop has
+    /// mirrored the probe manager's verdict); `None` for
+    /// structurally non-HTTP workloads (agents, ROS2, embeddings)
+    /// — the TUI renderer draws no net-chip in that case, matching
+    /// the web renderer's honesty rule.
+    pub probe_status: Option<crate::telemetry::probe_manager::ProbeStatus>,
 }
 
 /// CAR-17 — compute the §3 `WorkloadStatus` for a single annotated
@@ -312,6 +320,14 @@ pub(crate) fn ordered_rows(state: &RuntimeState, app: &App) -> Vec<Row> {
                 // RuntimeState::live_telemetry (refreshed each tick
                 // from Dispatcher::activity_for in runtime.rs).
                 activity,
+                // DISPATCH connectivity — read the tick-loop mirror
+                // of the async prober's per-PID verdict. Present iff
+                // this PID has a `probe_endpoint`. `None` = draw no
+                // net-chip (non-HTTP workload).
+                probe_status: p
+                    .probe_endpoint
+                    .as_ref()
+                    .and(state.probe_status.get(&p.pid).copied()),
             }
         })
         .collect();
@@ -633,13 +649,33 @@ pub fn render(f: &mut Frame, area: Rect, state: &RuntimeState, app: &App, theme:
                     vram_label,
                 )
             };
-            let primary_line = Line::from(vec![
+            // DISPATCH connectivity — append a trailing reachability
+            // chip when the workload has a probe endpoint. The chip
+            // is short (` net` / ` …` / ` down`) so it doesn't blow
+            // the 80-col floor; colored via the same theme roles as
+            // the status dot so a `down` chip reads as "critical."
+            // Nothing rendered when `probe_status` is None — the
+            // honesty rule (no chip for non-HTTP workloads).
+            let probe_span: Option<Span<'_>> = row.probe_status.map(|st| {
+                use crate::telemetry::probe_manager::ProbeStatus;
+                let (label, color) = match st {
+                    ProbeStatus::Ok => (" net", theme.foreground),
+                    ProbeStatus::Checking => (" …", theme.muted),
+                    ProbeStatus::Unreachable => (" down", theme.critical),
+                };
+                Span::styled(label.to_string(), Style::default().fg(color))
+            });
+            let mut spans = vec![
                 Span::styled(
                     dot.to_string(),
                     Style::default().fg(theme.status_color(row.status)),
                 ),
                 Span::styled(rest, Style::default().fg(theme.foreground)),
-            ]);
+            ];
+            if let Some(s) = probe_span {
+                spans.push(s);
+            }
+            let primary_line = Line::from(spans);
             // L12 — combine primary + expansion into a single
             // ListItem so the highlight (selection bg) covers both
             // when this row is selected. The expansion's `Option`
@@ -787,6 +823,7 @@ mod tests {
             // panel's `Instant::now()` minus this lands at
             // `first_observed_age`.
             first_observed_at: Instant::now() - first_observed_age,
+            probe_endpoint: None,
         }
     }
 
@@ -808,6 +845,7 @@ mod tests {
             spawn_time: None,
             model: None,
             activity: None,
+            probe_status: None,
         }
     }
 

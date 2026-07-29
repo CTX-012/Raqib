@@ -403,6 +403,7 @@ mod tests {
             rss_mb,
             vram_bytes: None,
             first_observed_at: Instant::now(),
+            probe_endpoint: None,
         }
     }
 

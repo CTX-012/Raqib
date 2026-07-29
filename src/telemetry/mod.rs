@@ -26,6 +26,8 @@ pub mod cold_load;
 pub mod concurrent_requests;
 pub mod dispatcher;
 pub mod exporter;
+pub mod probe_endpoint;
+pub mod probe_manager;
 pub mod rapl;
 pub mod samplers;
 pub mod source;

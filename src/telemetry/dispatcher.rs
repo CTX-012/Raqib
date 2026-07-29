@@ -117,6 +117,26 @@ impl Dispatcher {
     /// Tier 3.6 — start the vision probe Unix socket. Empty string
     /// disables. Frames received from clients flow into the same
     /// per-PID accumulator as HTTP-scraped frames.
+    /// DISPATCH connectivity — spawn the HTTP probe manager on the
+    /// dispatcher's tokio runtime. Long-lived task; aborted when the
+    /// dispatcher (and its runtime) drops. Mirrors the
+    /// `enable_vision_probe` pattern — the caller keeps its own
+    /// `Arc<RwLock<ProbeState>>` handle to reconcile per-PID
+    /// endpoints and read back statuses; this method just moves a
+    /// clone into an async task so we don't leak the tokio runtime
+    /// reference to callers.
+    ///
+    /// The probe task NEVER blocks the tick loop: it awaits on a
+    /// tokio interval, holds locks only for the microseconds needed
+    /// to snapshot the PID list / apply results, and every HTTP call
+    /// is capped by the reqwest client's 500 ms timeout.
+    pub fn enable_probe_manager(
+        &mut self,
+        shared: crate::telemetry::probe_manager::SharedProbeState,
+    ) {
+        crate::telemetry::probe_manager::spawn(&self.runtime, shared, None);
+    }
+
     pub fn enable_vision_probe(&mut self, socket_path: &str) {
         if socket_path.is_empty() {
             return;

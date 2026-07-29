@@ -193,11 +193,31 @@ export interface WireWorkload {
      * mirroring the TUI's auto-hide rule (Inspector #8 V1).
      */
     activity: ActivityState | null;
+    /**
+     * DISPATCH connectivity — HTTP health-probe endpoint derived
+     * server-side from the workload's cmdline + environ (via
+     * `derive_probe_endpoint`). Present for ollama / vLLM /
+     * llama.cpp workloads; absent (`undefined`) for structurally
+     * non-HTTP types (embeddings, agents, ROS2, training). The
+     * frontend gates the connectivity chip on this being present —
+     * showing a chip for a workload with no HTTP surface would lie.
+     */
+    probe_endpoint?: string;
+    /**
+     * DISPATCH connectivity — current probe state as a wire-stable
+     * string. Present iff `probe_endpoint` is present. `"checking"`
+     * is the honest first-load state (probe pending); `"ok"` after
+     * a successful probe; `"unreachable"` only after two consecutive
+     * failures (debounce prevents flapping on a single blip).
+     */
+    probe_status?: ProbeStatus;
 }
 
 export type WorkloadStatus = 'healthy' | 'attention' | 'critical' | 'loading';
 
 export type ActivityState = 'active' | 'idle' | 'loading' | 'not_detected';
+
+export type ProbeStatus = 'ok' | 'checking' | 'unreachable';
 
 export interface WireRunRecord {
     pid: number;

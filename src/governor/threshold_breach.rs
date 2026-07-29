@@ -283,6 +283,7 @@ mod tests {
             rss_mb: 0,
             vram_bytes,
             first_observed_at: Instant::now(),
+            probe_endpoint: None,
         }
     }
 
@@ -406,6 +407,7 @@ mod tests {
             rss_mb,
             vram_bytes: None,
             first_observed_at: Instant::now(),
+            probe_endpoint: None,
         }
     }
 

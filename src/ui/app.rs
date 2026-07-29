@@ -895,6 +895,7 @@ mod tests {
             // App-state tests don't exercise the Loading warmup gate;
             // any non-zero `Instant` works.
             first_observed_at: std::time::Instant::now(),
+            probe_endpoint: None,
         }
     }
 

@@ -2350,6 +2350,128 @@ async function runSettingsPanelGate(browser, url) {
     return result;
 }
 
+// ── D113 — Connectivity indicator render invariant ──────────────────
+//
+// Regression backstop for the connectivity-chip dispatch. The wire
+// carries `probe_endpoint` + `probe_status` per WorkloadRow;
+// `WorkloadRow.svelte` renders a chip iff both are present.
+//
+// Invariants this gate pins:
+//   * HTTP workload (ollama/vLLM/llama.cpp) WITH probe_endpoint +
+//     probe_status="ok" → chip rendered, testid-probe="ok",
+//     label "net".
+//   * HTTP workload WITH probe_status="checking" (first-load) →
+//     chip rendered, testid-probe="checking", label "…". NEVER
+//     "down" before the first probe completes — the honesty rule.
+//   * HTTP workload WITH probe_status="unreachable" → chip rendered,
+//     testid-probe="unreachable", label "down".
+//   * Non-HTTP workload (agent, ROS2, embeddings) WITHOUT
+//     probe_endpoint → NO chip. Zero `[data-testid="workload-probe"]`
+//     inside that row. Showing anything would lie about a workload
+//     that structurally can't be HTTP-probed.
+async function runConnectivityChipGate(browser, url) {
+    const result = new GateResult();
+    const page = await browser.newPage();
+    const pageErrors = [];
+    page.on('pageerror', (err) => pageErrors.push(err.message));
+    await page.setRequestInterception(true);
+    page.on('request', (req) => {
+        const u = new URL(req.url());
+        if (!u.pathname.startsWith('/api/')) return req.continue();
+        const j = (obj) =>
+            req.respond({
+                status: 200,
+                contentType: 'application/json; charset=utf-8',
+                body: JSON.stringify(obj),
+            });
+        if (u.pathname === '/api/snapshot')
+            return j({
+                tick: 1,
+                schema_version: '1',
+                mission: { workloads: 4, degraded: 0 },
+                vitals: {
+                    memory_pct: 30,
+                    memory_used_mb: 8000,
+                    memory_total_mb: 32000,
+                    load_average: [1.0, 1.1, 1.2],
+                    cpu_count: 12,
+                    process_count: 100,
+                    thermal_zones: [],
+                },
+                workloads: [
+                    // ollama: ok
+                    { pid: 1, name: 'ollama', model_name: 'llama3', category: 'inference', workload_category: 'llm', cpu_pct: 25.0, rss_mb: 2048, ram_pct: 6.4, vram_mb: 512, tokens_per_sec: 42.0, fps: null, kv_cache_peak_pct: null, status: 'healthy', activity: 'active', probe_endpoint: 'http://127.0.0.1:11434/api/ps', probe_status: 'ok' },
+                    // vLLM: checking (first-load honest state)
+                    { pid: 2, name: 'python', model_name: 'phi3', category: 'inference', workload_category: 'llm', cpu_pct: 20.0, rss_mb: 4096, ram_pct: 12.8, vram_mb: 8192, tokens_per_sec: 55.0, fps: null, kv_cache_peak_pct: null, status: 'healthy', activity: 'active', probe_endpoint: 'http://127.0.0.1:8000/metrics', probe_status: 'checking' },
+                    // llama.cpp: unreachable (post-debounce)
+                    { pid: 3, name: 'llama-server', model_name: 'mistral', category: 'inference', workload_category: 'llm', cpu_pct: 0.5, rss_mb: 1024, ram_pct: 3.2, vram_mb: 0, tokens_per_sec: null, fps: null, kv_cache_peak_pct: null, status: 'healthy', activity: null, probe_endpoint: 'http://127.0.0.1:8080/metrics', probe_status: 'unreachable' },
+                    // agent: NO chip (probe_endpoint absent → probe_status absent)
+                    { pid: 4, name: 'agent-process', model_name: null, category: 'agent', workload_category: 'agent', cpu_pct: 1.5, rss_mb: 128, ram_pct: 0.4, vram_mb: null, tokens_per_sec: null, fps: null, kv_cache_peak_pct: null, status: 'healthy', activity: null },
+                ],
+                activity: [],
+                alerts: [],
+                recommendations: [],
+            });
+        if (u.pathname === '/api/health') return j({ ok: true });
+        if (u.pathname === '/api/history') return j({ events: [], dead_pids: [] });
+        if (u.pathname === '/api/settings')
+            return j({
+                thresholds: {},
+                kill_sustain_secs: 10,
+                auto_actuate_readonly: false,
+                default_ai_action_readonly: 'Allow',
+                config_path: null,
+            });
+        req.respond({ status: 404 });
+    });
+    await page.goto(`${url}/`, { waitUntil: 'networkidle2', timeout: 15000 });
+    await new Promise((r) => setTimeout(r, 500));
+    const shot = await page.evaluate(() => {
+        const rows = Array.from(document.querySelectorAll('[data-testid="workload-row"]'));
+        return rows.map((row) => {
+            const chip = row.querySelector('[data-testid="workload-probe"]');
+            return {
+                name: row.children[1]?.textContent.trim().slice(0, 40),
+                chip_present: !!chip,
+                chip_status: chip?.getAttribute('data-testid-probe') ?? null,
+                chip_text: chip?.textContent.trim() ?? null,
+            };
+        });
+    });
+    await page.close();
+
+    if (shot.length === 4)
+        result.ok(`D113: 4 workload rows rendered`);
+    else
+        result.fail(`D113: expected 4 rows, got ${shot.length}: ${JSON.stringify(shot)}`);
+    // Row 0 — ollama, ok
+    if (shot[0]?.chip_present && shot[0]?.chip_status === 'ok' && /net/.test(shot[0]?.chip_text ?? ''))
+        result.ok(`D113: ollama row shows OK chip (net)`);
+    else
+        result.fail(`D113: ollama chip wrong: ${JSON.stringify(shot[0])}`);
+    // Row 1 — vLLM, checking (honesty: never "down" on first-load)
+    if (shot[1]?.chip_present && shot[1]?.chip_status === 'checking' && /…/.test(shot[1]?.chip_text ?? ''))
+        result.ok(`D113: vLLM row shows CHECKING chip (…); never "down" on first-load`);
+    else
+        result.fail(`D113: vLLM checking chip wrong: ${JSON.stringify(shot[1])}`);
+    // Row 2 — llama.cpp, unreachable
+    if (shot[2]?.chip_present && shot[2]?.chip_status === 'unreachable' && /down/.test(shot[2]?.chip_text ?? ''))
+        result.ok(`D113: llama.cpp row shows UNREACHABLE chip (down)`);
+    else
+        result.fail(`D113: llama.cpp unreachable chip wrong: ${JSON.stringify(shot[2])}`);
+    // Row 3 — agent, NO chip (honesty: non-HTTP workload)
+    if (shot[3] && !shot[3].chip_present)
+        result.ok(`D113: agent row shows NO chip (non-HTTP → honesty rule holds)`);
+    else
+        result.fail(`D113: agent chip should be absent; got: ${JSON.stringify(shot[3])}`);
+    if (pageErrors.length === 0)
+        result.ok(`D113: no page errors`);
+    else
+        result.fail(`D113: got ${pageErrors.length} page error(s): ${pageErrors.join('; ')}`);
+
+    return result;
+}
+
 // ── D111 — Thermal-friendly-name render invariant ───────────────────
 //
 // Regression backstop for the thermal-friendly dispatch: raw kernel
@@ -2917,6 +3039,15 @@ async function main() {
     results.push({
         name: 'D112_workload_vram_column',
         ...vramColRes.summarize(),
+    });
+
+    console.log(`\n▶ D113 — Connectivity indicator (chip present/absent/checking)`);
+    const chipRes = await runConnectivityChipGate(browser, url);
+    chipRes.passes.forEach((p) => console.log(`   ✓ ${p}`));
+    chipRes.failures.forEach((f) => console.log(`   ✗ ${f}`));
+    results.push({
+        name: 'D113_connectivity_chip',
+        ...chipRes.summarize(),
     });
 
     await browser.close();

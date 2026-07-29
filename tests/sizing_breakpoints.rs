@@ -38,6 +38,7 @@ fn ai_process(pid: u32, name: &str, category: WorkloadCategory) -> AnnotatedProc
         rss_mb: 0,
         vram_bytes: None,
         first_observed_at: Instant::now(),
+            probe_endpoint: None,
     }
 }
 

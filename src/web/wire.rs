@@ -549,6 +549,28 @@ pub struct WireWorkload {
     /// report throughput-only). Web UI hides the column when every
     /// visible row's `activity` is `None`, mirroring the TUI.
     pub activity: Option<String>,
+    /// DISPATCH connectivity — HTTP health-probe endpoint derived
+    /// from the workload's cmdline + environ at annotation time.
+    /// `Some(url)` for HTTP-scrapable workload types (ollama /
+    /// vLLM / llama.cpp), `None` for non-HTTP workloads (embeddings,
+    /// agents, ROS2, training). The renderer treats `None` as "no
+    /// chip at all" — showing a status dot for a workload with no
+    /// endpoint would lie in the same shape as `0` for unmeasured
+    /// VRAM. `#[serde(skip_serializing_if = "Option::is_none")]`
+    /// keeps the JSON minimal for the common non-HTTP case.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub probe_endpoint: Option<String>,
+    /// DISPATCH connectivity — current probe result as a
+    /// wire-stable string: `"ok"` (last probe succeeded), `"checking"`
+    /// (probe pending or in-flight; also the first-load state before
+    /// any probe has completed), `"unreachable"` (>= 2 consecutive
+    /// probe failures — the poison-after-2 pattern shared with
+    /// `VllmPrometheusSource`'s `endpoint_cache`). `None` when the
+    /// workload has no `probe_endpoint` (structurally can't be
+    /// probed). NEVER `"unreachable"` before the first probe
+    /// completes — the honesty rule: "unmeasured" is not "down."
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub probe_status: Option<String>,
 }
 
 /// v1.3.2 / DISPATCH 71 — uniform activity-feed entry.
@@ -765,6 +787,15 @@ impl WireSnapshot {
     /// a `recent: &[RunRecord]` slice covering only `state.completed`,
     /// but the merged 3-source feed reads `state.completed` +
     /// `state.audit` + `state.regressions` directly.
+    ///
+    /// The connectivity `probe_status` on each `WireWorkload` is
+    /// populated from `state.probe_status` — the tick-loop mirror of
+    /// the shared prober state. When the prober has no entry for a
+    /// PID (first tick / prober disabled), the wire emits
+    /// `"checking"` per the honesty rule (never `"unreachable"`
+    /// before the first probe completes). When the workload has no
+    /// `probe_endpoint` at all, the wire emits no probe_status —
+    /// the renderer then draws no chip.
     pub fn from_runtime_state(state: &RuntimeState) -> Self {
         let mission = WireMission::from_runtime(state);
         let vitals = WireVitals::from_runtime(state);
@@ -969,7 +1000,10 @@ impl WireVitals {
 }
 
 impl WireWorkload {
-    fn from_annotated(p: &crate::runtime::AnnotatedProcess, state: &RuntimeState) -> Self {
+    fn from_annotated(
+        p: &crate::runtime::AnnotatedProcess,
+        state: &RuntimeState,
+    ) -> Self {
         let vram_mb = p.vram_bytes.map(|b| b / (1024 * 1024)).filter(|&v| v > 0);
         let lt = state.live_telemetry.get(&p.pid);
         let tokens_per_sec = lt.and_then(|t| t.tokens_per_sec_avg);
@@ -986,6 +1020,25 @@ impl WireWorkload {
         let ram_pct = compute_ram_pct(p.rss_mb, total_ram_bytes);
         let inputs = build_status_inputs(p, state);
         let status = crate::runtime::compute_workload_status(&inputs, &state.thresholds);
+        // DISPATCH connectivity — probe_endpoint is stable per-PID
+        // (annotation-derived). probe_status comes from the tick
+        // loop's mirror of the shared prober state
+        // (`state.probe_status`), so the wire mapper stays pure and
+        // never touches the RwLock. Fallback to `"checking"` when
+        // the endpoint exists but the prober hasn't seen the PID
+        // yet — the honesty rule: never `"unreachable"` on the
+        // first-load frame before a probe has completed. `None`
+        // status for endpoint-less workloads (no chip rendered).
+        let probe_endpoint = p.probe_endpoint.clone();
+        let probe_status = if probe_endpoint.is_some() {
+            let looked_up = state
+                .probe_status
+                .get(&p.pid)
+                .map(|s| s.as_str().to_string());
+            Some(looked_up.unwrap_or_else(|| "checking".to_string()))
+        } else {
+            None
+        };
         Self {
             pid: p.pid,
             name: p.name.clone(),
@@ -1007,6 +1060,8 @@ impl WireWorkload {
             kv_cache_peak_pct,
             status: workload_status_to_str(status).to_string(),
             activity,
+            probe_endpoint,
+            probe_status,
         }
     }
 }

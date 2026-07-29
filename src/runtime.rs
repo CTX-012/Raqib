@@ -79,6 +79,17 @@ pub struct AnnotatedProcess {
     /// running before edge_monitor started has a young
     /// `first_observed_at` even though it has a long process age.
     pub first_observed_at: Instant,
+    /// DISPATCH connectivity — HTTP health-probe endpoint derived at
+    /// annotation time via
+    /// [`crate::telemetry::probe_endpoint::derive_probe_endpoint`].
+    /// `Some(url)` for HTTP-scrapable workload types (ollama / vLLM /
+    /// llama.cpp), `None` for anything else (embeddings, agents,
+    /// ROS2, training) — those workloads have no HTTP surface, so
+    /// showing a connectivity chip for them would lie in exactly the
+    /// shape the VRAM-honesty rule forbids. The prober task consumes
+    /// this field; the wire surfaces it verbatim so the frontend
+    /// knows whether to render a chip at all.
+    pub probe_endpoint: Option<String>,
 }
 
 /// v1.3.2 / DISPATCH 74 — per-exit classification projected to
@@ -126,6 +137,15 @@ pub struct RuntimeState {
     /// only present for AI processes the dispatcher has sampled at least
     /// once. Empty when telemetry is disabled.
     pub live_telemetry: HashMap<u32, LiveTelemetry>,
+    /// DISPATCH connectivity — per-PID probe status mirror. Refreshed
+    /// each tick from the shared `Arc<RwLock<ProbeState>>` written by
+    /// the async probe manager. Keyed by PID; entries only present
+    /// for HTTP-scrapable workloads (i.e. ones whose
+    /// `AnnotatedProcess.probe_endpoint` is `Some`). The wire mapper
+    /// projects each entry's `as_str()` onto
+    /// `WireWorkload.probe_status`; entries absent = renderer emits
+    /// no chip for that PID (the non-HTTP honesty case).
+    pub probe_status: HashMap<u32, crate::telemetry::probe_manager::ProbeStatus>,
     /// L8 / UX_CONTRACT.md §4 — exit-driven alert events queued by
     /// the lifecycle exit hook. Drained by the UI loop after each
     /// tick (`Runtime::drain_exit_alerts`) and dispatched to
@@ -396,6 +416,13 @@ pub struct Runtime {
     /// usually a kernel thread-creation failure) so the rest of the
     /// runtime degrades gracefully.
     telemetry: Option<Dispatcher>,
+    /// DISPATCH connectivity — shared handle to the async probe
+    /// manager's state map. `None` when telemetry is disabled (no
+    /// tokio runtime available to host the probe task); populated
+    /// unconditionally otherwise (the ratified spec has no config
+    /// knob). Owned as `Arc` so the async task can hold a clone and
+    /// the tick loop can reconcile per-PID endpoints from here.
+    probe_state: Option<crate::telemetry::probe_manager::SharedProbeState>,
     /// Tier 2.3 — cumulative governor-kill counter, keyed by reason.
     /// Surfaced as `edge_monitor_governor_kills_total{reason="..."}`
     /// in the Prometheus exporter.
@@ -578,6 +605,19 @@ impl Runtime {
         if let Some(d) = telemetry.as_mut() {
             d.enable_vision_probe(&config.telemetry.vision_probe_socket);
         }
+        // DISPATCH connectivity — spawn the HTTP probe manager on the
+        // dispatcher's tokio runtime. The task is a long-lived 5 s
+        // interval; it awaits, snapshots the PID list, fires N
+        // concurrent 500ms-timeout probes, updates the shared state,
+        // and loops. It NEVER blocks the tick loop (async pool
+        // separation is the whole safety property). `None` when
+        // telemetry is disabled — the wire mapper then emits no
+        // probe_status for any workload.
+        let probe_state = telemetry.as_mut().map(|d| {
+            let shared = crate::telemetry::probe_manager::shared_state();
+            d.enable_probe_manager(shared.clone());
+            shared
+        });
         let fingerprinter = Fingerprinter::open(if config.storage.fingerprint_cache.is_empty() {
             None
         } else {
@@ -601,6 +641,7 @@ impl Runtime {
             summary_store,
             run_store,
             telemetry,
+            probe_state,
             kills_by_reason: HashMap::new(),
             regressions_count: HashMap::new(),
             cold_load_seconds_by_model: HashMap::new(),
@@ -992,6 +1033,20 @@ impl Runtime {
                 next_cpu.insert(p.pid, (p.cpu_time_ticks, now));
                 let first_observed_at =
                     *self.pid_first_seen_at.entry(p.pid).or_insert(now);
+                // DISPATCH connectivity — derive the HTTP probe
+                // endpoint at annotation time. `None` for non-HTTP
+                // workload types (embeddings, agents, ROS2, training)
+                // per the honesty rule at
+                // `telemetry::probe_endpoint`. Result is stable
+                // per-PID across ticks — the sampler patterns that
+                // determine it read cmdline + environ, both stable
+                // for a given process instance.
+                let probe_endpoint =
+                    crate::telemetry::probe_endpoint::derive_probe_endpoint(
+                        &p.name,
+                        &p.cmdline,
+                        &p.environ,
+                    );
                 AnnotatedProcess {
                     pid: p.pid,
                     name: p.name.clone(),
@@ -1007,10 +1062,42 @@ impl Runtime {
                     rss_mb: p.rss_bytes / (1024 * 1024),
                     vram_bytes: vram_by_pid.get(&p.pid).copied(),
                     first_observed_at,
+                    probe_endpoint,
                 }
             })
             .collect();
         self.prev_cpu = next_cpu;
+
+        // DISPATCH connectivity — reconcile the async probe manager's
+        // PID → endpoint set against this tick's annotated procs (new
+        // PIDs enter as `Checking`, exited PIDs drop). Then mirror
+        // the current per-PID statuses onto `state.probe_status` so
+        // the wire mapper can read them without touching the lock.
+        //
+        // Locks are held only for the microseconds needed for a
+        // HashMap retain / insert-or-check / clone — NEVER across an
+        // .await point and NEVER while blocking on I/O. The whole
+        // safety property (the probe MUST NOT block the tick loop)
+        // is here.
+        if let Some(shared) = &self.probe_state {
+            let endpoints: Vec<(u32, String)> = annotated
+                .iter()
+                .filter_map(|ap| {
+                    ap.probe_endpoint
+                        .as_ref()
+                        .map(|ep| (ap.pid, ep.clone()))
+                })
+                .collect();
+            if let Ok(mut guard) = shared.write() {
+                guard.reconcile(&endpoints);
+                self.state.probe_status = guard.snapshot_statuses();
+            } else {
+                tracing::warn!(
+                    "probe_state RwLock poisoned; dropping this tick's probe reconcile"
+                );
+                self.state.probe_status.clear();
+            }
+        }
 
         let lifecycle = self
             .tracker
@@ -2788,6 +2875,7 @@ mod tests {
             rss_mb: 0,
             vram_bytes: None,
             first_observed_at: Instant::now(),
+            probe_endpoint: None,
         });
         rt.state.decisions = vec![(
             pid,
@@ -2878,6 +2966,7 @@ mod tests {
             rss_mb: 0,
             vram_bytes: None,
             first_observed_at: Instant::now(),
+            probe_endpoint: None,
         });
         // state.decisions has nothing matching SignalTermSent (here:
         // empty, but Whitelisted/Skipped/AlreadyExited would all
@@ -2968,6 +3057,7 @@ mod tests {
             rss_mb: 0,
             vram_bytes: None,
             first_observed_at: Instant::now(),
+            probe_endpoint: None,
         });
         rt.state.decisions = vec![(
             pid,
@@ -3392,6 +3482,7 @@ mod tests {
             rss_mb: 0,
             vram_bytes: None,
             first_observed_at: Instant::now(),
+            probe_endpoint: None,
         });
     }
 
@@ -3812,6 +3903,7 @@ mod tests {
             rss_mb: 0,
             vram_bytes: None,
             first_observed_at: Instant::now(),
+            probe_endpoint: None,
         });
         // Drive the same internal method `tick()` would call.
         rt.observe_alerts(Instant::now());
@@ -4015,6 +4107,7 @@ mod tests {
             rss_mb: 0,
             vram_bytes: None,
             first_observed_at: Instant::now(),
+            probe_endpoint: None,
         });
 
         let t0 = Instant::now();
@@ -5404,6 +5497,7 @@ mod tests {
             rss_mb: 0,
             vram_bytes: None,
             first_observed_at: Instant::now(),
+            probe_endpoint: None,
         }
     }
 

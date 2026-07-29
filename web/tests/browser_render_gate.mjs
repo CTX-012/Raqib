@@ -2489,6 +2489,169 @@ async function runConnectivityChipGate(browser, url) {
 //     (positional disambiguation held).
 //   * A known label (`x86_pkg_temp`) maps to a known friendly
 //     (`CPU Package`).
+// ── D114 — Web workloads column-header parity with TUI ─────────────
+//
+// Regression backstop for the web-column-headers dispatch: the TUI
+// workloads panel has a column-header row (D107 FIX 2) — NAME /
+// MODEL / STATE / PRIMARY / STARTED / CPU % / RSS MB / VRAM — but
+// the web panel rendered data rows with NO header row. Operators
+// couldn't tell which column was which.
+//
+// The web panel now renders a header row above the group dividers.
+// Web has no MODEL/STARTED columns (name-fused, no per-row spawn
+// time), so the header labels the columns web ACTUALLY renders:
+// NAME / PRIMARY / STATE / CPU % / RSS MB / VRAM.
+//
+// Invariants this gate pins:
+//   * `[data-testid="workloads-header"]` exists exactly once when
+//     the panel has workloads.
+//   * 6 label testids are present: name / primary / state / cpu /
+//     rss / vram. If a future refactor drops one, the alignment
+//     between header and row breaks — this fires early.
+//   * The header uses the SAME grid-template as WorkloadRow. Pinned
+//     by the computed grid-template-columns matching.
+//   * When the panel is empty (no workloads), the header does NOT
+//     render — otherwise operators see a stranded header above an
+//     "empty state" message.
+async function runWorkloadsHeaderGate(browser, url) {
+    const result = new GateResult();
+
+    async function probe(withWorkloads) {
+        const page = await browser.newPage();
+        const pageErrors = [];
+        page.on('pageerror', (err) => pageErrors.push(err.message));
+        await page.setRequestInterception(true);
+        page.on('request', (req) => {
+            const u = new URL(req.url());
+            if (!u.pathname.startsWith('/api/')) return req.continue();
+            const j = (obj) =>
+                req.respond({
+                    status: 200,
+                    contentType: 'application/json; charset=utf-8',
+                    body: JSON.stringify(obj),
+                });
+            if (u.pathname === '/api/snapshot')
+                return j({
+                    tick: 1,
+                    schema_version: '1',
+                    mission: { workloads: withWorkloads ? 1 : 0, degraded: 0 },
+                    vitals: {
+                        memory_pct: 30, memory_used_mb: 8000, memory_total_mb: 32000,
+                        load_average: [1.0, 1.1, 1.2], cpu_count: 12, process_count: 100,
+                        thermal_zones: [],
+                    },
+                    workloads: withWorkloads ? [
+                        { pid: 1, name: 'ollama', model_name: 'llama3', category: 'inference', workload_category: 'llm', cpu_pct: 25.0, rss_mb: 2048, ram_pct: 6.4, vram_mb: 512, tokens_per_sec: 42.0, fps: null, kv_cache_peak_pct: null, status: 'healthy', activity: 'active' },
+                    ] : [],
+                    activity: [], alerts: [], recommendations: [],
+                });
+            if (u.pathname === '/api/health') return j({ ok: true });
+            if (u.pathname === '/api/history') return j({ events: [], dead_pids: [] });
+            if (u.pathname === '/api/settings')
+                return j({
+                    thresholds: {}, kill_sustain_secs: 10,
+                    auto_actuate_readonly: false, default_ai_action_readonly: 'Allow',
+                    config_path: null,
+                });
+            req.respond({ status: 404 });
+        });
+        await page.goto(`${url}/`, { waitUntil: 'networkidle2', timeout: 15000 });
+        await new Promise((r) => setTimeout(r, 500));
+        const shot = await page.evaluate(() => {
+            const header = document.querySelector('[data-testid="workloads-header"]');
+            const row = document.querySelector('[data-testid="workload-row"]');
+            // With `display: contents` on both wrappers, their cells
+            // are direct children of ONE shared CSS Grid. Alignment
+            // is proved by the header's cell-left positions matching
+            // the row's cell-left positions for each column. Sample
+            // the 3 label cells that carry unique widths — NAME
+            // (1fr, wide), PRIMARY (auto), VRAM (auto).
+            const nameHdr = document.querySelector('[data-testid="workloads-header-name"]');
+            const primaryHdr = document.querySelector('[data-testid="workloads-header-primary"]');
+            const vramHdr = document.querySelector('[data-testid="workloads-header-vram"]');
+            const rowChildren = row ? Array.from(row.querySelectorAll(':scope > *')) : [];
+            // Row cell positions: index 1 (name), 2 (primary), 6 (vram) —
+            // matches WorkloadRow's 8-cell order.
+            const nameCell = rowChildren[1];
+            const primaryCell = rowChildren[2];
+            const vramCell = rowChildren[6];
+            const leftOf = (el) => el ? Math.round(el.getBoundingClientRect().left) : null;
+            return {
+                header_present: !!header,
+                header_count: document.querySelectorAll('[data-testid="workloads-header"]').length,
+                labels: {
+                    name: nameHdr?.textContent.trim(),
+                    primary: primaryHdr?.textContent.trim(),
+                    state: document.querySelector('[data-testid="workloads-header-state"]')?.textContent.trim(),
+                    cpu: document.querySelector('[data-testid="workloads-header-cpu"]')?.textContent.trim(),
+                    rss: document.querySelector('[data-testid="workloads-header-rss"]')?.textContent.trim(),
+                    vram: vramHdr?.textContent.trim(),
+                },
+                alignment: {
+                    name_header_left: leftOf(nameHdr),
+                    name_row_left: leftOf(nameCell),
+                    primary_header_left: leftOf(primaryHdr),
+                    primary_row_left: leftOf(primaryCell),
+                    vram_header_left: leftOf(vramHdr),
+                    vram_row_left: leftOf(vramCell),
+                },
+            };
+        });
+        await page.close();
+        return { shot, pageErrors };
+    }
+
+    // Probe 1 — panel WITH workloads: header must render, labels present, grid matches row.
+    {
+        const { shot, pageErrors } = await probe(true);
+        if (shot.header_present && shot.header_count === 1)
+            result.ok(`D114: exactly one workloads-header renders when panel has workloads`);
+        else
+            result.fail(`D114: header count wrong (present=${shot.header_present}, count=${shot.header_count})`);
+        const expected = { name: 'NAME', primary: 'PRIMARY', state: 'STATE', cpu: 'CPU %', rss: 'RSS MB', vram: 'VRAM' };
+        for (const [key, want] of Object.entries(expected)) {
+            const got = shot.labels[key];
+            if (got === want)
+                result.ok(`D114: header label ${key} = "${want}"`);
+            else
+                result.fail(`D114: header label ${key} — expected "${want}", got "${got}"`);
+        }
+        // Column alignment — each header cell's left edge must match
+        // the corresponding data-row cell's left edge (they're
+        // direct children of the SAME grid via display:contents).
+        // Tolerance of 1px covers subpixel rounding.
+        const nearby = (a, b) => a !== null && b !== null && Math.abs(a - b) <= 1;
+        const a = shot.alignment;
+        if (nearby(a.name_header_left, a.name_row_left))
+            result.ok(`D114: NAME header aligned above NAME cell (${a.name_header_left}px ≈ ${a.name_row_left}px)`);
+        else
+            result.fail(`D114: NAME misaligned — header@${a.name_header_left}px, row@${a.name_row_left}px`);
+        if (nearby(a.primary_header_left, a.primary_row_left))
+            result.ok(`D114: PRIMARY header aligned above PRIMARY cell (${a.primary_header_left}px ≈ ${a.primary_row_left}px)`);
+        else
+            result.fail(`D114: PRIMARY misaligned — header@${a.primary_header_left}px, row@${a.primary_row_left}px`);
+        if (nearby(a.vram_header_left, a.vram_row_left))
+            result.ok(`D114: VRAM header aligned above VRAM cell (${a.vram_header_left}px ≈ ${a.vram_row_left}px)`);
+        else
+            result.fail(`D114: VRAM misaligned — header@${a.vram_header_left}px, row@${a.vram_row_left}px`);
+        if (pageErrors.length === 0)
+            result.ok(`D114: no page errors`);
+        else
+            result.fail(`D114: got ${pageErrors.length} page error(s): ${pageErrors.join('; ')}`);
+    }
+
+    // Probe 2 — panel EMPTY: header must NOT render (no stranded label above the empty-state message).
+    {
+        const { shot } = await probe(false);
+        if (!shot.header_present)
+            result.ok(`D114: empty panel renders NO header (no stranded label)`);
+        else
+            result.fail(`D114: header should be absent when workloads=[]; got header_count=${shot.header_count}`);
+    }
+
+    return result;
+}
+
 async function runThermalFriendlyGate(browser, url) {
     const result = new GateResult();
     const page = await browser.newPage();
@@ -3048,6 +3211,15 @@ async function main() {
     results.push({
         name: 'D113_connectivity_chip',
         ...chipRes.summarize(),
+    });
+
+    console.log(`\n▶ D114 — Web workloads column-header parity with TUI`);
+    const headerRes = await runWorkloadsHeaderGate(browser, url);
+    headerRes.passes.forEach((p) => console.log(`   ✓ ${p}`));
+    headerRes.failures.forEach((f) => console.log(`   ✗ ${f}`));
+    results.push({
+        name: 'D114_workloads_column_headers',
+        ...headerRes.summarize(),
     });
 
     await browser.close();

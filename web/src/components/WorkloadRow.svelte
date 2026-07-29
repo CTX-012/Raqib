@@ -76,13 +76,22 @@
     harness selector in lockstep.
 -->
 <!--
-    v1.3.2 / DISPATCH thermal+VRAM+connectivity — the grid now has
-    8 cells: status · name · primary · activity · CPU · RSS · VRAM ·
-    net-chip. The 8th cell is the connectivity indicator (present
-    only for workloads with a derived HTTP endpoint; nothing renders
-    for non-HTTP workloads per the honesty rule).
+    v1.3.2 / DISPATCH thermal+VRAM+connectivity+headers — the grid
+    now has 8 cells: status · name · primary · activity · CPU · RSS ·
+    VRAM · net-chip. The 8th cell is the connectivity indicator
+    (present only for workloads with a derived HTTP endpoint;
+    nothing renders for non-HTTP workloads per the honesty rule).
+
+    DISPATCH web-column-headers — this wrapper uses `display: contents`
+    (Tailwind `contents`) so its 8 <span>s become direct children of
+    WorkloadsPanel's grid. That way the header row + every data row
+    share ONE grid track set — labels sit above their columns
+    (pixel-aligned), not approximately-above. Without `contents`,
+    each row was its own grid and auto-widths diverged per row.
+    `data-testid="workload-row"` still resolves — the test harness
+    finds this wrapper as before.
 -->
-<div data-testid="workload-row" class="grid grid-cols-[auto_1fr_auto_auto_auto_auto_auto_auto] gap-x-3 py-0.5 items-baseline text-sm">
+<div data-testid="workload-row" class="contents">
     <span class={STATUS_CLASS[workload.status]} aria-label={workload.status}>
         {STATUS_GLYPH[workload.status]}
     </span>

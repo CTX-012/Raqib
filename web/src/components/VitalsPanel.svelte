@@ -154,8 +154,11 @@
                         deliberately out of scope here.
                     -->
                     {#each thermalTop as zone, idx (`${zone.label}-${idx}`)}
-                        <li class="flex justify-between {thermalColor(zone.severity)}">
-                            <span class="font-mono">{zone.label}</span>
+                        <li class="flex justify-between {thermalColor(zone.severity)}" data-testid="thermal-row">
+                            <span>
+                                <span data-testid="thermal-friendly">{zone.friendly_label}</span>
+                                <span class="font-mono text-fg-muted/70 text-[0.65rem] ml-1" data-testid="thermal-raw">({zone.label})</span>
+                            </span>
                             <span>{zone.temp_celsius.toFixed(1)} °C</span>
                         </li>
                     {/each}

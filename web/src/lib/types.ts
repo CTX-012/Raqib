@@ -133,6 +133,14 @@ export interface WireVitals {
 export interface WireThermalZone {
     // Canonical zone label, e.g. "x86_pkg_temp", "cpu-thermal".
     label: string;
+    // Server-derived human-readable rendering of `label` (e.g.
+    // "CPU Package", "System Zone 1"). Populated by the wire mapper
+    // via platform::humanize_thermal_labels — duplicate raw labels
+    // (multiple `acpitz` rows are common on x86) get positional
+    // suffixes. Falls back to the raw label verbatim when the sensor
+    // is unknown, so this field is never blank. Render friendly
+    // primary + raw muted so both are legible.
+    friendly_label: string;
     temp_celsius: number;
     // Pre-classified by the Rust wire layer against
     // ux_contract::thresholds::THERMAL_AMBER_C / THERMAL_RED_C.

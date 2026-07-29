@@ -144,9 +144,37 @@ fn render_thermal_summary(
         return;
     }
     let (top, total) = top_hottest(zones);
+    // Derive friendlies for the FULL zone list so positional
+    // disambiguation (`System Zone 1` / `System Zone 2` for duplicate
+    // `acpitz`) matches the wire's ordering exactly — the top-N slice
+    // is then indexed against the full-list friendlies so no drift
+    // between what the operator sees on TUI vs web.
+    let all_raw: Vec<String> = zones.iter().map(|z| z.label.clone()).collect();
+    let friendlies =
+        crate::platform::humanize_thermal_labels(&all_raw);
     let inline: String = top
         .iter()
-        .map(|z| format!("{}: {:.1}°C", z.label, z.temp_celsius))
+        .map(|z| {
+            // Find this zone's original position in `zones` (linear
+            // scan; `zones` is bounded by the number of thermal
+            // zones on the host — typically 3-9, at most low-tens on
+            // Jetson) to look up its friendly. Pointer identity
+            // match: `top` holds `&ThermalZone` borrowed from
+            // `zones`, so ptr equality is well-defined and cheap.
+            let idx = zones
+                .iter()
+                .position(|z2| std::ptr::eq(z2, *z))
+                .unwrap_or(0);
+            let friendly = friendlies
+                .get(idx)
+                .cloned()
+                .unwrap_or_else(|| z.label.clone());
+            // Show friendly + raw label muted-shape (via ASCII
+            // parens; per-span styling would require a `Line`
+            // rewrite of the inline string — deferred to keep this
+            // fix cosmetic-scope).
+            format!("{}: {:.1}°C ({})", friendly, z.temp_celsius, z.label)
+        })
         .collect::<Vec<_>>()
         .join("  ");
     // Color the LINE by the hottest zone — the operator's eye gets

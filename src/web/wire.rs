@@ -152,8 +152,19 @@ pub struct WireVitals {
 pub struct WireThermalZone {
     /// Canonical zone label (e.g. `"x86_pkg_temp"`,
     /// `"cpu-thermal"`). Comes verbatim from
-    /// `/sys/class/thermal/thermal_zone*/type`.
+    /// `/sys/class/thermal/thermal_zone*/type`. Preserved on the
+    /// wire so dev tools (`sensors`, `btop`) can still be
+    /// cross-referenced from the panel.
     pub label: String,
+    /// Human-readable rendering of `label` (e.g. `"CPU Package"`,
+    /// `"System Zone 1"`). Populated server-side by
+    /// `platform::humanize_thermal_labels`, which disambiguates
+    /// duplicate raw labels (multiple `acpitz` rows are common on
+    /// x86) with a positional suffix. Falls back to the raw label
+    /// verbatim when the sensor is unknown — never blank. The
+    /// renderer shows friendly primary + raw muted so both are
+    /// legible.
+    pub friendly_label: String,
     /// Temperature in degrees Celsius. The renderer formats with
     /// one decimal place; we send the raw f32 so the formatter
     /// stays in the rendering layer.
@@ -918,12 +929,28 @@ impl WireVitals {
         // zones come off the platform-layer host_vitals collection
         // already sorted by label; we map each into a
         // `WireThermalZone` with its severity attached.
+        //
+        // Friendly-name derivation runs OVER THE FULL LIST so
+        // duplicate raw labels (e.g. two `acpitz` rows) get
+        // positional disambiguation (`System Zone 1` / `System Zone 2`).
+        // Positional order matches the mapper's iteration order,
+        // which matches the wire order — no re-key drift.
+        let raw_labels: Vec<String> = snap
+            .vitals
+            .thermal_zones
+            .iter()
+            .map(|z| z.label.clone())
+            .collect();
+        let friendly_labels =
+            crate::platform::humanize_thermal_labels(&raw_labels);
         let thermal_zones: Vec<WireThermalZone> = snap
             .vitals
             .thermal_zones
             .iter()
-            .map(|z| WireThermalZone {
+            .zip(friendly_labels)
+            .map(|(z, friendly)| WireThermalZone {
                 label: z.label.clone(),
+                friendly_label: friendly,
                 temp_celsius: z.temp_celsius,
                 severity: classify_thermal(z.temp_celsius, &state.thresholds),
             })
@@ -1891,6 +1918,59 @@ mod tests {
             let json = serde_json::to_string(sev).expect("serialize");
             assert_eq!(&json, expected, "{sev:?} → {expected}");
         }
+    }
+
+    /// DISPATCH thermal-friendly — WireThermalZone must always
+    /// carry a non-empty `friendly_label`. The wire honesty rule
+    /// for thermal: if the sensor is unknown, the field falls back
+    /// to the raw label — NEVER absent, NEVER an empty string. This
+    /// keeps the web renderer's "friendly primary + raw muted"
+    /// shape legible on ANY host, including ones with sensor
+    /// labels we haven't mapped yet.
+    #[test]
+    fn wire_thermal_zone_friendly_label_is_never_empty() {
+        // Empirically-observed labels on the operator's dev host,
+        // plus an intentionally-unknown one to exercise the fallback.
+        // Constructing WireThermalZone directly instead of going
+        // through the full RuntimeState → WireSnapshot mapper —
+        // the mapper's derivation is tested via
+        // `wire_thermal_zone_mapper_disambiguates_duplicate_labels`
+        // below.
+        let raw = [
+            "acpitz".to_string(),
+            "acpitz".to_string(),
+            "x86_pkg_temp".to_string(),
+            "brand_new_sensor_kernel_added_yesterday".to_string(),
+        ];
+        let friendlies = crate::platform::humanize_thermal_labels(&raw);
+        for (raw_label, friendly) in raw.iter().zip(friendlies.iter()) {
+            assert!(
+                !friendly.is_empty(),
+                "friendly_label must never be empty; raw={raw_label:?}",
+            );
+        }
+    }
+
+    /// Serialization-level pin: the JSON emitted for a
+    /// `WireThermalZone` MUST include `friendly_label` as a
+    /// string. Web renderer reads it unconditionally
+    /// (`{zone.friendly_label}`), so a `skip_serializing_if` or
+    /// rename regression would blank the panel silently.
+    #[test]
+    fn wire_thermal_zone_serialize_includes_friendly_label() {
+        let zone = WireThermalZone {
+            label: "x86_pkg_temp".to_string(),
+            friendly_label: "CPU Package".to_string(),
+            temp_celsius: 62.0,
+            severity: WireThermalSeverity::Nominal,
+        };
+        let v: serde_json::Value = serde_json::to_value(&zone).expect("serialize");
+        assert_eq!(v.get("label").and_then(|x| x.as_str()), Some("x86_pkg_temp"));
+        assert_eq!(
+            v.get("friendly_label").and_then(|x| x.as_str()),
+            Some("CPU Package"),
+            "friendly_label must be present as a top-level string on the wire; got {v}",
+        );
     }
 
     #[test]

@@ -1,9 +1,11 @@
 mod gpu_nvidia;
 pub mod host_vitals;
 mod linux_proc;
+pub mod thermal_label;
 
 pub use gpu_nvidia::{GpuCollector, GpuDeviceMetrics, GpuSnapshot};
 pub use linux_proc::ProcessCollector;
+pub use thermal_label::humanize_thermal_labels;
 
 use crate::model::ProcessSample;
 use chrono::{DateTime, Utc};

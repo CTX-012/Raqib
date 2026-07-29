@@ -168,6 +168,14 @@ function normalizeFixture(fx) {
                     typeof z.severity === 'string'
                         ? z.severity.toLowerCase()
                         : z.severity,
+                // Thermal-friendly dispatch — friendly_label was added
+                // to WireThermalZone on the server side. Existing
+                // fixtures pre-date the field; fall back to the raw
+                // label so they still parse. The dedicated
+                // `runThermalFriendlyGate` probe below drives a
+                // fixture that DOES set friendly_label so the render
+                // path is exercised.
+                friendly_label: z.friendly_label ?? z.label,
             })),
         };
     }
@@ -2342,6 +2350,223 @@ async function runSettingsPanelGate(browser, url) {
     return result;
 }
 
+// ── D111 — Thermal-friendly-name render invariant ───────────────────
+//
+// Regression backstop for the thermal-friendly dispatch: raw kernel
+// labels (`x86_pkg_temp`, `acpitz`, `acpitz`) were unreadable and
+// duplicate acpitz rows were indistinguishable. The wire now carries
+// `friendly_label` per zone (populated by
+// `platform::humanize_thermal_labels`, disambiguates duplicates with
+// positional `System Zone 1` / `System Zone 2`); the web renderer
+// shows friendly primary + raw muted alongside.
+//
+// Invariant this gate pins:
+//   * Every thermal row renders BOTH `data-testid="thermal-friendly"`
+//     AND `data-testid="thermal-raw"` — never just one.
+//   * Duplicate raw labels resolve to DIFFERENT friendly names
+//     (positional disambiguation held).
+//   * A known label (`x86_pkg_temp`) maps to a known friendly
+//     (`CPU Package`).
+async function runThermalFriendlyGate(browser, url) {
+    const result = new GateResult();
+    const page = await browser.newPage();
+    const pageErrors = [];
+    page.on('pageerror', (err) => pageErrors.push(err.message));
+    await page.setRequestInterception(true);
+    page.on('request', (req) => {
+        const u = new URL(req.url());
+        if (!u.pathname.startsWith('/api/')) return req.continue();
+        const j = (obj) =>
+            req.respond({
+                status: 200,
+                contentType: 'application/json; charset=utf-8',
+                body: JSON.stringify(obj),
+            });
+        if (u.pathname === '/api/snapshot')
+            return j({
+                tick: 1,
+                schema_version: '1',
+                mission: { workloads: 0, degraded: 0 },
+                vitals: {
+                    memory_pct: 30,
+                    memory_used_mb: 8000,
+                    memory_total_mb: 32000,
+                    load_average: [1.0, 1.1, 1.2],
+                    cpu_count: 12,
+                    process_count: 100,
+                    thermal_zones: [
+                        { label: 'acpitz', friendly_label: 'System Zone 1', temp_celsius: 48.0, severity: 'nominal' },
+                        { label: 'acpitz', friendly_label: 'System Zone 2', temp_celsius: 51.0, severity: 'nominal' },
+                        { label: 'x86_pkg_temp', friendly_label: 'CPU Package', temp_celsius: 62.0, severity: 'nominal' },
+                    ],
+                },
+                workloads: [],
+                activity: [],
+                alerts: [],
+                recommendations: [],
+            });
+        if (u.pathname === '/api/health') return j({ ok: true });
+        if (u.pathname === '/api/history') return j({ events: [], dead_pids: [] });
+        if (u.pathname === '/api/settings')
+            return j({
+                thresholds: {},
+                kill_sustain_secs: 10,
+                auto_actuate_readonly: false,
+                default_ai_action_readonly: 'Allow',
+                config_path: null,
+            });
+        req.respond({ status: 404 });
+    });
+    await page.goto(`${url}/`, { waitUntil: 'networkidle2', timeout: 15000 });
+    await new Promise((r) => setTimeout(r, 500));
+    const shot = await page.evaluate(() => {
+        const rows = Array.from(document.querySelectorAll('[data-testid="thermal-row"]'));
+        return rows.map((row) => ({
+            friendly: row.querySelector('[data-testid="thermal-friendly"]')?.textContent.trim() ?? null,
+            raw: row.querySelector('[data-testid="thermal-raw"]')?.textContent.trim() ?? null,
+        }));
+    });
+    await page.close();
+
+    if (shot.length === 3)
+        result.ok(`D111: 3 thermal rows rendered (matches fixture)`);
+    else
+        result.fail(`D111: expected 3 thermal rows, got ${shot.length}`);
+    const bothPresent = shot.every((r) => r.friendly && r.raw);
+    if (bothPresent)
+        result.ok(`D111: every thermal row renders BOTH friendly + raw label`);
+    else
+        result.fail(`D111: some rows missing friendly or raw: ${JSON.stringify(shot)}`);
+    const friendlies = shot.map((r) => r.friendly);
+    const uniq = new Set(friendlies).size;
+    if (uniq === friendlies.length)
+        result.ok(`D111: duplicate raw labels resolve to DIFFERENT friendly names (uniq=${uniq})`);
+    else
+        result.fail(`D111: friendly names collided ({friendlies=${JSON.stringify(friendlies)}}); positional disambiguation broken`);
+    if (friendlies.includes('CPU Package'))
+        result.ok(`D111: known label x86_pkg_temp maps to friendly "CPU Package"`);
+    else
+        result.fail(`D111: friendly-name mapping for x86_pkg_temp broken; got ${JSON.stringify(friendlies)}`);
+    if (pageErrors.length === 0)
+        result.ok(`D111: no page errors`);
+    else
+        result.fail(`D111: got ${pageErrors.length} page error(s): ${pageErrors.join('; ')}`);
+
+    return result;
+}
+
+// ── D112 — Workload VRAM column render invariant ────────────────────
+//
+// Regression backstop for the VRAM-column dispatch: per-workload
+// vram_mb was ALREADY populated on the wire (WireWorkload.vram_mb),
+// but the web renderer crammed it into the RSS cell as `· NNNM GPU`
+// which operators reported as invisible next to the TUI's aligned
+// column. Web WorkloadRow now has a dedicated 7th grid cell for VRAM,
+// with the VRAM honesty rule: `null` / `0` / absent → `—` (muted +
+// data-testid-unmeasured="true"); positive → `NNNM VRAM`.
+//
+// Invariant this gate pins:
+//   * Every workload row exposes a `data-testid="workload-vram"` cell.
+//   * A row with `vram_mb: 512` shows `512M VRAM` and no unmeasured
+//     testid.
+//   * A row with `vram_mb: null` shows `— VRAM` with
+//     `data-testid-unmeasured="true"` (VRAM honesty).
+//   * A row with `vram_mb: 0` also shows `— VRAM` (zero is NOT a
+//     measurement in the workload-attribution semantic — matches TUI
+//     `Some(b) if b > 0` gate).
+async function runWorkloadVramColumnGate(browser, url) {
+    const result = new GateResult();
+    const page = await browser.newPage();
+    const pageErrors = [];
+    page.on('pageerror', (err) => pageErrors.push(err.message));
+    await page.setRequestInterception(true);
+    page.on('request', (req) => {
+        const u = new URL(req.url());
+        if (!u.pathname.startsWith('/api/')) return req.continue();
+        const j = (obj) =>
+            req.respond({
+                status: 200,
+                contentType: 'application/json; charset=utf-8',
+                body: JSON.stringify(obj),
+            });
+        if (u.pathname === '/api/snapshot')
+            return j({
+                tick: 1,
+                schema_version: '1',
+                mission: { workloads: 3, degraded: 0 },
+                vitals: {
+                    memory_pct: 30,
+                    memory_used_mb: 8000,
+                    memory_total_mb: 32000,
+                    load_average: [1.0, 1.1, 1.2],
+                    cpu_count: 12,
+                    process_count: 100,
+                    thermal_zones: [],
+                },
+                workloads: [
+                    { pid: 1, name: 'ollama-runner', model_name: 'llama3', category: 'inference', workload_category: 'llm', cpu_pct: 25.0, rss_mb: 2048, ram_pct: 6.4, vram_mb: 512, tokens_per_sec: 42.0, fps: null, kv_cache_peak_pct: null, status: 'healthy', activity: 'active' },
+                    { pid: 2, name: 'agent-process', model_name: null, category: 'agent', workload_category: 'agent', cpu_pct: 1.5, rss_mb: 128, ram_pct: 0.4, vram_mb: null, tokens_per_sec: null, fps: null, kv_cache_peak_pct: null, status: 'healthy', activity: null },
+                    { pid: 3, name: 'zero-vram', model_name: null, category: 'inference', workload_category: 'llm', cpu_pct: 0.5, rss_mb: 64, ram_pct: 0.2, vram_mb: 0, tokens_per_sec: null, fps: null, kv_cache_peak_pct: null, status: 'healthy', activity: null },
+                ],
+                activity: [],
+                alerts: [],
+                recommendations: [],
+            });
+        if (u.pathname === '/api/health') return j({ ok: true });
+        if (u.pathname === '/api/history') return j({ events: [], dead_pids: [] });
+        if (u.pathname === '/api/settings')
+            return j({
+                thresholds: {},
+                kill_sustain_secs: 10,
+                auto_actuate_readonly: false,
+                default_ai_action_readonly: 'Allow',
+                config_path: null,
+            });
+        req.respond({ status: 404 });
+    });
+    await page.goto(`${url}/`, { waitUntil: 'networkidle2', timeout: 15000 });
+    await new Promise((r) => setTimeout(r, 500));
+    const shot = await page.evaluate(() => {
+        const rows = Array.from(document.querySelectorAll('[data-testid="workload-row"]'));
+        return rows.map((row) => {
+            const cell = row.querySelector('[data-testid="workload-vram"]');
+            return {
+                text: cell?.textContent.trim() ?? null,
+                unmeasured: cell?.getAttribute('data-testid-unmeasured') === 'true',
+            };
+        });
+    });
+    await page.close();
+
+    if (shot.length === 3)
+        result.ok(`D112: 3 workload rows rendered`);
+    else
+        result.fail(`D112: expected 3 rows, got ${shot.length}`);
+    const allHaveVramCell = shot.every((r) => r.text !== null);
+    if (allHaveVramCell)
+        result.ok(`D112: every workload row exposes a workload-vram cell`);
+    else
+        result.fail(`D112: some rows missing VRAM cell: ${JSON.stringify(shot)}`);
+    if (shot[0]?.text === '512M VRAM' && !shot[0]?.unmeasured)
+        result.ok(`D112: measured vram_mb=512 renders as "512M VRAM" (not unmeasured)`);
+    else
+        result.fail(`D112: measured VRAM row wrong: ${JSON.stringify(shot[0])}`);
+    if (shot[1]?.text === '— VRAM' && shot[1]?.unmeasured)
+        result.ok(`D112: vram_mb=null renders as "— VRAM" with unmeasured testid (VRAM honesty)`);
+    else
+        result.fail(`D112: unmeasured VRAM row wrong: ${JSON.stringify(shot[1])}`);
+    if (shot[2]?.text === '— VRAM' && shot[2]?.unmeasured)
+        result.ok(`D112: vram_mb=0 also renders as "— VRAM" (zero is NOT a measurement in workload attribution)`);
+    else
+        result.fail(`D112: zero-VRAM row wrong: ${JSON.stringify(shot[2])}`);
+    if (pageErrors.length === 0)
+        result.ok(`D112: no page errors`);
+    else
+        result.fail(`D112: got ${pageErrors.length} page error(s): ${pageErrors.join('; ')}`);
+
+    return result;
+}
+
 async function runMatrixGate(browser, url) {
     const result = new GateResult();
 
@@ -2674,6 +2899,24 @@ async function main() {
     results.push({
         name: 'D110_settings_panel_never_blank',
         ...settingsRes.summarize(),
+    });
+
+    console.log(`\n▶ D111 — Thermal friendly-name render invariant`);
+    const thermalRes = await runThermalFriendlyGate(browser, url);
+    thermalRes.passes.forEach((p) => console.log(`   ✓ ${p}`));
+    thermalRes.failures.forEach((f) => console.log(`   ✗ ${f}`));
+    results.push({
+        name: 'D111_thermal_friendly',
+        ...thermalRes.summarize(),
+    });
+
+    console.log(`\n▶ D112 — Workload VRAM column render invariant`);
+    const vramColRes = await runWorkloadVramColumnGate(browser, url);
+    vramColRes.passes.forEach((p) => console.log(`   ✓ ${p}`));
+    vramColRes.failures.forEach((f) => console.log(`   ✗ ${f}`));
+    results.push({
+        name: 'D112_workload_vram_column',
+        ...vramColRes.summarize(),
     });
 
     await browser.close();

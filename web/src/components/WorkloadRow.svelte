@@ -59,7 +59,17 @@
     the styled output. If you remove or rename it, update the
     harness selector in lockstep.
 -->
-<div data-testid="workload-row" class="grid grid-cols-[auto_1fr_auto_auto_auto_auto] gap-x-3 py-0.5 items-baseline text-sm">
+<!--
+    v1.3.2 / DISPATCH thermal+VRAM — the grid grew from 6 to 7 cells.
+    Layout: status · name · primary · activity · CPU · RSS · VRAM.
+    The VRAM cell was previously crammed into the RSS cell as a
+    trailing `· NNNM GPU` suffix that operators reported as invisible
+    next to the TUI's aligned column. Promoting to its own cell
+    matches the TUI's shape (`vram_label` at src/ui/panels/workloads.rs:558)
+    and gives the VRAM-honesty discriminator a stable render slot:
+    unmeasured / zero → `—` (muted), measured → `NNNM` (foreground).
+-->
+<div data-testid="workload-row" class="grid grid-cols-[auto_1fr_auto_auto_auto_auto_auto] gap-x-3 py-0.5 items-baseline text-sm">
     <span class={STATUS_CLASS[workload.status]} aria-label={workload.status}>
         {STATUS_GLYPH[workload.status]}
     </span>
@@ -76,6 +86,23 @@
     {/if}
     <span class="text-fg-muted text-xs">{workload.cpu_pct.toFixed(1)}% CPU</span>
     <span class="text-fg-muted text-xs tabular-nums">
-        {workload.rss_mb}M{#if workload.ram_pct != null} ({workload.ram_pct.toFixed(1)}%){/if}{#if workload.vram_mb} · {workload.vram_mb}M GPU{/if}
+        {workload.rss_mb}M{#if workload.ram_pct != null} ({workload.ram_pct.toFixed(1)}%){/if} RSS
     </span>
+    <!--
+        VRAM cell. VRAM honesty rule (CLAUDE.md): null / zero / absent
+        → `—` (unmeasured or CPU-only workload), NEVER `0M`. Positive
+        integer → `NNNM VRAM`. Zero-suffixed testid discriminates the
+        two states for the browser gate — `data-testid-unmeasured` on
+        the "—" branch matches the pattern used for VRAM everywhere
+        else (D95 / D98 / D102 / D109).
+    -->
+    {#if workload.vram_mb != null && workload.vram_mb > 0}
+        <span class="text-fg text-xs tabular-nums" data-testid="workload-vram">
+            {workload.vram_mb}M VRAM
+        </span>
+    {:else}
+        <span class="text-fg-muted text-xs tabular-nums" data-testid="workload-vram" data-testid-unmeasured="true">
+            — VRAM
+        </span>
+    {/if}
 </div>

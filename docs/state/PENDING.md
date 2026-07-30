@@ -1,5 +1,157 @@
 # PENDING — things waiting on the human
 
+## [SAFETY-INVESTIGATION] Governor kill-target selection — PRE-ARM verification for live-fire test — 2026-07-29
+
+**READ-ONLY dispatch.** No code touched. Findings for the operator before arming `auto_actuate=true` on a host running real workloads (claude agent + ~20 ROS2 nodes).
+
+### 🚨 VERDICT: The plan "kill the highest VRAM consumer" is WRONG. The plan is UNSAFE without additional protections. 🚨
+
+**The governor does NOT select "the single highest VRAM consumer over threshold."** It fires on EVERY policy-Kill PID that has ANY of three breach signals — one of which (host thermal) is SYSTEM-WIDE and would sweep every AI-classified PID simultaneously.
+
+### Q1 — What triggers a kill? (`src/governor/executor.rs:200-282`)
+
+A PID becomes a kill candidate on this tick when **ALL** of:
+1. `[governor] auto_actuate = true` (config) — Gate 1, `runtime.rs:2111`
+2. Policy `evaluate(name, category) == Kill` — `policy.rs:68-92`
+3. **At least ONE** of these three breach signals (widened D84):
+   - Per-PID VRAM: `pid.vram_bytes / total_device_vram >= vram_critical_pct` (default 95.0%) — `threshold_breach.rs:181-191`
+   - Per-PID RAM: `pid.rss_mb / system_total_ram_mb >= ram_critical_pct` (default 95.0%) — `threshold_breach.rs:200-203`
+   - **Host thermal: `max(thermal_zones) >= thermal_red_c`** (default 95.0°C) — `threshold_breach.rs:241-266`. **HOST-WIDE — applies to EVERY AI-classified PID on the same tick.**
+4. `(now - first_breached_at) >= kill_sustain_secs` (default 10s) — Gate 2, `runtime.rs:2117, 2141-2164`
+
+Any one of `vram_breached || ram_breached || host_thermal` satisfies (3) — the `any_breach` line is `executor.rs:229`.
+
+### Q2 — Which process gets killed? (THE safety question)
+
+**NOT the highest VRAM consumer.** Every PID that satisfies Q1(1-4) becomes a candidate. When the rate limit forces a subset:
+- **Ordering: `sorted_pids.sort_unstable()` — ASCENDING PID.** `executor.rs:82-84`. Lowest-numbered PID wins the budget when there's contention.
+- Comment at `executor.rs:66-75` explicitly calls this a "Q4 STOPGAP" — "the long-term tiebreaker" (least-recent-activity) is a `KILL_ARM_WINDOW_SECS` CAR item in DEFERRED (PENDING.md, above).
+- Rate limit: `rate_limit_max_kills = 3` per `rate_limit_window_secs = 60` (default; `policy.rs:62-63`). So **up to 3 kills per minute**, and if 20+ PIDs are all candidates, 3 will die per minute in LOWEST-PID-FIRST order until the breach clears.
+
+### Q3 — Allowlist / exclusion (`src/governor/policy.rs:35-92`, `src/config.rs:512-528`)
+
+Yes. `[policy] allowlist` (TOML) → `whitelist_names: HashSet<String>` → checked **FIRST** in `policy.evaluate` at `policy.rs:70-72`, returns `PolicyAction::Allow` → decision becomes `KillAction::Whitelisted` → actuation site at `runtime.rs:2130-2134` **filters SignalTermSent only** → whitelisted PIDs are structurally unreachable by the actuation loop.
+
+**But: the default whitelist is minimal** (`policy.rs:37-46`):
+```
+sshd, bash, zsh, sh, systemd, init, kworker, kthreadd
+```
+This list DOES NOT include: `claude`, `ros2`, `robot_state_pub`, `parameter_bridg`, `range_converter`, `async_slam_tool`, `ekf_node`, `controller_server`, `smoother_server`, `planner_server`, `behavior_server`, `bt_navigator`, `waypoint_follow`, `velocity_smooth`, `lifecycle_manag`, `docker`, or ANY of the operator's live workloads.
+
+**All of the operator's live workloads currently classify as `AICategory::Inference`** (confirmed via `/api/snapshot` — `workload_category: "agent"` for claude and `workload_category: "ros2"` for the rest, but internal `category` is `Inference` for all → `policy.rs:86-91` gates on `AICategory` → `default_ai_action` applies to them all).
+
+### Q4 — Kill sequence (`src/governor/executor.rs:322-489`)
+
+1. `send_sigterm(pid, name, cat)` — captures `pidfd_open(pid)` + `/proc/<pid>/stat` starttime BEFORE `libc::kill(pid, SIGTERM)`. Stores as `PendingKill` — `executor.rs:328-355`.
+2. Wait `[policy] sigterm_grace_secs` (default **5s**, min 1s) — `policy.rs:60`, `executor.rs:481-488`.
+3. `execute_after_grace()` walks pending PIDs whose grace expired → `send_sigkill(pid, name)`:
+   - **PID-reuse guard**: re-checks pidfd (kernel-race-free) OR re-reads starttime; mismatch → **REFUSE the SIGKILL** with `KillAction::PidReusedAborted`. `executor.rs:378-410`.
+   - On success: `pidfd_send_signal(fd, SIGKILL)` (preferred) or `libc::kill(pid, SIGKILL)` fallback — `executor.rs:416-430`.
+4. A process that handles SIGTERM and exits cleanly within `sigterm_grace_secs` **will not receive SIGKILL** — the lifecycle reaper drops the entry, `execute_after_grace` sees nothing pending. A stubborn SIGTERM-ignoring process (ollama runners are the documented case, PENDING.md above §"HARD-BLOCKING follow-up") **will get SIGKILLed after grace**.
+
+### Q5 — Exact arm / disarm config keys
+
+**ARM** (all four required; two independent operator opt-ins per `runtime.rs:2059-2063`):
+```toml
+[governor]
+auto_actuate = true               # THE opt-in. Default: false.
+kill_sustain_secs = 10            # optional; default 10. Breach must persist this long.
+
+[policy]
+default_ai_action = "Kill"        # Second opt-in. Default: "Allow".
+# The 3 optional protections:
+allowlist = [                     # names → structurally kill-unreachable
+    "claude", "ros2", "robot_state_pub",
+    # ... etc for every real workload
+]
+blocklist = ["target_process_name"]   # names → Kill regardless of category
+sigterm_grace_secs = 5            # SIGTERM→SIGKILL delay; default 5, min 1
+rate_limit_max_kills = 3          # default 3
+rate_limit_window_secs = 60       # default 60
+
+[thresholds]
+vram_critical_pct = 95.0          # per-PID VRAM% cutoff; default 95
+ram_critical_pct = 95.0           # per-PID RAM% cutoff; default 95
+thermal_red_c = 95.0              # HOST-WIDE thermal cutoff; default 95
+```
+
+**DISARM**: **config is NOT hot-reloaded** (verified: no inotify/SIGHUP-reload path in `config.rs`/`main.rs`). To disarm:
+- Edit `edge_monitor.toml` → set `[governor] auto_actuate = false` → **RESTART edge_monitor** (SIGTERM the process, then relaunch).
+- OR just SIGTERM `edge_monitor` (`kill $(pgrep edge_monitor)`) — immediate hard-stop of the governor.
+
+Note: web `/api/settings` POST **cannot** flip `auto_actuate` — it's schema-firewalled out (`policy.rs`, `config.rs:GovernorConfig`, and the D86 SettingsPanel boundary at `web/src/components/SettingsPanel.svelte:5-18`). The wire cannot arm/disarm the killer.
+
+### Q6 — Applied to this operator's specific host: **UNSAFE without protections**
+
+**Current host state (from live `/api/snapshot`):**
+- 22 workloads: 1 `agent` (claude) + 19 `ros2` + potentially 2 `llm` (only if the fake-ollama smoke is still running; likely dead by now)
+- All classify as `AICategory::Inference` on the wire
+- **CPU Package thermal: 90-93°C** (I saw 93°C repeatedly this session; the alert `Thermal at 93.0°C — system thermal pressure` was firing)
+- **`thermal_red_c` default: 95.0°C — a 2-4°C temperature rise crosses this threshold**
+
+**If operator arms with `auto_actuate=true` + `default_ai_action=Kill` + defaults elsewhere:**
+
+Scenario A — the intended path (disposable 2.5GB target on 12GB card = 20.8% VRAM):
+- 20.8% < 95.0% `vram_critical_pct` → **the disposable does NOT breach VRAM at default thresholds.** The operator MUST lower `vram_critical_pct` (e.g. to 15) to make it fire.
+- Once threshold is 15%: the disposable target breaches. Real workloads with 0 or unmeasured VRAM don't. If a bystander LLM (say a claude subprocess) transiently uses >15% of 12GB (~1.8GB) — it becomes a co-candidate.
+
+Scenario B — thermal spike (the FIRE risk):
+- **Host is already at 93°C.** Any load-inducing action (test workload, browser opening, background compile) that pushes past 95°C fires `host_thermal_breached = true`.
+- On that tick, **EVERY AI-classified PID** (all 20+ ROS2 nodes + claude, minus the whitelist which is only shell/init) satisfies breach gate (3).
+- If `default_ai_action = Kill`, every one becomes `SignalTermSent`.
+- Rate-limited to 3 kills / 60s, **ordered ascending PID.** In practice this means the lowest-PID robot nodes die first — often the ROS2 daemon or the earliest-launched control node.
+- 3 killed ROS2 nodes = broken robot stack.
+
+**The operator's plan assumption "the governor kills the highest VRAM consumer" is FALSE.** The governor kills EVERY qualifying PID; the sort is lowest-PID-first for rate-limit ties; and thermal is a system-wide grenade that catches everyone.
+
+### Recommended safe-test config (operator to apply BEFORE arming)
+
+```toml
+[governor]
+auto_actuate = true
+kill_sustain_secs = 30              # LONG — extra reaction window before actuation
+
+[policy]
+default_ai_action = "Allow"         # <<<< KEEP DEFAULT ALLOW.
+# Force target via blocklist instead — belt AND braces.
+blocklist = ["<disposable_process_name>"]
+# Explicit safety net if default_ai_action is later flipped:
+allowlist = [
+    "claude", "ros2", "robot_state_pub", "parameter_bridg",
+    "range_converter", "async_slam_tool", "ekf_node",
+    "controller_server", "smoother_server", "planner_server",
+    "behavior_server", "bt_navigator", "waypoint_follow",
+    "velocity_smooth", "lifecycle_manag", "docker",
+]
+sigterm_grace_secs = 5              # default
+rate_limit_max_kills = 1            # <<<< LOWERED to 1/window — one shot only
+rate_limit_window_secs = 60
+
+[thresholds]
+vram_critical_pct = 15.0            # tuned to catch a 2.5GB target on 12GB card (~20.8%)
+ram_critical_pct = 95.0             # default; no real workload approaches this
+thermal_red_c = 120.0               # <<<< RAISED to prevent thermal-triggered mass-kill.
+                                    # Host is at 93°C; default 95°C is unsafe.
+```
+
+**Post-test disarm sequence:**
+1. `kill $(pgrep -f "target/release/edge_monitor")` — immediate stop.
+2. Edit `edge_monitor.toml` → set `[governor] auto_actuate = false` (and revert `thermal_red_c = 95.0` if raised).
+3. Restart edge_monitor (no auto-reload).
+
+### Belt-and-braces additional check (recommended before arming)
+
+Before arming, run this one-liner to confirm the whitelist would actually match every live workload name:
+```
+curl -s http://127.0.0.1:7070/api/snapshot \
+  | python3 -c "import json,sys; d=json.load(sys.stdin); wl=['claude','ros2','robot_state_pub','parameter_bridg','range_converter','async_slam_tool','ekf_node','controller_server','smoother_server','planner_server','behavior_server','bt_navigator','waypoint_follow','velocity_smooth','lifecycle_manag','docker']; unmatched=[w for w in d['workloads'] if w['name'] not in wl]; print('UNPROTECTED:' if unmatched else 'ALL COVERED'); [print(f'  {w[\"pid\"]} {w[\"name\"]}') for w in unmatched]"
+```
+If any workload prints under `UNPROTECTED:`, add its exact name to the allowlist before arming.
+
+**HARD STOP #1 stays intact throughout this dispatch** — no governor code touched, no arming, no config change. This is READING the governor, which is permitted.
+
+---
+
 ## [COMPLETION SUMMARY — Autonomous Completion + Hardening run] 2026-07-16
 
 The **completion+hardening** run finished. All autonomously-completable

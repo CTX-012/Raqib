@@ -149,6 +149,22 @@ enum Commands {
         #[arg(required = true, last = true)]
         command: Vec<String>,
     },
+    /// Write a safe-default starter config to
+    /// `~/.config/edge_monitor/edge_monitor.toml` (or an explicit
+    /// `--path`) and exit. Refuses to overwrite an existing file
+    /// unless `--force` is given.
+    Init {
+        /// Overwrite an existing config file. Off by default so
+        /// repeated `init` invocations preserve operator edits.
+        #[arg(long)]
+        force: bool,
+        /// Alternative target path. When omitted, writes to the
+        /// XDG standard location — which is the same place the
+        /// config-discovery fallback chain looks second, so the
+        /// next `edge_monitor` invocation picks it up automatically.
+        #[arg(long, value_name = "PATH")]
+        path: Option<PathBuf>,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -160,7 +176,15 @@ fn main() -> anyhow::Result<()> {
     let log_to_file = !cli.no_ui && cli.command.is_none() && !cli.log_stderr;
     init_tracing(&cli.log_level, &cli.log_format, log_to_file)?;
 
-    let config = load_config(cli.config.as_deref())?;
+    // `init` subcommand runs BEFORE config load — it exists exactly
+    // to bootstrap a config file when none is present, so requiring
+    // an existing one first would be a chicken-and-egg. Matches on
+    // the CLI options directly and short-circuits.
+    if let Some(Commands::Init { force, path }) = &cli.command {
+        return run_init_subcommand(*force, path.as_deref());
+    }
+
+    let (config, config_source) = load_config(cli.config.as_deref())?;
     config.validate().context("config validation failed")?;
 
     // Subcommand path: query-only, no signal handler / runtime needed.
@@ -180,6 +204,11 @@ fn main() -> anyhow::Result<()> {
                     .build()?;
                 let code = rt.block_on(exec_wrapper::run_exec(name, command, &config))?;
                 std::process::exit(code);
+            }
+            Commands::Init { .. } => {
+                // Handled above before load_config; the match arm exists
+                // only to make the enum exhaustive.
+                unreachable!("Commands::Init is dispatched before load_config")
             }
         };
     }
@@ -227,10 +256,26 @@ fn main() -> anyhow::Result<()> {
         // !allow_no_auth ⇒ refuse to start the web server with a
         // clear operator-actionable error. `--no-web` (above)
         // bypasses this check entirely.
-        runtime
-            .config()
-            .validate_web_auth()
-            .with_context(|| "web auth posture rejected; refusing to start the web companion")?;
+        //
+        // ONBOARDING dispatch: when we fell through to
+        // `Config::default()` because NO config file was found
+        // anywhere, the real problem isn't "auth posture ambiguous"
+        // — it's "no config at all." Swap the auth-jargon error for
+        // the actionable `edge_monitor init` message so a new user
+        // sees a clear path forward instead of a wall of D85 text.
+        if let Err(e) = runtime.config().validate_web_auth() {
+            if let ConfigSource::Defaults { searched } = &config_source {
+                anyhow::bail!(
+                    "{}",
+                    edge_monitor::onboarding::no_config_error_message(searched)
+                );
+            }
+            // Config exists — the auth field is ambiguous. Surface
+            // the (now-softened) validator error.
+            return Err(anyhow::Error::new(e).context(
+                "web auth posture ambiguous; refusing to start the web companion",
+            ));
+        }
         match spawn_web_server(
             cli.bind,
             cli.port,
@@ -691,31 +736,99 @@ fn init_tracing(level: &str, format: &str, log_to_file: bool) -> anyhow::Result<
     Ok(())
 }
 
-fn load_config(path: Option<&std::path::Path>) -> anyhow::Result<Config> {
-    let cfg = match path {
-        Some(p) => {
-            tracing::info!(path = %p.display(), "loading config");
-            Config::from_file(p).with_context(|| format!("loading {}", p.display()))?
+/// Where the config that this process is running under came from.
+/// Threaded from [`load_config`] to the auth-check path so the
+/// "no config found" error can distinguish the two failure modes
+/// (missing-config vs config-exists-but-auth-ambiguous) and print
+/// the actionable message that fits.
+///
+/// `Explicit(_)` / `Discovered(_)` payloads carry the resolved path
+/// even though only `Defaults { searched }` is currently matched on —
+/// having the paths on the enum keeps future extension (e.g. showing
+/// the loaded path in the auth-error footer) a one-line change.
+#[allow(dead_code)]
+enum ConfigSource {
+    /// Loaded from an operator-supplied `--config <path>`.
+    Explicit(PathBuf),
+    /// Discovered in one of the [`edge_monitor::onboarding`]
+    /// fallback locations. Path is the one that won.
+    Discovered(PathBuf),
+    /// No config file existed anywhere; running with `Config::default()`.
+    /// `searched` names every path the discovery walk checked, so the
+    /// "no config" error can enumerate them.
+    Defaults { searched: Vec<PathBuf> },
+}
+
+fn load_config(explicit: Option<&std::path::Path>) -> anyhow::Result<(Config, ConfigSource)> {
+    // Explicit `--config <path>` — must exist; caller wanted this
+    // one, not a fallback. Same behaviour as pre-onboarding-dispatch.
+    if let Some(p) = explicit {
+        tracing::info!(path = %p.display(), "loading config (explicit --config)");
+        let cfg = Config::from_file(p)
+            .with_context(|| format!("loading {}", p.display()))?;
+        return Ok((cfg, ConfigSource::Explicit(p.to_path_buf())));
+    }
+
+    // Discovery fallback chain: ./edge_monitor.toml → ~/.config/… →
+    // /etc/… (per `onboarding::config_search_paths`). First existing
+    // file wins.
+    let searched = edge_monitor::onboarding::config_search_paths();
+    for path in &searched {
+        if path.exists() {
+            tracing::info!(path = %path.display(), "loading config (discovered)");
+            let cfg = Config::from_file(path)?;
+            return Ok((cfg, ConfigSource::Discovered(path.clone())));
         }
-        None => {
-            // Fall back to ./edge_monitor.toml if present; otherwise built-in defaults.
-            let default_path = PathBuf::from("./edge_monitor.toml");
-            if default_path.exists() {
-                tracing::info!(path = %default_path.display(), "loading config");
-                Config::from_file(&default_path)?
-            } else {
-                tracing::info!(
-                    "Running with built-in defaults (no edge_monitor.toml \
-                     found). Run history persists at \
-                     ~/.local/share/edge_monitor. See \
-                     edge_monitor.toml.example for tunables, or run with \
-                     --config <path> to load one."
-                );
-                Config::default()
-            }
-        }
+    }
+
+    // No file found. Fall back to built-in defaults; the caller then
+    // decides whether to run (--no-web) or refuse (web requires a
+    // deliberate auth choice).
+    tracing::info!(
+        "no config file found in any search location; running with built-in defaults"
+    );
+    Ok((Config::default(), ConfigSource::Defaults { searched }))
+}
+
+/// Handle the `edge_monitor init` subcommand: write a safe-default
+/// starter config to the operator's XDG location (or the explicit
+/// `--path` override) and exit. Refuses to overwrite an existing
+/// config unless `force = true`.
+fn run_init_subcommand(force: bool, path: Option<&std::path::Path>) -> anyhow::Result<()> {
+    let target = match path {
+        Some(p) => p.to_path_buf(),
+        None => edge_monitor::onboarding::default_init_path().ok_or_else(|| {
+            anyhow::anyhow!(
+                "cannot determine a default init path — $HOME is unset. \
+                 Re-run with `--path <path>` to name the target file."
+            )
+        })?,
     };
-    Ok(cfg)
+    match edge_monitor::onboarding::write_starter_config(&target, force)? {
+        edge_monitor::onboarding::InitOutcome::Wrote(p) => {
+            eprintln!("wrote starter config: {}", p.display());
+            eprintln!();
+            eprintln!("Now run `edge_monitor` to start the monitor.");
+            eprintln!(
+                "  * The auto-kill governor is OFF by default (safe-off posture)."
+            );
+            eprintln!(
+                "  * The web dashboard is OPEN on http://localhost:7070 with NO auth."
+            );
+            eprintln!(
+                "    Edit {} to set an auth_token before binding to a LAN address.",
+                p.display()
+            );
+            Ok(())
+        }
+        edge_monitor::onboarding::InitOutcome::RefusedExisting(p) => {
+            anyhow::bail!(
+                "config already exists at {} — refusing to overwrite. \
+                 Pass `--force` to replace it (your edits will be LOST).",
+                p.display()
+            )
+        }
+    }
 }
 
 /// Install Ctrl-C / SIGTERM / SIGHUP shutdown handler (S.0.8). Returns

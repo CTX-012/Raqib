@@ -18,6 +18,7 @@ pub mod config;
 pub mod exec_wrapper;
 pub mod exit_classify;
 pub mod fingerprint;
+pub mod onboarding;
 pub mod governor;
 pub mod history;
 pub mod lifecycle;

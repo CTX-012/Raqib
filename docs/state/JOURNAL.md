@@ -64,3 +64,14 @@
 - Live smoke: `/api/snapshot.top_processes.by_vram` returned 2 entries on host (Xorg 56MB + gnome-shell 4MB — real GPU users; honest short list held, NOT padded to 5). Screenshot confirms all 3 panels render side-by-side.
 - Commit: (pending — this landing).
 - Notes: no governor, no contract, no new sampling. Purely display + wire projection. HARD STOP #2 didn't fire — additive consumer-side change (D109 precedent).
+
+## 2026-07-30 — onboarding: config discovery + `init` subcommand + friendly errors
+- NEW `src/onboarding.rs`: config_search_paths (CWD → XDG → /etc), default_init_path (XDG), write_starter_config (creates dirs, refuses overwrite without --force), no_config_error_message, DEFAULT_CONFIG_TOML (heavily commented safe-off template — governor OFF, allow_no_auth=true with loud comment). 8 unit tests including "starter config parses + validates" pin.
+- CLI: new `edge_monitor init [--force] [--path <p>]` subcommand. Dispatched BEFORE `load_config` (chicken-and-egg — init exists to bootstrap the config). Writes to XDG by default.
+- `load_config` refactored: returns `(Config, ConfigSource)` where ConfigSource is Explicit/Discovered/Defaults{searched}. Discovery walks the new search paths in order.
+- Auth-error path in main.rs: when validate_web_auth fails AND ConfigSource == Defaults (no config found anywhere), swap the auth wall for the actionable `no_config_error_message` naming exact commands (`edge_monitor init`, `--no-web`, `--config`).
+- `validate_web_auth` message rewritten: named both settings verbatim inside a `[web]` block snippet, dropped "pre-D85 posture" jargon, offered `--no-web` alternative. Test `default_web_config_rejects_validate_web_auth` updated to pin the new checklist shape (both fields named + `--no-web` mentioned + no D85 language + no token value echoed).
+- Live smoke verified 4 flows on a fake `$HOME`: (1) no config → actionable error with search paths + fix commands; (2) `init` → writes safe-off config to `$HOME/.config/edge_monitor/edge_monitor.toml` + prints "now run edge_monitor" reminder; (3) `init` again → refuses ("pass --force to replace"); (4) `edge_monitor` again → picks up the XDG config, starts cleanly.
+- STOP #1 (auth default): took dispatch's recommended option (a) — `allow_no_auth = true` with prominent comment explaining LAN/remote risk. First-run friendliness > paper-secure default that requires token-hunting.
+- Tests: 1237 → 1245 (+8 onboarding). Gate 269/0 unchanged (no web surface touched). clippy clean.
+- Notes: no governor / kill-path / contract change. Starter config ships SAFE-OFF (auto_actuate=false + default_ai_action=Allow — killer inert on fresh install). HARD STOP #3 (auth-default choice) surfaced in dispatch text; operator's dispatch already recommended option (a), so no ratification round-trip needed.

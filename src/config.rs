@@ -726,14 +726,22 @@ impl Config {
     /// name the field, not its content.
     pub fn validate_web_auth(&self) -> Result<(), ConfigError> {
         if self.web.auth_token.is_empty() && !self.web.allow_no_auth {
+            // ONBOARDING dispatch — front-load the fix, drop D85
+            // jargon. A new user needs "here's what to add," not a
+            // history lesson. The 3 concrete choices are named
+            // literally.
             return Err(ConfigError::Invalid(
-                "web.auth_token is empty AND web.allow_no_auth is false. \
-                 The web companion will not start without a deliberate \
-                 choice: set `web.auth_token = \"<your-secret>\"` to lock \
-                 the API, OR set `web.allow_no_auth = true` to explicitly \
-                 opt into the pre-D85 unauthenticated posture. The token \
-                 itself is NEVER echoed in logs or error messages. (To \
-                 run without the web companion at all, pass `--no-web`.)".into(),
+                "the web dashboard needs an auth choice. In your config, set ONE of:\n\
+                 \n\
+                 \u{20}\u{20}[web]\n\
+                 \u{20}\u{20}allow_no_auth = true    # OK on localhost / trusted LAN; no token needed\n\
+                 \n\
+                 \u{20}\u{20}[web]\n\
+                 \u{20}\u{20}auth_token = \"<secret>\" # required for remote / untrusted networks;\n\
+                 \u{20}\u{20}                         # clients send Authorization: Bearer <token>\n\
+                 \n\
+                 Or run without the web dashboard at all: pass --no-web on the command line.\n\
+                 (Your auth_token value is never echoed in logs or error messages.)".into(),
             ));
         }
         Ok(())
@@ -1255,11 +1263,17 @@ mod tests {
     // DISPATCH 85 — web auth posture (validate_web_auth).
     // ─────────────────────────────────────────────────────────────
 
-    /// THE HEADLINE: Config::default() now has an empty auth_token
-    /// AND allow_no_auth=false, so validate_web_auth REJECTS. This
-    /// is the pin against the pre-D85 silent-open regression: an
-    /// out-of-the-box install MUST make a deliberate choice (set
-    /// the token, OR flip allow_no_auth=true, OR run --no-web).
+    /// THE HEADLINE: Config::default() has an empty auth_token AND
+    /// allow_no_auth=false, so validate_web_auth REJECTS. Silent-
+    /// open regression pin: an out-of-the-box install MUST make a
+    /// deliberate choice (set the token, OR flip allow_no_auth=true,
+    /// OR run --no-web).
+    ///
+    /// ONBOARDING dispatch: the error message wording softened to
+    /// name each of the three fixes verbatim (both field names + the
+    /// --no-web escape hatch), so a new user sees a checklist rather
+    /// than jargon. This test pins the checklist — all three named,
+    /// no D85 language, no token value echoed.
     #[test]
     fn default_web_config_rejects_validate_web_auth() {
         let cfg = Config::default();
@@ -1267,10 +1281,17 @@ mod tests {
             .validate_web_auth()
             .expect_err("empty token + !allow_no_auth MUST reject");
         let msg = format!("{err}");
+        // Both settings named (any occurrence is enough — the
+        // message wraps them inside a `[web]` TOML snippet).
         assert!(
-            msg.contains("web.auth_token") && msg.contains("web.allow_no_auth"),
+            msg.contains("auth_token") && msg.contains("allow_no_auth"),
             "error must name BOTH fields so the operator can act on \
              it; got: {msg}",
+        );
+        // The --no-web escape hatch is offered.
+        assert!(
+            msg.contains("--no-web"),
+            "error must mention --no-web as an alternative; got: {msg}",
         );
         // Schema-firewall + dispatch C1: the token VALUE is never
         // echoed. The error message lists the FIELD NAMES, never a
@@ -1279,6 +1300,13 @@ mod tests {
         assert!(
             !msg.contains("hunter2") && !msg.contains("secret-value"),
             "validate_web_auth error MUST NOT echo any token value; got: {msg}",
+        );
+        // De-jargon: the pre-D85 language must be gone. A new user
+        // has no idea what D85 was; the message is a first-run
+        // fixture, not a history lesson.
+        assert!(
+            !msg.contains("D85") && !msg.contains("pre-D85"),
+            "auth error must NOT reference D85 jargon; got: {msg}",
         );
     }
 

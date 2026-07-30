@@ -77,7 +77,7 @@ impl Dispatcher {
     pub fn new(sources: Vec<Box<dyn TelemetrySource>>) -> std::io::Result<Self> {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
-            .thread_name("edge_monitor-telemetry")
+            .thread_name("raqib-telemetry")
             .enable_all()
             .build()?;
         let (frame_tx, frame_rx) = mpsc::unbounded_channel();

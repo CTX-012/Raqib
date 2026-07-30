@@ -54,8 +54,8 @@ impl GovernorPolicy {
             // semantics + actual send-signal path are wired in a
             // future minor release. Operators who want automated
             // kill enable it via `policy.default_ai_action = "Kill"`
-            // in `edge_monitor.toml` — documented in the help
-            // overlay (FIX 10) and edge_monitor.toml.example.
+            // in `raqib.toml` — documented in the help
+            // overlay (FIX 10) and raqib.toml.example.
             default_ai_action: PolicyAction::Allow,
             sigterm_grace_period_secs: 5,
             // CLAUDE.md safety rule 5: max 3 automated kills per 60s window.
@@ -113,7 +113,7 @@ mod tests {
         assert!(policy.whitelist_names.contains("sshd"));
         // v1.0.1 B-NEW-1 — flipped from Kill to Allow to close the
         // phantom-kill gap (Inspector #1). Operators opt in via
-        // `policy.default_ai_action = "Kill"` in edge_monitor.toml.
+        // `policy.default_ai_action = "Kill"` in raqib.toml.
         assert_eq!(policy.default_ai_action, PolicyAction::Allow);
     }
 

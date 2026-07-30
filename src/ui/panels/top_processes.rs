@@ -519,11 +519,11 @@ mod tests {
     }
 
     #[test]
-    fn top_processes_panel_excludes_edge_monitor_self() {
+    fn top_processes_panel_excludes_raqib_self() {
         // The monitor's own RSS would dominate at "what's eating
         // memory" otherwise. Lock the self-PID exclusion.
         let state = state_with(vec![
-            proc(42, "edge_monitor", 50_000, 0.0),
+            proc(42, "raqib", 50_000, 0.0),
             proc(100, "browser", 2_000, 0.0),
         ]);
         let top = top_n_by_rss(&state, /* self_pid */ 42, 10);
@@ -762,7 +762,7 @@ mod tests {
     #[test]
     fn top_n_by_vram_honest_excludes_self_pid() {
         let state = state_with(vec![
-            proc_full(42, "edge_monitor", 50, 0.0, Some(2_000_000_000)),
+            proc_full(42, "raqib", 50, 0.0, Some(2_000_000_000)),
             proc_full(100, "python_train", 1_000, 0.0, Some(1_000_000_000)),
         ]);
         let top = top_n_by_vram_honest(&state, /* self_pid */ 42, 5);

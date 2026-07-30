@@ -113,7 +113,7 @@ fn render_unknown_model(
     writeln!(w)?;
     writeln!(
         w,
-        "Models with run history (run `edge_monitor history` for a summary):"
+        "Models with run history (run `raqib history` for a summary):"
     )?;
     for name in known {
         writeln!(w, "    {}", name)?;
@@ -122,7 +122,7 @@ fn render_unknown_model(
     writeln!(
         w,
         "If the model you wanted isn't listed, the classifier may have \
-         recorded it under a different name — check `edge_monitor history` \
+         recorded it under a different name — check `raqib history` \
          (no model) for the canonical labels."
     )?;
     Ok(())
@@ -184,7 +184,7 @@ fn render_models(w: &mut impl Write, summaries: &[ModelSummary]) -> std::io::Res
         writeln!(w)?;
         writeln!(
             w,
-            "Try one of these in another terminal — edge_monitor will"
+            "Try one of these in another terminal — raqib will"
         )?;
         writeln!(w, "detect the workload automatically:")?;
         writeln!(w)?;
@@ -196,7 +196,7 @@ fn render_models(w: &mut impl Write, summaries: &[ModelSummary]) -> std::io::Res
             w,
             "Or wrap an existing command so we capture stdout metrics too:"
         )?;
-        writeln!(w, "    edge_monitor exec -- <your command>")?;
+        writeln!(w, "    raqib exec -- <your command>")?;
         return Ok(());
     }
     writeln!(
@@ -423,7 +423,7 @@ mod tests {
             "empty-state must include at least one example command; got: {out}"
         );
         assert!(
-            out.contains("edge_monitor exec"),
+            out.contains("raqib exec"),
             "empty-state must mention the exec wrapper; got: {out}"
         );
     }
@@ -463,7 +463,7 @@ mod tests {
         assert!(out.contains("llama-3.1-8b"), "got: {out}");
         // And the line that points at `history` (no model) for the
         // canonical labels.
-        assert!(out.contains("edge_monitor history"), "got: {out}");
+        assert!(out.contains("raqib history"), "got: {out}");
     }
 
     /// Unknown-model empty-state with an empty store: list nothing

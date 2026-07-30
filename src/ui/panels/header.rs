@@ -207,7 +207,7 @@ mod tests {
         let text = mission_line_text(SymbolSet::Unicode, 3, 1);
         assert_eq!(
             text,
-            "edge_monitor · 3 workloads · 1 degraded · press ? for help"
+            "raqib · 3 workloads · 1 degraded · press ? for help"
         );
     }
 
@@ -216,7 +216,7 @@ mod tests {
         let text = mission_line_text(SymbolSet::Ascii, 3, 1);
         assert_eq!(
             text,
-            "edge_monitor - 3 workloads - 1 degraded - press ? for help"
+            "raqib - 3 workloads - 1 degraded - press ? for help"
         );
     }
 
@@ -243,7 +243,7 @@ mod tests {
             "wide terminal must right-align the clock; got {line:?}"
         );
         assert!(
-            line.starts_with(" edge_monitor"),
+            line.starts_with(" raqib"),
             "leading-space gutter preserved; got {line:?}"
         );
         // No double spaces inside the contract label itself — padding

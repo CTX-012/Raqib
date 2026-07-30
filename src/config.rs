@@ -491,11 +491,11 @@ impl StorageConfig {
 }
 
 fn default_run_store_path() -> String {
-    "~/.local/share/edge_monitor".to_string()
+    "~/.local/share/raqib".to_string()
 }
 
 fn default_fingerprint_cache() -> String {
-    "~/.cache/edge_monitor/fingerprints.json".to_string()
+    "~/.cache/raqib/fingerprints.json".to_string()
 }
 
 /// Replace a leading `~/` with `$HOME/`. Returns the original path

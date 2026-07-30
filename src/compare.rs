@@ -186,7 +186,7 @@ pub fn run_compare(
                 writeln!(
                     err,
                     "      The run store at {} has no records yet — try \
-                     `edge_monitor history` for the empty-state hint.",
+                     `raqib history` for the empty-state hint.",
                     path.display()
                 )?;
             } else {

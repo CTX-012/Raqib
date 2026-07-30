@@ -10,7 +10,7 @@
 use std::process::Command;
 
 fn run_help() -> String {
-    let bin = env!("CARGO_BIN_EXE_edge_monitor");
+    let bin = env!("CARGO_BIN_EXE_raqib");
     let out = Command::new(bin)
         .arg("--help")
         .output()

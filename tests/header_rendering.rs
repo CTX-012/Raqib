@@ -75,7 +75,7 @@ fn header_renders_full_mission_line_with_counts() {
     let theme = current_theme("dark");
     let row = render_row0(3, 1, &theme);
     assert!(
-        row.contains(" edge_monitor · 3 workloads · 1 degraded · press ? for help"),
+        row.contains(" raqib · 3 workloads · 1 degraded · press ? for help"),
         "missing mission substring in row: {row:?}"
     );
     assert!(
@@ -140,7 +140,7 @@ fn header_trailing_help_hint_is_always_present() {
 fn header_title_picks_up_theme_foreground() {
     // L20 plumbing invariant: switching themes must change the
     // rendered fg of the title text. cell (1, 0) is the first
-    // character of 'edge_monitor' (col 0 is the leading space).
+    // character of 'raqib' (col 0 is the leading space).
     let backend = TestBackend::new(80, 3);
     let mut terminal = Terminal::new(backend).expect("test backend");
     let app = App::with_symbol_set(SymbolSet::Unicode);
@@ -183,7 +183,7 @@ fn header_uses_ascii_separator_when_symbol_set_is_ascii() {
     let row = row.trim_end().to_string();
 
     assert!(
-        row.contains(" edge_monitor - 2 workloads - 1 degraded - press ? for help"),
+        row.contains(" raqib - 2 workloads - 1 degraded - press ? for help"),
         "missing ASCII-separator mission substring in {row:?}"
     );
     assert!(

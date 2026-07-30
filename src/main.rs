@@ -41,12 +41,16 @@ use edge_monitor::ui;
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "edge_monitor",
-    about = "Model-aware resource monitor and governor for edge AI workloads",
+    name = "raqib",
+    about = "raqib — model-aware resource monitor and governor for edge AI workloads",
     version
 )]
 struct Cli {
-    /// Path to TOML config (defaults to ./edge_monitor.toml if present).
+    /// Path to TOML config. When omitted, discovery walks
+    /// `./raqib.toml` → `~/.config/raqib/raqib.toml` →
+    /// `/etc/raqib/raqib.toml` → (legacy fallback for one release)
+    /// the equivalent `edge_monitor.toml` paths with a deprecation
+    /// warn.
     #[arg(long, value_name = "PATH")]
     config: Option<PathBuf>,
 
@@ -540,10 +544,9 @@ fn log_tick_summary(state: &RuntimeState) {
     {
         tracing::info!(
             "No AI workloads detected this tick. Try one of these in \
-             another terminal — edge_monitor will pick it up on the \
-             next tick: `ollama run llama3 'hello'`, \
-             `vllm serve <model>`, or wrap with \
-             `edge_monitor exec -- <your command>`."
+             another terminal — raqib will pick it up on the next \
+             tick: `ollama run llama3 'hello'`, `vllm serve <model>`, \
+             or wrap with `raqib exec -- <your command>`."
         );
     }
     for p in &ai_procs {
@@ -778,10 +781,10 @@ fn load_config(explicit: Option<&std::path::Path>) -> anyhow::Result<(Config, Co
         return Ok((cfg, ConfigSource::Explicit(p.to_path_buf())));
     }
 
-    // Discovery fallback chain: ./edge_monitor.toml → ~/.config/… →
-    // /etc/… (per `onboarding::config_search_paths`). First existing
-    // file wins.
-    let searched = edge_monitor::onboarding::config_search_paths();
+    // Discovery fallback chain: ./raqib.toml → ~/.config/… → /etc/…
+    // (per `onboarding::config_search_paths`). First existing file
+    // wins.
+    let mut searched = edge_monitor::onboarding::config_search_paths();
     for path in &searched {
         if path.exists() {
             tracing::info!(path = %path.display(), "loading config (discovered)");
@@ -790,9 +793,30 @@ fn load_config(explicit: Option<&std::path::Path>) -> anyhow::Result<(Config, Co
         }
     }
 
-    // No file found. Fall back to built-in defaults; the caller then
-    // decides whether to run (--no-web) or refuse (web requires a
-    // deliberate auth choice).
+    // raqib rename — LEGACY fallback: try `edge_monitor.toml`
+    // locations for one release of overlap so existing users don't
+    // have to re-init on upgrade. A hit emits a deprecation warn
+    // pointing at `raqib init`; planned removal in the next version.
+    let legacy = edge_monitor::onboarding::legacy_config_search_paths();
+    for path in &legacy {
+        if path.exists() {
+            tracing::warn!(
+                path = %path.display(),
+                "loading LEGACY edge_monitor.toml (raqib rename) — run \
+                 `raqib init` to migrate to ~/.config/raqib/raqib.toml; \
+                 the legacy path is planned for removal in the next release"
+            );
+            let cfg = Config::from_file(path)?;
+            return Ok((cfg, ConfigSource::Discovered(path.clone())));
+        }
+    }
+
+    // No file found in EITHER set. Fall back to built-in defaults;
+    // the caller then decides whether to run (--no-web) or refuse
+    // (web requires a deliberate auth choice). Report the full
+    // enumerated set so the operator sees every location that
+    // was checked.
+    searched.extend(legacy);
     tracing::info!(
         "no config file found in any search location; running with built-in defaults"
     );
@@ -817,7 +841,7 @@ fn run_init_subcommand(force: bool, path: Option<&std::path::Path>) -> anyhow::R
         edge_monitor::onboarding::InitOutcome::Wrote(p) => {
             eprintln!("wrote starter config: {}", p.display());
             eprintln!();
-            eprintln!("Now run `edge_monitor` to start the monitor.");
+            eprintln!("Now run `raqib` to start the monitor.");
             eprintln!(
                 "  * The auto-kill governor is OFF by default (safe-off posture)."
             );

@@ -8,21 +8,27 @@
 //! ## Config discovery order (fallback chain when `--config` is not set)
 //!
 //!   1. `--config <path>` (explicit; caller checks this before calling)
-//!   2. `./edge_monitor.toml`       (CWD — the legacy behaviour; still
-//!      the go-to for anyone running from the repo root)
-//!   3. `~/.config/edge_monitor/edge_monitor.toml` (XDG standard;
+//!   2. `./raqib.toml`             (CWD)
+//!   3. `~/.config/raqib/raqib.toml` (XDG standard;
 //!      where a Linux user EXPECTS an app's config)
-//!   4. `/etc/edge_monitor/edge_monitor.toml`     (system-wide;
+//!   4. `/etc/raqib/raqib.toml`      (system-wide;
 //!      lowest priority, rarely populated on personal machines)
+//!   5. LEGACY (raqib rename): `./edge_monitor.toml`,
+//!      `~/.config/edge_monitor/edge_monitor.toml`,
+//!      `/etc/edge_monitor/edge_monitor.toml`. Loading any of
+//!      these emits a `tracing::warn!` deprecation note pointing
+//!      the operator at `raqib init` to migrate. Planned removal
+//!      in the next version — one release of overlap only, so
+//!      existing users don't have to re-init on upgrade.
 //!
 //! First existing file wins. If none exist, callers fall back to
 //! `Config::default()` and — when web is enabled — get a friendly
-//! "no config found; run `edge_monitor init`" error via
+//! "no config found; run `raqib init`" error via
 //! [`no_config_error_message`].
 //!
 //! ## `--init` and the safe-off starter config
 //!
-//! [`DEFAULT_CONFIG_TOML`] is what `edge_monitor init` writes. It:
+//! [`DEFAULT_CONFIG_TOML`] is what `raqib init` writes. It:
 //!
 //!   * Ships the governor OFF: `[governor] auto_actuate = false` +
 //!     `[policy] default_ai_action = "Allow"`. Killer is quiet by
@@ -43,15 +49,18 @@
 //!
 //! ## Not clobber-safe by default
 //!
-//! `edge_monitor init` refuses to overwrite an existing config unless
+//! `raqib init` refuses to overwrite an existing config unless
 //! the caller passes `--force`. Preserves the operator's edits.
 
 use std::path::{Path, PathBuf};
 
 /// Where the config-discovery fallback chain looks after
 /// `--config <path>` (which is checked by the caller before invoking
-/// discovery) and `./edge_monitor.toml`. Ordered highest-priority
-/// first. Existence is checked per-entry; the first present file wins.
+/// discovery). Ordered highest-priority first. Existence is checked
+/// per-entry; the first present file wins.
+///
+/// See [`legacy_config_search_paths_with_home`] for the raqib
+/// rename's one-release-overlap `edge_monitor.toml` fallback set.
 pub fn config_search_paths() -> Vec<PathBuf> {
     config_search_paths_with_home(std::env::var("HOME").ok().as_deref())
 }
@@ -61,6 +70,21 @@ pub fn config_search_paths() -> Vec<PathBuf> {
 /// on the process-wide environment. `None` → skip the XDG entry (as
 /// happens when `$HOME` is unset in production).
 pub fn config_search_paths_with_home(home: Option<&str>) -> Vec<PathBuf> {
+    let mut paths = vec![PathBuf::from("./raqib.toml")];
+    if let Some(h) = home {
+        paths.push(PathBuf::from(h).join(".config/raqib/raqib.toml"));
+    }
+    paths.push(PathBuf::from("/etc/raqib/raqib.toml"));
+    paths
+}
+
+/// raqib rename — legacy edge_monitor.toml discovery paths. Read
+/// as a FALLBACK after [`config_search_paths_with_home`] misses;
+/// when a legacy file is loaded, the caller emits a
+/// `tracing::warn!` deprecation note pointing the operator at
+/// `raqib init` to migrate. One release only — planned removal in
+/// the next version.
+pub fn legacy_config_search_paths_with_home(home: Option<&str>) -> Vec<PathBuf> {
     let mut paths = vec![PathBuf::from("./edge_monitor.toml")];
     if let Some(h) = home {
         paths.push(PathBuf::from(h).join(".config/edge_monitor/edge_monitor.toml"));
@@ -69,10 +93,15 @@ pub fn config_search_paths_with_home(home: Option<&str>) -> Vec<PathBuf> {
     paths
 }
 
-/// Default target path for `edge_monitor init` (the XDG user-config
+/// Convenience env-driven variant of the legacy fallback list.
+pub fn legacy_config_search_paths() -> Vec<PathBuf> {
+    legacy_config_search_paths_with_home(std::env::var("HOME").ok().as_deref())
+}
+
+/// Default target path for `raqib init` (the XDG user-config
 /// location). Same shape the discovery-chain looks at as entry #3, so
 /// a freshly-initialised config is picked up automatically on the
-/// next `edge_monitor` invocation without any flag.
+/// next `raqib` invocation without any flag.
 ///
 /// Returns `None` when `$HOME` isn't set (rare in interactive
 /// contexts; may happen under `sudo -H` weirdness or minimal
@@ -80,10 +109,10 @@ pub fn config_search_paths_with_home(home: Option<&str>) -> Vec<PathBuf> {
 pub fn default_init_path() -> Option<PathBuf> {
     std::env::var("HOME")
         .ok()
-        .map(|h| PathBuf::from(h).join(".config/edge_monitor/edge_monitor.toml"))
+        .map(|h| PathBuf::from(h).join(".config/raqib/raqib.toml"))
 }
 
-/// Result of `edge_monitor init`, surfaced to the CLI so the
+/// Result of `raqib init`, surfaced to the CLI so the
 /// operator sees `where` the config was written.
 #[derive(Debug, PartialEq)]
 pub enum InitOutcome {
@@ -126,24 +155,24 @@ pub fn no_config_error_message(searched: &[PathBuf]) -> String {
     format!(
         "no configuration file found.\n\
          \n\
-         edge_monitor searched (in order):\n\
+         raqib searched (in order):\n\
          {paths}\n\
          \n\
          To create a starter config with safe defaults:\n\
          \n\
-         \u{20}\u{20}edge_monitor init\n\
+         \u{20}\u{20}raqib init\n\
          \n\
          To run without the web dashboard (no config required):\n\
          \n\
-         \u{20}\u{20}edge_monitor --no-web\n\
+         \u{20}\u{20}raqib --no-web\n\
          \n\
          Or pass an explicit path:\n\
          \n\
-         \u{20}\u{20}edge_monitor --config <path>",
+         \u{20}\u{20}raqib --config <path>",
     )
 }
 
-/// The starter config `edge_monitor init` writes. SAFE-OFF posture:
+/// The starter config `raqib init` writes. SAFE-OFF posture:
 /// governor observer-only, web allows unauthenticated local access
 /// with a LOUD comment about it. Heavily commented so a new user can
 /// read + edit.
@@ -154,13 +183,13 @@ pub fn no_config_error_message(searched: &[PathBuf]) -> String {
 ///
 /// AUTH DECISION: `allow_no_auth = true` (option a per dispatch). See
 /// module-level doc for the trade-off rationale.
-pub const DEFAULT_CONFIG_TOML: &str = r#"# edge_monitor starter configuration
+pub const DEFAULT_CONFIG_TOML: &str = r#"# raqib starter configuration
 #
-# This file was generated by `edge_monitor init`. It ships SAFE
+# This file was generated by `raqib init`. It ships SAFE
 # defaults: the auto-kill governor is OFF, the web dashboard is
 # open on localhost with NO authentication. Everything below is
 # commented — edit only the fields you want to override, then
-# restart edge_monitor.
+# restart raqib.
 
 # ─────────────────────────────────────────────────────────────────
 # [web] Dashboard listener + authentication
@@ -253,9 +282,9 @@ rate_limit_window_secs = 60
 
 # ─────────────────────────────────────────────────────────────────
 # Everything else uses built-in defaults. See
-# `edge_monitor.toml.example` in the repo for the full menu of
-# tunables ([runtime], [storage], [regression], [telemetry],
-# [thresholds], [[workloads]]).
+# `raqib.toml.example` in the repo for the full menu of tunables
+# ([runtime], [storage], [regression], [telemetry], [thresholds],
+# [[workloads]]).
 # ─────────────────────────────────────────────────────────────────
 "#;
 
@@ -270,16 +299,16 @@ mod tests {
         // mutate in parallel test runs).
         let paths = config_search_paths_with_home(Some("/tmp/fake-home"));
         // CWD first (highest priority after --config).
-        assert_eq!(paths[0], PathBuf::from("./edge_monitor.toml"));
+        assert_eq!(paths[0], PathBuf::from("./raqib.toml"));
         // XDG standard location second.
         assert_eq!(
             paths[1],
-            PathBuf::from("/tmp/fake-home/.config/edge_monitor/edge_monitor.toml"),
+            PathBuf::from("/tmp/fake-home/.config/raqib/raqib.toml"),
         );
         // System-wide fallback last.
         assert_eq!(
             paths.last(),
-            Some(&PathBuf::from("/etc/edge_monitor/edge_monitor.toml")),
+            Some(&PathBuf::from("/etc/raqib/raqib.toml")),
         );
     }
 
@@ -288,14 +317,53 @@ mod tests {
         let paths = config_search_paths_with_home(None);
         // CWD + system-wide only; XDG entry omitted (a fresh user
         // with `$HOME` unset falls through to CWD then system-wide).
+        assert!(paths.iter().any(|p| p == Path::new("./raqib.toml")));
+        assert!(paths.iter().all(|p| !p.to_string_lossy().contains(".config/raqib")));
+        assert!(paths.contains(&PathBuf::from("/etc/raqib/raqib.toml")));
+    }
+
+    /// raqib rename — legacy fallback paths still enumerate the old
+    /// `edge_monitor.toml` locations so `Runtime::load_config` can
+    /// try them AFTER the raqib set misses. Callers that hit a
+    /// legacy path emit a `tracing::warn!` deprecation note. One
+    /// release only.
+    #[test]
+    fn legacy_config_search_paths_still_list_edge_monitor_locations() {
+        let paths = legacy_config_search_paths_with_home(Some("/tmp/fake-home"));
+        assert_eq!(paths[0], PathBuf::from("./edge_monitor.toml"));
+        assert_eq!(
+            paths[1],
+            PathBuf::from("/tmp/fake-home/.config/edge_monitor/edge_monitor.toml"),
+        );
+        assert_eq!(
+            paths.last(),
+            Some(&PathBuf::from("/etc/edge_monitor/edge_monitor.toml")),
+        );
+    }
+
+    #[test]
+    fn legacy_config_search_paths_skip_xdg_when_no_home() {
+        let paths = legacy_config_search_paths_with_home(None);
         assert!(paths.iter().any(|p| p == Path::new("./edge_monitor.toml")));
         assert!(paths.iter().all(|p| !p.to_string_lossy().contains(".config/edge_monitor")));
-        assert!(paths.contains(&PathBuf::from("/etc/edge_monitor/edge_monitor.toml")));
+    }
+
+    /// raqib rename — the primary + legacy search sets must be
+    /// DISJOINT. If the two ever start returning the same path,
+    /// the caller's "found in raqib path → skip fallback" gate
+    /// would fire in the wrong branch.
+    #[test]
+    fn raqib_and_legacy_search_paths_are_disjoint() {
+        let primary = config_search_paths_with_home(Some("/tmp/fake-home"));
+        let legacy = legacy_config_search_paths_with_home(Some("/tmp/fake-home"));
+        for p in &primary {
+            assert!(!legacy.contains(p), "raqib path {p:?} must not appear in the legacy fallback list");
+        }
     }
 
     #[test]
     fn default_starter_config_parses_and_validates() {
-        // THE load-bearing test — the template `edge_monitor init`
+        // THE load-bearing test — the template `raqib init`
         // writes must parse against the current schema AND pass
         // `Config::validate` + `validate_web_auth`. If a schema field
         // is added or renamed without updating the template, this
@@ -344,8 +412,8 @@ mod tests {
     #[test]
     fn write_starter_config_creates_dir_and_writes_bytes() {
         let tmp = std::env::temp_dir()
-            .join(format!("edge_monitor_onboarding_test_write_{}", std::process::id()));
-        let target = tmp.join("nested/edge_monitor.toml");
+            .join(format!("raqib_onboarding_test_write_{}", std::process::id()));
+        let target = tmp.join("nested/raqib.toml");
         // Ensure clean state.
         let _ = std::fs::remove_dir_all(&tmp);
 
@@ -363,9 +431,9 @@ mod tests {
     #[test]
     fn write_starter_config_refuses_existing_without_force() {
         let tmp = std::env::temp_dir()
-            .join(format!("edge_monitor_onboarding_test_refuse_{}", std::process::id()));
+            .join(format!("raqib_onboarding_test_refuse_{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
-        let target = tmp.join("edge_monitor.toml");
+        let target = tmp.join("raqib.toml");
         std::fs::write(&target, "PREEXISTING_CONTENT").unwrap();
 
         let outcome = write_starter_config(&target, false).expect("returns Ok(RefusedExisting)");
@@ -385,8 +453,8 @@ mod tests {
     #[test]
     fn no_config_error_lists_searched_paths_and_actionable_commands() {
         let searched = vec![
-            PathBuf::from("./edge_monitor.toml"),
-            PathBuf::from("/tmp/fake-home/.config/edge_monitor/edge_monitor.toml"),
+            PathBuf::from("./raqib.toml"),
+            PathBuf::from("/tmp/fake-home/.config/raqib/raqib.toml"),
         ];
         let msg = no_config_error_message(&searched);
         // Every searched path appears verbatim in the message.
@@ -395,11 +463,11 @@ mod tests {
                 "message must list searched path {}: {msg}", p.display());
         }
         // The two ways forward are named literally.
-        assert!(msg.contains("edge_monitor init"),
-            "message must recommend `edge_monitor init`: {msg}");
-        assert!(msg.contains("edge_monitor --no-web"),
+        assert!(msg.contains("raqib init"),
+            "message must recommend `raqib init`: {msg}");
+        assert!(msg.contains("raqib --no-web"),
             "message must offer `--no-web` alternative: {msg}");
-        assert!(msg.contains("edge_monitor --config"),
+        assert!(msg.contains("raqib --config"),
             "message must mention explicit --config path: {msg}");
         // No jargon: the pre-D85 language must NOT appear (that
         // belonged to the auth-existing-config error, not this one).

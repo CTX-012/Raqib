@@ -1,5 +1,555 @@
 # PENDING — things waiting on the human
 
+## ✅ SAFE-TEST CONFIG — ready to apply — 2026-07-30
+
+**READ-ONLY dispatch.** Nothing applied. Nothing armed. No code touched. No config
+written. This block is the operator's ready-to-paste artefact + the checks that must
+pass BEFORE `auto_actuate = true`.
+
+Every key below was confirmed against the shipped schema (`src/config.rs`,
+`src/governor/policy.rs`, `src/thresholds.rs`) and every process name against the
+LIVE host (`/proc/<pid>/comm`, `/api/snapshot`, `nvidia-smi`).
+
+---
+
+### 🚨 §0 — FOUR DEFECTS in the 2026-07-29 draft config. Do NOT paste that block.
+
+The recommended config in the safety-investigation below (§"Recommended safe-test
+config") is **broken in four ways**. Each one was verified:
+
+| # | Defect | Consequence | Proof |
+|---|---|---|---|
+| **D1** | `vram_critical_pct = 15.0` with no `vram_attention_pct` override | **edge_monitor REFUSES TO START.** `check_pair` rejects `critical < attention`; attention defaults to 85.0 → `vram_critical_pct (15.0) must be ≥ vram_attention_pct (85.0)` | [`thresholds.rs:133-138,189-201`](../../src/thresholds.rs#L133-L201), default [`ux_contract/src/lib.rs:134`](../../../ux_contract/src/lib.rs#L134) |
+| **D2** | Allowlist entry `"controller_server"` | **NEVER MATCHES.** Policy matches `/proc/<pid>/comm`, which the kernel truncates to 15 chars. The real name is `controller_serv`. A 17-char entry can never equal a 15-char comm | [`linux_proc.rs:119,203-207`](../../src/platform/linux_proc.rs#L203-L207); live `comm` = `controller_serv` |
+| **D3** | Disarm via `kill $(pgrep -f "target/release/edge_monitor")` | **KILLS THE WRONG PROCESS.** Tested live: that pattern returned PID 126199 (a transient `rustc` build job) and did **NOT** match the running monitor (PID 123212, whose `comm` AND `argv[0]` are both `edge`). Disarm would appear to succeed while the killer stayed up | verified live via `pgrep -f` + `/proc/123212/comm` |
+| **D4** | Draft allowlist omits 5 classes of real workload, and specifying `allowlist` at all **silently drops the built-in shell/init defaults** (`sshd`,`bash`,`zsh`,`sh`,`systemd`,`init`,`kworker`,`kthreadd`) — `#[serde(default)]` is per-FIELD, so a present `allowlist` replaces the default set wholesale | Gazebo, rviz2, the ROS2 daemon, VS Code and the shells all end up unlisted | [`config.rs:512-514`](../../src/config.rs#L512-L514) + [`policy.rs:37-46`](../../src/governor/policy.rs#L37-L46) |
+
+---
+
+### §1 — THE ALLOWLIST: every real workload on this host, enumerated
+
+Names are **exact `/proc/<pid>/comm` strings** — kernel-truncated at 15 chars.
+`policy.evaluate` does `whitelist_names.contains(name)`: **exact match, no globbing,
+no substring, no regex** ([`policy.rs:70-72`](../../src/governor/policy.rs#L70-L72)).
+A name that is one character off is *not protected*.
+
+PIDs below are indicative only — the ROS2 stack was restarted mid-investigation
+(PIDs moved 119752→129358 range). **Names are the stable identifier; PIDs are not.**
+
+**ROS2 / Nav2 / SLAM stack — 15 names** (all `AICategory::Inference` on the wire):
+
+| comm (exact) | e.g. PID | Real binary | Truncated? |
+|---|---|---|---|
+| `ros2` | 129358, 129882, 131029, 137803 | `ros2 launch nova …` (4 launchers + `topic hz`) | no |
+| `robot_state_pub` | 129514 | `robot_state_publisher` | ✂ yes |
+| `parameter_bridg` | 129519 | `ros_gz_bridge/parameter_bridge` | ✂ yes |
+| `range_converter` | 129521 | `nova/range_converter` | exactly 15 |
+| `async_slam_tool` | 129969 | `async_slam_toolbox_node` | ✂ yes |
+| `ekf_node` | 131084 | `robot_localization/ekf_node` | no |
+| `controller_serv` | 131086 | `nav2_controller/controller_server` | ✂ **yes — draft had this wrong** |
+| `smoother_server` | 131090 | `nav2_smoother/smoother_server` | exactly 15 |
+| `planner_server` | 131092 | `nav2_planner/planner_server` | no |
+| `behavior_server` | 131094 | `nav2_behaviors/behavior_server` | exactly 15 |
+| `bt_navigator` | 131096 | `nav2_bt_navigator/bt_navigator` | no |
+| `waypoint_follow` | 131107 | `nav2_waypoint_follower/waypoint_follower` | ✂ yes |
+| `velocity_smooth` | 131120 | `nav2_velocity_smoother/velocity_smoother` | ✂ yes |
+| `lifecycle_manag` | 131124 | `nav2_lifecycle_manager/lifecycle_manager` | ✂ yes |
+| `rviz2` | 129525 | `rviz2` — **GPU/OpenGL client** | no |
+
+**Agents:** `claude` — 6 live processes (9607, 9729, 9904, 35263, 124206, +1).
+The draft said "1 agent"; there are **six**.
+
+**🚩 FLAGGED — real workloads hiding behind GENERIC names (§1a below):**
+
+| comm | PID | What it actually is |
+|---|---|---|
+| `python3` | 129419 | **the ROS2 daemon** — `ros2cli.daemon.daemonize` |
+| `ruby` | 129512, 129614, 129624 | **Ignition Gazebo** — launcher + `ign gazebo server` + `ign gazebo gui` (GPU client) |
+| `sh` | 129511 | the `ign gazebo` launcher wrapper |
+| `MainThread` | 5006, 5186, 5198, 5209, 9505, 27164, 36297 | **VS Code Server** node processes |
+| `code-6a44c352bd` | ×2 | VS Code Server supervisor |
+
+**Dev/host processes worth protecting:** `rustc` (×16 during a build), `cargo`,
+`esbuild`, `node`, `terminator`, `Xorg`, `gnome-shell`, `chrome` (×18), `firefox`,
+`docker`, plus the monitor itself (`edge` / `edge_monitor`).
+
+#### §1a — 🚩 FLAG: `python3` and `ruby` CANNOT be cleanly protected by name
+
+The dispatch asked me to flag any real workload that name/pattern matching can't
+cleanly protect. **Two qualify, and one of them changes the target spec:**
+
+- **`python3`** carries the ROS2 daemon. Allowlisting `python3` protects it — but it
+  also blanket-protects *every* Python process on the host, including any future
+  Python AI workload you might actually want the governor to manage. It is blunt,
+  but it errs safe. **Accept the bluntness for this test.**
+- **`ruby`** carries all three Gazebo processes. Same trade: allowlisting `ruby`
+  protects the simulator and any other Ruby process. Also errs safe.
+- **⛔ THE CONSEQUENCE FOR THE TARGET: the disposable MUST NOT be a bare `python3`.**
+  Evaluation order is allowlist → blocklist → category
+  ([`policy.rs:70-77`](../../src/governor/policy.rs#L70-L77)), so `"python3"` on
+  BOTH lists means the allowlist silently wins. You would get the worst of both:
+  a target that can never be killed (test proves nothing), and — if you "fixed" it
+  by removing `python3` from the allowlist — **the ROS2 daemon becomes a kill
+  candidate under the same name.** §3 gives a distinctly-named target that
+  sidesteps this entirely.
+
+---
+
+### §2 — THE CONFIG BLOCK (exact keys, confirmed against the schema)
+
+**⚠️ Schema correction to the dispatch:** the dispatch asked for one `[governor]`
+block containing `allowlist`, `thermal_red_c`, `rate_limit_max_kills`,
+`kill_sustain_secs`, `default_ai_action` and `auto_actuate`. **That is not the
+schema.** Those keys live in **three different sections**. Putting them all under
+`[governor]` fails silently — `Config` is `#[serde(default)]` with no
+`deny_unknown_fields` ([`config.rs:27-28`](../../src/config.rs#L27-L28)), so the
+misplaced keys are **ignored without error** and you would run on defaults while
+believing you were protected. Actual homes:
+
+| Key | Section | Cite |
+|---|---|---|
+| `auto_actuate`, `kill_sustain_secs` | `[governor]` | [`config.rs:145-173`](../../src/config.rs#L145-L173) |
+| `allowlist`, `blocklist`, `default_ai_action`, `sigterm_grace_secs`, `rate_limit_max_kills`, `rate_limit_window_secs` | `[policy]` | [`config.rs:512-528`](../../src/config.rs#L512-L528) |
+| `thermal_red_c`, `thermal_amber_c`, `vram_critical_pct`, `vram_attention_pct`, `ram_critical_pct`, `ram_attention_pct`, `alert_sustain_secs` | `[thresholds]` | [`config.rs:264-275`](../../src/config.rs#L264-L275) |
+| `prometheus_bind` | `[telemetry]` | [`config.rs:328-330`](../../src/config.rs#L328-L330) |
+
+**WRITE TO:** `/home/faiz/edge_monitor-l14/edge_monitor.toml` — first entry in the
+discovery chain and the CWD of the running instance
+([`onboarding.rs:63-70`](../../src/onboarding.rs#L63-L70)). It currently holds only
+`[web] allow_no_auth = true`; **keep that block or the web server refuses to start**
+([`config.rs:validate_web_auth`](../../src/config.rs#L727)) — and the web API is the
+verification surface in §4.
+
+```toml
+# ═══════════════════════════════════════════════════════════════════
+# SAFE-TEST CONFIG — governor live-fire, disposable target only.
+# Written 2026-07-30. REVERT AFTER THE TEST (see §5).
+# ═══════════════════════════════════════════════════════════════════
+
+[web]
+allow_no_auth = true          # KEEP — /api/settings is the verification surface
+
+[governor]
+# ⛔ THE ARMING SWITCH. Stays false until every check in §4 passes.
+auto_actuate      = false
+# LONG reaction window: 30 s of sustained breach before SIGTERM fires.
+# Must be >= thresholds.alert_sustain_secs (5) or config load FAILS.
+kill_sustain_secs = 30
+
+[policy]
+# ── THE PRIMARY STRUCTURAL GUARANTEE ──────────────────────────────
+# "Allow" means policy.evaluate can return Kill for ONE reason only:
+# a blocklist hit. Every other process on the host — AI-classified or
+# not — returns Allow -> KillAction::Whitelisted -> structurally
+# unreachable by the actuation loop (runtime.rs:2130-2134).
+# DO NOT set this to "Kill" for this test.
+default_ai_action = "Allow"
+
+# ── THE ONLY KILLABLE NAME ON THE HOST ────────────────────────────
+blocklist = ["vram_canary"]
+
+# ── BELT-AND-BRACES: survives even if default_ai_action is flipped ─
+# NOTE: this list REPLACES the built-in defaults, so the shells and
+# init are re-listed explicitly. Exact /proc/<pid>/comm, 15-char max.
+allowlist = [
+    # -- shells + init (re-added: a present allowlist drops the defaults)
+    "systemd", "init", "sshd", "bash", "zsh", "sh",
+    "kworker", "kthreadd",
+    # -- agents (6 live)
+    "claude",
+    # -- ROS2 / Nav2 / SLAM stack (15)
+    "ros2", "robot_state_pub", "parameter_bridg", "range_converter",
+    "async_slam_tool", "ekf_node", "controller_serv", "smoother_server",
+    "planner_server", "behavior_server", "bt_navigator", "waypoint_follow",
+    "velocity_smooth", "lifecycle_manag", "rviz2",
+    # -- generic names carrying REAL workloads (see §1a FLAG)
+    "python3",            # <- the ROS2 daemon (ros2cli.daemon)
+    "ruby",               # <- ign gazebo server / gui / launcher
+    # -- IDE + build toolchain
+    "MainThread", "code-6a44c352bd", "node", "esbuild",
+    "rustc", "cargo", "terminator",
+    # -- desktop / GPU clients (hold real VRAM; see §2a)
+    "Xorg", "gnome-shell", "chrome", "firefox",
+    # -- containers
+    "docker", "containerd",
+    # -- the monitor itself
+    "edge", "edge_monitor", "raqib",
+]
+
+sigterm_grace_secs     = 5    # SIGTERM -> SIGKILL delay (min 1)
+rate_limit_max_kills   = 1    # ONE kill per window. One shot only.
+rate_limit_window_secs = 60
+
+[thresholds]
+# ── THERMAL: raised to disable the system-wide mass-kill trigger ───
+# Host CPU Package is at 93.0 C RIGHT NOW (confirmed live this
+# session). Default thermal_red_c = 95.0 is ~2 C away. A thermal
+# breach is HOST-WIDE: it makes EVERY AI-classified PID a candidate
+# on the same tick (threshold_breach.rs:241-266, executor.rs:229).
+# 120.0 puts it out of reach of any load spike. Must be > amber.
+thermal_amber_c    = 85.0
+thermal_red_c      = 120.0
+
+# ── VRAM: tuned so the canary breaches and nothing else does ───────
+# 15% of 12288 MB = 1843 MB. The canary holds ~2.5-3.0 GB (~23%).
+# vram_attention_pct MUST be <= vram_critical_pct or startup FAILS
+# (this is defect D1). Both must be in 0.0..=100.0.
+vram_attention_pct = 12.0
+vram_critical_pct  = 15.0
+
+# ── RAM: untouched. No real workload is near 95% of 31960 MB;
+#    the largest is claude at ~1.17%.
+ram_attention_pct  = 90.0
+ram_critical_pct   = 95.0
+
+alert_sustain_secs = 5
+
+[telemetry]
+# Enables the decision counters used by the §4 dry-run gate.
+# Default is empty = exporter DISABLED. Required for verification.
+prometheus_bind = "127.0.0.1:9472"
+```
+
+#### §2a — Two accepted side-effects of the threshold tuning
+
+1. **`vram_attention_pct = 12.0` will raise VRAM-pressure ALERTS** for any GPU client
+   over ~1475 MB — Gazebo GUI, rviz2, Xorg, chrome. That is **alert noise, not
+   danger**: they are allowlisted AND `default_ai_action = "Allow"`, so they can
+   never reach `PolicyAction::Kill`. Expect the alerts panel to light up.
+2. **`thermal_red_c = 120.0` disables the thermal RED alarm for the duration.** You
+   lose the real 95 °C warning while the test runs. The host is at 93 °C. **Do not
+   leave this in place after the test** — §5 reverts it.
+
+---
+
+### §3 — THE DISPOSABLE TARGET
+
+**Requirements it satisfies:** distinctive 11-char `comm` (no collision with any of
+the 445 live processes, and critically **not** `python3`); holds ~2.5 GB VRAM
+(≈20-24% of 12288 MB, comfortably over the 15% cutoff); registers as a **CUDA
+compute process** so NVML attributes the memory per-PID; holds steady well past the
+30 s sustain window; loses nothing when killed.
+
+**Why the name trick matters:** `comm` comes from the exec'd filename, so a **symlink**
+to the interpreter renames the process while `sys.prefix` still resolves through the
+symlink to the real stdlib. **I verified this live** — symlinked, launched, read
+`/proc/<pid>/comm` → `vram_canary` (11 chars, untruncated), `sys.prefix` intact,
+`torch.cuda.is_available()` → `True` on torch 2.5.1+cu124.
+
+**Why per-PID VRAM works:** the sampler merges BOTH `running_graphics_processes()`
+and `running_compute_processes()`, and torch's CUDA context lands in the compute list
+([`gpu_nvidia.rs:166-215`](../../src/platform/gpu_nvidia.rs#L166-L215)). Note that
+`nvidia-smi --query-compute-apps` is currently **empty** on this host — no compute
+process is running yet. That is expected, but it means **per-PID VRAM attribution is
+UNPROVEN on this host until the canary appears in `/api/snapshot` with a non-null
+`vram_mb`.** §4 step 6 makes that an explicit gate: if `vram_mb` stays `null`, the
+canary can never breach and the test would silently prove nothing.
+
+```bash
+# ── 1. create the distinctly-named interpreter (one time) ──────────
+ln -sf "$(command -v python3)" /tmp/vram_canary
+
+# ── 2. launch the canary: grabs ~2.5 GB VRAM and holds it ──────────
+/tmp/vram_canary -c "
+import torch, time, os
+torch.cuda.init()
+# 2.5 GiB of float32 on the device, kept referenced so it is never freed
+hog = torch.empty(int(2.5*1024**3//4), dtype=torch.float32, device='cuda')
+torch.cuda.synchronize()
+print('canary pid', os.getpid(),
+      'holding', torch.cuda.memory_allocated()//1024**2, 'MiB', flush=True)
+while True:            # hold steady, ~0% CPU
+    time.sleep(5)
+" &
+echo $! > /tmp/vram_canary.pid
+
+# ── 3. confirm identity + attribution BEFORE relying on it ─────────
+cat /proc/$(cat /tmp/vram_canary.pid)/comm     # MUST print exactly: vram_canary
+nvidia-smi --query-compute-apps=pid,used_memory --format=csv   # MUST list that PID
+```
+
+**Cleanup (it is disposable — kill it any time):**
+`kill $(cat /tmp/vram_canary.pid) 2>/dev/null; rm -f /tmp/vram_canary /tmp/vram_canary.pid`
+
+---
+
+### §4 — PRE-ARM VERIFICATION CHECKLIST (all 7 must pass; `auto_actuate` stays `false` throughout)
+
+The whole point: prove the governor would target **only** `vram_canary` while the
+killer is still structurally disabled by Gate 1
+([`runtime.rs:2111`](../../src/runtime.rs#L2111)).
+
+**1 — Build, then launch capturing the PID.** Do not skip the PID capture; §0/D3 is
+exactly what happens without it.
+```bash
+cd /home/faiz/edge_monitor-l14 && cargo build --release
+./target/release/edge_monitor > /tmp/raqib_test.log 2>&1 &
+echo $! > /tmp/raqib_test.pid
+```
+
+**2 — Prove the config was actually READ.** The currently-running instance reports
+`"config_path": null` — it loaded **no config file at all**. Editing a TOML the
+binary never reads is the quietest possible failure mode.
+```bash
+curl -s http://127.0.0.1:7070/api/settings | python3 -m json.tool
+```
+✅ PASS requires ALL of: `thermal_red_c: 120.0`, `vram_critical_pct: 15.0`,
+`vram_attention_pct: 12.0`, `kill_sustain_secs: 30`,
+`auto_actuate_readonly: false`, `default_ai_action_readonly: "Allow"`.
+❌ If any value still shows the default (95.0 / 85.0 / 10) → the config was NOT
+loaded. **STOP.** Fix the path before going further.
+
+**3 — Confirm the killer is still disabled.** `auto_actuate_readonly` must be
+`false`. Everything below runs with the actuation loop structurally off.
+
+**4 — Allowlist coverage sweep — use `ps`, NOT `/api/snapshot`.** The draft's
+one-liner read `/api/snapshot`, which only lists the 21 AI-classified workloads and
+therefore **misses `rviz2`, `ruby`/Gazebo and the `python3` ROS2 daemon entirely**.
+Sweep every process on the host instead:
+```bash
+python3 - <<'EOF'
+import subprocess
+allow = {"systemd","init","sshd","bash","zsh","sh","kworker","kthreadd","claude",
+ "ros2","robot_state_pub","parameter_bridg","range_converter","async_slam_tool",
+ "ekf_node","controller_serv","smoother_server","planner_server","behavior_server",
+ "bt_navigator","waypoint_follow","velocity_smooth","lifecycle_manag","rviz2",
+ "python3","ruby","MainThread","code-6a44c352bd","node","esbuild","rustc","cargo",
+ "terminator","Xorg","gnome-shell","chrome","firefox","docker","containerd",
+ "edge","edge_monitor","raqib"}
+live = subprocess.run(["ps","-eo","comm="],capture_output=True,text=True).stdout.split()
+missing = sorted(set(live) - allow)
+print("UNLISTED (%d distinct):" % len(missing))
+for m in missing: print("  ", m)
+print("\nvram_canary in allowlist?", "vram_canary" in allow, "<- MUST be False")
+EOF
+```
+✅ PASS: `vram_canary` is **not** in the allowlist, and you have eyeballed the
+UNLISTED names and confirmed none is a workload you care about. Unlisted is *not*
+dangerous while `default_ai_action = "Allow"` — this step is to protect you if the
+setting is ever flipped.
+
+**5 — Baseline the decision counters** (exporter from `[telemetry]`):
+```bash
+curl -s http://127.0.0.1:9472/metrics | grep governor_kills_total
+```
+✅ PASS: `reason="whitelisted"` is large and climbing (~one per process per tick);
+`reason="sigterm"` is **absent or flat**. A non-zero, *climbing* `sigterm` here —
+before the canary exists — means something real is already a kill candidate. **STOP.**
+
+**6 — Launch the canary (§3) and prove VRAM attribution works.**
+```bash
+curl -s http://127.0.0.1:7070/api/snapshot \
+ | python3 -c "import json,sys; [print(w['pid'],w['name'],w['vram_mb']) for w in json.load(sys.stdin)['workloads'] if 'canary' in w['name']]"
+```
+✅ PASS: a row appears with `vram_mb` ≈ 2500-3000 (**not `null`**).
+❌ `null` → NVML is not attributing per-process VRAM on this host. The canary can
+never breach; the test proves nothing. **STOP** and fix attribution first.
+
+**7 — THE DECISIVE GATE: count how many PIDs are kill candidates.** Sample the
+counter twice, 20 s apart, while the canary is breaching:
+```bash
+A=$(curl -s http://127.0.0.1:9472/metrics | grep 'governor_kills_total{reason="sigterm"}' | awk '{print $2}')
+sleep 20
+B=$(curl -s http://127.0.0.1:9472/metrics | grep 'governor_kills_total{reason="sigterm"}' | awk '{print $2}')
+echo "delta=$(( ${B:-0} - ${A:-0} ))  over ~20 ticks (1 Hz)"
+```
+✅ **PASS: delta ≈ 20** — i.e. **exactly ONE** `SignalTermSent` decision per tick.
+That one decision is the canary.
+❌ **delta ≈ 40 (or any multiple)** → **TWO OR MORE PIDs are kill candidates.**
+**ABORT. DO NOT ARM.** Something besides the canary is reaching `PolicyAction::Kill`.
+❌ **delta = 0** → the canary is not breaching (check step 6, and that 30 s sustain
+has elapsed). Arming would prove nothing.
+
+Also confirm the canary is **still alive** at this point — that is Gate 1 doing its
+job with `auto_actuate = false`.
+
+**ONLY IF ALL SEVEN PASS:** set `auto_actuate = true` in `[governor]`, then **restart**
+(§5 — config is not hot-reloaded). Re-check `/api/settings` shows
+`auto_actuate_readonly: true`, and watch `/tmp/raqib_test.log` for
+`auto_actuate: firing SIGTERM`.
+
+---
+
+### §5 — ABORT + DISARM
+
+**Config is NOT hot-reloaded** — no inotify, no SIGHUP path. Editing the TOML does
+nothing until restart. The only instant stop is killing the process.
+
+**🔴 INSTANT ABORT (use this the moment anything looks wrong):**
+```bash
+kill $(cat /tmp/raqib_test.pid)
+```
+This stops the governor immediately. Because `execute_after_grace` runs **in-process**
+([`executor.rs:481-488`](../../src/governor/executor.rs#L481-L488)), killing the
+monitor during the 5 s SIGTERM grace **also cancels the pending SIGKILL escalation**.
+
+**If the PID file is lost** — do **NOT** use `pgrep -f "target/release/edge_monitor"`
+(defect D3: it matches `rustc` build jobs and misses the real process). Use one of:
+```bash
+fuser -k -n tcp 7070          # kills whatever holds the web port — most reliable
+pgrep -x edge_monitor         # exact comm match
+pgrep -x edge                 # the currently-running instance's comm is 'edge'
+ss -lntp | grep 7070          # read the PID out directly
+```
+
+**Confirm the killer is OFF:**
+```bash
+curl -s -m 2 http://127.0.0.1:7070/api/settings   # connection refused == dead
+pgrep -x edge_monitor; pgrep -x edge; echo "exit=$? (1 == nothing running)"
+```
+
+**Full disarm (do this after the test — do not leave the tuned thresholds in place):**
+1. `kill $(cat /tmp/raqib_test.pid)`
+2. Edit `edge_monitor.toml`: `auto_actuate = false`; revert `thermal_red_c = 95.0`;
+   revert `vram_attention_pct = 85.0` / `vram_critical_pct = 95.0`; empty the
+   `blocklist`. **Re-arming the 95 °C thermal alarm is the important one** — the host
+   idles at 93 °C.
+3. Kill the canary: `kill $(cat /tmp/vram_canary.pid); rm -f /tmp/vram_canary /tmp/vram_canary.pid`
+4. Restart and confirm: `/api/settings` shows `auto_actuate_readonly: false`,
+   `thermal_red_c: 95.0`, `vram_critical_pct: 95.0`.
+
+**Two notes on things that will NOT disarm it:**
+- The web UI **cannot** flip `auto_actuate` — it is schema-firewalled out of
+  `/api/settings` POST ([`runtime.rs:707,724`](../../src/runtime.rs#L707)). The wire
+  can neither arm nor disarm the killer. Console only.
+- The `GovernorArmed` alert is **unrelated** to `auto_actuate` — it tracks the TUI's
+  manual kill-confirm card ([`runtime.rs:508-517,752-763`](../../src/runtime.rs#L508-L517))
+  and is always Idle in headless mode. **Do not read it as an arming indicator.**
+
+---
+
+### §6 — Current host state (measured this session, for the record)
+
+- **21 AI-classified workloads**, every one `AICategory::Inference`: 6 × `claude`,
+  15 × ROS2/Nav2. Plus Gazebo (×3 `ruby`), `rviz2`, and the ROS2 daemon (`python3`)
+  which the wire does not list as workloads.
+- **CPU Package: 93.0 °C** (amber). Default `thermal_red_c` is 95.0 — **2 °C of
+  headroom**. This is the single biggest reason the draft config was unsafe.
+- GPU: RTX 3060, **12288 MB** total, 1087-2198 MB in use (graphics only —
+  `--query-compute-apps` is empty). Every workload reports `vram_mb: null`.
+- RAM: 31960 MB total, 33.7% used. Largest workload ~1.17%. Nowhere near 95%.
+- Running monitor: PID 123212, `comm`/`argv[0]` = **`edge`**, exe
+  `target/release/edge_monitor (deleted)` — an older build, rebuilt underneath it.
+  Reports `auto_actuate_readonly: false` and `config_path: null`, i.e. **currently
+  safe and running on built-in defaults.**
+
+**HARD STOP #1 and #5 both intact.** No governor code read-modified, no config
+written, no arming performed. This is READING the governor and WRITING a document —
+both permitted. **The operator reviews all of the above before applying anything.**
+
+---
+
+## [RESOLVED 2026-07-30] Rename `edge_monitor` → `raqib` — CAR landed, decisions in, atomic commit shipped
+
+* **CAR resolved**: `../ux_contract` is at v0.3.22 (past the promised v0.3.17 bump). The 3 strings — `errors::TERMINAL_TOO_SMALL`, `help::TITLE`, `mission::TEMPLATE` — now say "raqib"; the test at contract line 1421 asserts the new template verbatim. Consumer's path-dep picks it up automatically (constraint `>=0.3.14` is satisfied by 0.3.22).
+* **STOP #3 (Prometheus prefix)**: **KEPT `edge_monitor_*`** per operator decision + inspector lean (option a). Doc-note added at the top of `src/telemetry/exporter.rs` calling the prefix an EXTERNAL CONTRACT, pinning the decision so a future contributor doesn't "clean it up" and break every downstream Grafana dashboard + alerting rule. Coordinated migration deferred.
+* **Backward-compat**: raqib.toml first, then legacy `edge_monitor.toml` fallback for one release with a `tracing::warn!("loading LEGACY edge_monitor.toml (raqib rename) — run raqib init to migrate ...")`. Live-verified: an existing operator with `~/.config/edge_monitor/edge_monitor.toml` still boots cleanly on the raqib binary; the warn gives them a migration cue.
+* **Governor gate held**: `git diff HEAD src/governor/` after the rename touched exactly 4 lines — all doc-comment string edits (`edge_monitor.toml` → `raqib.toml` at 3 sites). Zero logic. HARD STOP #1 boundary intact.
+* **Landing**: single atomic commit on top of the header web-link. Binary `target/release/raqib` (11.2 MB). Library crate name stays `edge_monitor` so ~30 `use edge_monitor::…` imports across the tree don't churn.
+* **Tests + gate**: 1256 → 1259 (+3 onboarding legacy-fallback tests). Browser gate unchanged at 269/0. clippy clean.
+* **Original STOP block preserved below for the discovery-stage record — no active work item remains.**
+
+### Original STOP block (archived) — 2026-07-30
+
+**What I was asked to do:** rename the project's user-facing identity from `edge_monitor` to `raqib` — binary name, config file/paths, log paths, output strings, TUI+web parity. Dispatch is explicit: "cosmetic rename — NO governor logic change, NO behavior change, NO contract semantics change."
+
+**Why I stopped BEFORE landing anything:**
+
+Three user-facing strings that must change to complete the rename live in `../ux_contract`. HARD STOP #2 (contract change needed) fires cleanly. CLAUDE.md says stop and file a CAR — I stopped.
+
+### The blocking strings (contract crate — I cannot edit them)
+
+All in `/home/faiz/ux_contract/src/lib.rs`:
+
+| Line | Constant | Current text |
+|---|---|---|
+| 561 | `errors::TERMINAL_TOO_SMALL` | `"edge_monitor needs at least 80×24 terminal.\nCurrent size: {w}×{h}. Resize and press any key."` |
+| 574 | `help::TITLE` | `"edge_monitor — keyboard reference"` |
+| 852 | `mission::TEMPLATE` | `"edge_monitor · {n} workloads · {m} degraded · press ? for help"` |
+| 1421 | *(test asserting the exact mission template — moves with 852)* | mirror of 852 |
+
+Additional doc-comment mentions of `edge_monitor` in `../ux_contract/src/lib.rs:483,486,503`, `activity.rs:1`, `host_vitals.rs:211`, `recommendation.rs:325`. Doc-only, but a consistent rename should sweep them too.
+
+### 📋 Contract Amendment Request (CAR) — routed via Agent A
+
+**Bump:** ux_contract 0.3.16 → 0.3.17 (breaking string content, additive shape). Tag AND push (per the no-orphan-tag rule).
+
+**Rename these constants' CONTENTS (identifiers stay stable):**
+
+```rust
+// errors::TERMINAL_TOO_SMALL
+"raqib needs at least 80×24 terminal.\nCurrent size: {w}×{h}. Resize and press any key."
+
+// help::TITLE
+"raqib — keyboard reference"
+
+// mission::TEMPLATE
+"raqib · {n} workloads · {m} degraded · press ? for help"
+```
+
+The **placeholders** (`{n}`, `{m}`, `{w}`, `{h}`) stay verbatim — those are contract semantics and my consumer-side substitution code depends on them.
+
+**Test at line 1421** — the exact-string test:
+```rust
+assert_eq!(
+    text,
+    "raqib · 3 workloads · 1 degraded · press ? for help"  // was "edge_monitor · …"
+);
+```
+
+**Doc-comment mentions of `edge_monitor`** — recommend leaving as-is (they document the consumer-side history, not user-facing text). Or replace with `raqib` for a full sweep. Judgment call for Agent A.
+
+### 🛑 [STOP #3] Prometheus metric prefix — DECISION NEEDED
+
+`src/telemetry/exporter.rs` emits ~14 Prometheus metrics prefixed `edge_monitor_*` (`edge_monitor_processes_total`, `edge_monitor_gpu_watts`, `edge_monitor_governor_kills_total`, `edge_monitor_tick_count_total`, …). These are the metric identifiers external scrapers (Prometheus, Grafana, alerting rules) read by NAME.
+
+Renaming them from `edge_monitor_*` to `raqib_*` is a **breaking change for any external monitoring setup** — dashboards go blank, alerts stop firing until every downstream config is updated in lockstep. The dispatch HARD RULE 2 says "NO behavior change" and HARD RULE 4 says "no contract touch"; Prometheus metric names arguably are both external contract AND behavior.
+
+**Materially different approaches — dispatch does not settle this:**
+
+- **(a)** **KEEP `edge_monitor_*` prefix, document as external contract.** No external breakage; the metric names become an internal-vs-external asymmetry (binary is `raqib`, metrics still say `edge_monitor_`). Add a short block in the exporter's module doc pinning the decision so a future contributor doesn't "clean it up" accidentally.
+- **(b)** **RENAME to `raqib_*`.** Clean sweep, but a breaking change for any external monitoring config (Grafana dashboards, alerting rules, `prometheus.yml` scrape configs). Requires a coordinated release note + probably a deprecation window emitting BOTH prefixes.
+- **(c)** **Hybrid — emit both prefixes for one release**, then drop `edge_monitor_*` in the next minor. Doubles metric-emission cost per scrape (~2x line count in the /metrics response) but gives operators time to migrate.
+
+**Inspector lean: (a).** Prometheus metric names ARE external contract; renaming without coordination is exactly the "breaking change" the CLAUDE.md HARD RULE 2 forbids. The internal-vs-external asymmetry is honest and documented. Operator picks.
+
+### What I DID before stopping (reversible with `git reset` — nothing committed)
+
+Nothing. Working tree clean. No files touched. I stopped at the discovery stage per CLAUDE.md HARD STOP protocol.
+
+### What's safe to do meanwhile
+
+Nothing on this rename until the CAR + STOP #3 decision route. Every other autonomous item is human/hardware-blocked per the 2026-07-16 EXIT summary above. No hot HARD STOPs to prevent OTHER work — the loop can hit EXIT again if there's nothing else.
+
+### What I need from you
+
+1. **Route the CAR** (or edit `../ux_contract` yourself, bump to 0.3.17, tag `v0.3.17`, push tag + commit). Then I can pick up the new symbols on next `cargo build`.
+2. **Decide (a) / (b) / (c) for the Prometheus prefix.** My lean is (a) — keep as `edge_monitor_*` with a doc-note.
+3. **Confirm the backward-compat plan for config discovery**: dispatch RECOMMENDS reading `raqib.toml` first + falling back to `edge_monitor.toml` for one version with a deprecation log-line. My lean matches: **yes to fallback**. Existing users (including you) don't have to re-init on upgrade. Confirm or override.
+
+### Post-decision landing plan (once you route)
+
+1. Cargo.toml — add `[[bin]] name = "raqib"` (keep package `name = "edge_monitor"` internally so the library crate compiles under the same identifier and lib consumers don't have to churn; the binary target is what users see). Verify `cargo build --release` produces `target/release/raqib`.
+2. `src/onboarding.rs` — update discovery paths (`./raqib.toml`, `~/.config/raqib/raqib.toml`, `/etc/raqib/raqib.toml`), init target path, error message, DEFAULT_CONFIG_TOML header comment. **Add fallback:** if none of the new paths hit, try the equivalent `edge_monitor.toml` paths + emit `tracing::warn!("config found at legacy edge_monitor.toml — run `raqib init` to migrate")`.
+3. `src/config.rs` — `~/.local/share/edge_monitor` → `~/.local/share/raqib`, `~/.cache/edge_monitor/fingerprints.json` → `~/.cache/raqib/fingerprints.json`. Consider fallback reads at the old paths too.
+4. `src/main.rs` — clap `name = "edge_monitor"` → `"raqib"`, doc-comment references to the config file, `use edge_monitor::…` stays (internal lib import — no user impact).
+5. `src/ui/panels/help.rs` — the two `edge_monitor exec`/`edge_monitor.toml` references in help text → `raqib`.
+6. `src/exec_wrapper.rs` — 6 `eprintln!("edge_monitor: …")` lines → `raqib:`.
+7. `src/history/cli.rs` — 4 `edge_monitor history`/`edge_monitor exec` references in output → `raqib`.
+8. `src/compare.rs`, `src/storage/run_store.rs` — same, user-facing error text.
+9. `src/web/handlers.rs` — `<title>edge_monitor — frontend not built</title>` + `<h1>` → `raqib`.
+10. `src/telemetry/dispatcher.rs:80` — `.thread_name("edge_monitor-telemetry")` — thread name shows in `htop`/`ps`. Rename to `raqib-telemetry` (user-observable via process inspection).
+11. `src/ui/panels/top_processes.rs` — the self-exclusion tests reference `"edge_monitor"` as the process name; after the binary rename, the runtime's self-exclusion needs to match the new binary name. Update tests + the self-exclusion filter (`proc_full(42, "edge_monitor", …)` → `"raqib"`).
+12. Prometheus prefix — apply (a) / (b) / (c) per your decision.
+13. Update tests that assert the exact mission string (currently ~4 sites: header.rs unit tests, ux_contract's own test at 1421 — moves with the contract).
+14. Full gate: `cargo test --workspace --release` (target 1256), `cargo clippy --workspace --all-targets -- -D warnings`, `npm --prefix web run test:browser` (target 269).
+15. Update BOARD.md + JOURNAL.md with the rename landing.
+16. Governor diff verification: `git diff HEAD src/governor/` should touch ZERO logic — only the string comments at `policy.rs:57-58,116` mentioning `edge_monitor.toml` → `raqib.toml`. Confirmed at CLAUDE.md HARD STOP #1 gate.
+
+**Estimated LoC (post-CAR):** ~30–50 line edits across ~15 files. Atomic single commit. No breakage of gates.
+
+---
+
 ## [SAFETY-INVESTIGATION] Governor kill-target selection — PRE-ARM verification for live-fire test — 2026-07-29
 
 **READ-ONLY dispatch.** No code touched. Findings for the operator before arming `auto_actuate=true` on a host running real workloads (claude agent + ~20 ROS2 nodes).

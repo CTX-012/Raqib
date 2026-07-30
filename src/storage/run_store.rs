@@ -411,7 +411,7 @@ pub enum RunStoreError {
         "could not (de)serialise run-store data: {0}. \
          The failing record is skipped and the rest of the store \
          remains consistent; the on-disk format may have drifted \
-         from this binary's expectations — check the edge_monitor \
+         from this binary's expectations — check the raqib \
          version that wrote these records, or rotate the run-store \
          directory if it was produced by an incompatible build."
     )]
@@ -1344,7 +1344,7 @@ mod tests {
                 "restart",
                 "df -h",
                 "ls -ld",
-                "edge_monitor version",
+                "raqib version",
                 "next successful append",
             ]
             .iter()

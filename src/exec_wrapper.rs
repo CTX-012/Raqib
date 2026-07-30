@@ -132,7 +132,7 @@ pub async fn run_exec(
         .with_context(|| format!("spawning child: {:?}", command))?;
     let pid = child.id().unwrap_or(0);
     eprintln!(
-        "edge_monitor: launched {:?} as pid {} (label={})",
+        "raqib: launched {:?} as pid {} (label={})",
         command, pid, label
     );
 
@@ -178,15 +178,15 @@ pub async fn run_exec(
             // compile-time constant.
             unsafe {
                 if libc::kill(target_pid as libc::pid_t, libc::SIGINT) != 0 {
-                    eprintln!("edge_monitor: failed to forward SIGINT to child");
+                    eprintln!("raqib: failed to forward SIGINT to child");
                 }
             }
         } else {
-            eprintln!("edge_monitor: hard exit on second Ctrl-C");
+            eprintln!("raqib: hard exit on second Ctrl-C");
             std::process::exit(130);
         }
     }) {
-        eprintln!("edge_monitor: signal handler install failed: {}", e);
+        eprintln!("raqib: signal handler install failed: {}", e);
     }
 
     let status: ExitStatus = child.wait().await.context("child wait failed")?;
@@ -255,15 +255,15 @@ pub async fn run_exec(
                 let mut store =
                     store.with_keep_limit(Some(config.storage.keep_runs_per_model as usize));
                 if let Err(e) = store.append(record) {
-                    eprintln!("edge_monitor: failed to persist run record: {}", e);
+                    eprintln!("raqib: failed to persist run record: {}", e);
                 }
             }
-            Err(e) => eprintln!("edge_monitor: opening run store failed: {}", e),
+            Err(e) => eprintln!("raqib: opening run store failed: {}", e),
         }
     }
 
     eprintln!(
-        "edge_monitor: child exited (exit_code={:?}, signal={:?})",
+        "raqib: child exited (exit_code={:?}, signal={:?})",
         exit_code, signal
     );
     Ok(exit_code.unwrap_or_else(|| signal.map(|s| 128 + s).unwrap_or(1)))

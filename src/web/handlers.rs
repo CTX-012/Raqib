@@ -134,7 +134,7 @@ fn placeholder_html() -> impl IntoResponse {
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>edge_monitor — frontend not built</title>
+<title>raqib — frontend not built</title>
 <style>
 body { font-family: ui-monospace, monospace; max-width: 640px; margin: 4rem auto; padding: 0 1rem; color: #c0caf5; background: #1a1b26; }
 h1 { font-size: 1.3rem; color: #7aa2f7; }
@@ -144,7 +144,7 @@ pre { background: #24283b; padding: 1rem; border-radius: 5px; overflow-x: auto; 
 </style>
 </head>
 <body>
-<h1>edge_monitor web UI — frontend not built</h1>
+<h1>raqib web UI — frontend not built</h1>
 <p>The Rust backend is running (you're reading a response from it), but
 <code>web/dist/</code> was empty at compile time, so no Svelte bundle was
 embedded into the binary.</p>

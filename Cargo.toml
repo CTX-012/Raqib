@@ -1,15 +1,28 @@
 [package]
+# `name` is the LIBRARY CRATE identifier — internal Rust package
+# name, never surfaced to users. Kept as `edge_monitor` so the
+# ~30 `use edge_monitor::…` imports across the binary + tests +
+# integration crates stay stable through the raqib rename. The
+# BINARY output is renamed to `raqib` via the `[[bin]]` target
+# below.
 name = "edge_monitor"
 version = "1.3.2"
 edition = "2024"
 authors = ["Mohaaxa"]
 license = "MIT OR Apache-2.0"
-description = "Model-aware resource monitor and governor for edge AI workloads"
+description = "raqib — model-aware resource monitor and governor for edge AI workloads"
 readme = "README.md"
 homepage = "https://github.com/Mohaaxa/edge_monitor"
 repository = "https://github.com/Mohaaxa/edge_monitor"
 keywords = ["monitoring", "governor", "ai", "jetson", "edge"]
 categories = ["command-line-utilities", "os::linux-apis"]
+
+# raqib rename — the binary target ships as `raqib`. Users type
+# `raqib`, `raqib init`, `raqib history`, etc. The library crate
+# stays `edge_monitor` (see `[package] name` comment above).
+[[bin]]
+name = "raqib"
+path = "src/main.rs"
 
 [dependencies]
 sysinfo = "0.38"

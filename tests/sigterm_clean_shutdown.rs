@@ -21,7 +21,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 fn binary() -> &'static str {
-    env!("CARGO_BIN_EXE_edge_monitor")
+    env!("CARGO_BIN_EXE_raqib")
 }
 
 #[test]

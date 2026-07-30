@@ -1,10 +1,31 @@
 //! Prometheus exporter (latest.md Tier 2.3).
 //!
-//! Exposes `edge_monitor`'s own metrics over HTTP for fleet operators
-//! who already run Prometheus + Grafana. The exporter does NOT pull in
+//! Exposes raqib's own metrics over HTTP for fleet operators who
+//! already run Prometheus + Grafana. The exporter does NOT pull in
 //! the `prometheus` crate — the text exposition format is small and
 //! the dep would dwarf our hand-rolled equivalent. Instead we render
 //! to a `String` and serve it from a tokio TCP listener.
+//!
+//! ## Metric-name prefix (`edge_monitor_*`) — DELIBERATELY KEPT
+//!
+//! Metric identifiers below (`edge_monitor_processes_total`,
+//! `edge_monitor_gpu_watts`, `edge_monitor_governor_kills_total`, …)
+//! are `edge_monitor_*` — NOT `raqib_*`. They pre-date the raqib
+//! rename and act as an EXTERNAL CONTRACT: external Prometheus
+//! scrape configs, Grafana dashboards, and alerting rules read the
+//! metric names literally. Renaming them without coordination would
+//! blank dashboards and stop alerts firing until every downstream
+//! config was updated in lockstep — precisely the kind of
+//! breaking-change-in-behavior the rename dispatch's HARD RULE 2
+//! forbids ("NO behavior change").
+//!
+//! The internal-vs-external asymmetry (binary is `raqib`, metrics
+//! stay `edge_monitor_*`) is honest and documented. A future
+//! coordinated release may migrate the prefix via a dual-emit
+//! deprecation window — until then, do NOT rename these identifiers.
+//! Pinned by convention; a future clean-up sweep that "fixes" the
+//! prefix would break every downstream monitoring config in the
+//! field.
 //!
 //! Endpoint: `GET /metrics` returns 200 text/plain with the Prom body.
 //! Anything else returns 404. No keep-alive, no compression, no

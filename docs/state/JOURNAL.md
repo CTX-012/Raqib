@@ -84,3 +84,16 @@
 - Live verify: standalone rustc of the URL fn produced the expected 4 shapes (loopback/0.0.0.0/LAN-IP/custom-port). Full TUI render not exercised (no TTY in bash tool) but the render path is `header::render → mission_line_text_with_web(…, app.web_url())` — all three seams have unit tests.
 - Tests: 1245 → 1256 (+11). clippy clean. No web-render change (browser gate untouched).
 - Notes: TUI-only display change. No governor, no contract, no web/wire touch.
+
+## 2026-07-30 — rename `edge_monitor` → `raqib` (16-step landing, atomic)
+- ux_contract landed the 3 user-facing strings as raqib (v0.3.22, past the promised v0.3.17). Consumer's path-dep picked it up on next build; header.rs mission-line tests already assert the new template (linter-updated in a prior turn).
+- Cargo.toml — added `[[bin]] name = "raqib" path = "src/main.rs"`. Kept `[package] name = "edge_monitor"` so `use edge_monitor::…` imports (~30 sites) don't churn. Binary output: `target/release/raqib`.
+- Config discovery — `./raqib.toml` → `~/.config/raqib/raqib.toml` → `/etc/raqib/raqib.toml`, PLUS legacy fallback for one release: `edge_monitor.toml` at the same 3 shapes with a `tracing::warn!` deprecation cue pointing at `raqib init`. Live-verified.
+- Storage paths — `~/.local/share/edge_monitor` → `~/.local/share/raqib`, `~/.cache/edge_monitor/fingerprints.json` → `~/.cache/raqib/fingerprints.json`. Config-schema fields unchanged (only defaults).
+- User-facing strings swept — help.rs (`raqib exec`, `raqib.toml`), exec_wrapper.rs (6 `eprintln!("raqib: …")`), history/cli.rs (4 output refs), compare.rs, storage/run_store.rs, web/handlers.rs (title + h1), telemetry/dispatcher.rs (`raqib-telemetry` thread name), top_processes.rs test fixture.
+- Prometheus prefix — KEPT `edge_monitor_*` per operator decision (option a). Doc-note added to exporter.rs pinning the decision + explaining the external-contract semantic. Renaming would blank Grafana dashboards + stop alerts firing across every downstream config.
+- Integration-test env vars — `CARGO_BIN_EXE_edge_monitor` → `CARGO_BIN_EXE_raqib` in log_format.rs, sigterm_clean_shutdown.rs, cli_flags.rs.
+- Governor gate: `git diff HEAD src/governor/` — 4 lines total, all comment string edits at policy.rs. Zero logic touch. HARD STOP #1 held.
+- Live smoke: `raqib --help` (says raqib), no-config error (enumerates all 6 searched paths + names 3 fix commands), `raqib init` (writes to `$HOME/.config/raqib/raqib.toml`), legacy fallback (loads `edge_monitor.toml` + emits the WARN cue).
+- Tests: 1256 → 1259 (+3 onboarding legacy-fallback + disjointness tests). Gate 269/0 unchanged. clippy clean.
+- PENDING.md STOP #2 + STOP #3 block marked RESOLVED with a summary + archived the original discovery-stage block.

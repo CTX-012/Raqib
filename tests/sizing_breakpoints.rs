@@ -98,7 +98,7 @@ fn at_70x20_tier_is_too_small_and_buffer_shows_contract_template() {
     // resize." The contract template carries the literal text we
     // expect to find on screen.
     assert!(
-        buf.contains("edge_monitor needs at least 80"),
+        buf.contains("raqib needs at least 80"),
         "expected TERMINAL_TOO_SMALL template literal in buffer, got:\n{buf}"
     );
     assert!(

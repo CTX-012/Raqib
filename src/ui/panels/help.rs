@@ -48,7 +48,7 @@ pub fn render(f: &mut Frame, area: Rect, theme: &UiTheme) {
         Line::from(""),
         Line::styled("Limitations", body),
         Line::styled(
-            "  Ollama tokens/sec: requires `edge_monitor exec -- ollama …`",
+            "  Ollama tokens/sec: requires `raqib exec -- ollama …`",
             body,
         ),
         Line::styled(
@@ -71,7 +71,7 @@ pub fn render(f: &mut Frame, area: Rect, theme: &UiTheme) {
             Style::default().fg(theme.attention),
         )),
         Line::styled(
-            "  Enable via edge_monitor.toml:",
+            "  Enable via raqib.toml:",
             body,
         ),
         Line::styled(

@@ -141,6 +141,15 @@ pub struct App {
     /// SCOPED to events — this state carries NO trajectory samples.
     /// The web HistoryPage (D95) owns the curve.
     history_events_browse: Option<HistoryEventsBrowse>,
+    /// TUI header web-link — the operator-facing URL for the
+    /// currently-running web companion (e.g. `http://localhost:7070`).
+    /// `Some(_)` when the web server was spawned this session (main
+    /// builds it from the actual `--bind` + `--port` via
+    /// `panels::header::web_display_url` and passes it to `ui::run`);
+    /// `None` under `--no-web` OR when the web server failed to
+    /// bind — the header then omits the "web: …" tail (honesty: we
+    /// don't advertise a server that isn't running).
+    web_url: Option<String>,
 }
 
 /// v1.3.2 / CAR-D97 / DISPATCH 97 — TUI history-events browse state.
@@ -228,7 +237,20 @@ impl App {
             history_events_browse: None,
             top_processes_sort: TopProcessesSort::default(),
             dismissed_pid: None,
+            web_url: None,
         }
+    }
+
+    /// Set the web-companion URL the TUI header should advertise.
+    /// Called once by `ui::run` at startup. `None` (default) or an
+    /// explicit `set_web_url(None)` hides the "web: …" tail.
+    pub fn set_web_url(&mut self, url: Option<String>) {
+        self.web_url = url;
+    }
+
+    /// Read-back accessor used by the header render.
+    pub fn web_url(&self) -> Option<&str> {
+        self.web_url.as_deref()
     }
 
     // v1.1.11 / DISPATCH 36 — `alerts()`, `alerts_mut()`,

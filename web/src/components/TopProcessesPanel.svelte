@@ -129,10 +129,17 @@
             {/if}
         </div>
 
-        <!-- CPU sub-panel -->
+        <!--
+            CPU sub-panel. Header carries the `per-core` clarification:
+            the value is raw per-core (htop / top / ps convention —
+            N cores = N × 100 % max), so a `210 %` reading on a 4-core
+            box is honest, not a bug. Display-only pin; the arithmetic
+            is unchanged. TUI mirror lives at
+            `src/ui/panels/top_processes.rs::panel_title(Cpu)`.
+        -->
         <div data-testid="top-processes-cpu" class="border border-fg-muted/20 rounded p-3 bg-bg-raised/30">
             <h3 class="text-fg-muted text-xs uppercase tracking-wide mb-2 border-b border-fg-muted/20 pb-1">
-                Top processes (by CPU)
+                Top processes (by CPU %, per-core)
             </h3>
             {#if safe.by_cpu.length === 0}
                 <div class="text-fg-muted italic text-xs">—</div>

@@ -53,6 +53,7 @@ pub fn run(
     theme: UiTheme,
     web_tx: Option<tokio::sync::watch::Sender<crate::web::WireSnapshot>>,
     history_view: Option<crate::web::history::SharedHistoryView>,
+    web_url: Option<String>,
 ) -> anyhow::Result<Runtime> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -60,7 +61,7 @@ pub fn run(
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let result = run_loop(&mut terminal, &mut runtime, shutdown, theme, web_tx, history_view);
+    let result = run_loop(&mut terminal, &mut runtime, shutdown, theme, web_tx, history_view, web_url);
 
     // Always restore the terminal, even if the loop errored.
     disable_raw_mode().ok();
@@ -78,6 +79,7 @@ fn run_loop(
     theme: UiTheme,
     web_tx: Option<tokio::sync::watch::Sender<crate::web::WireSnapshot>>,
     history_view: Option<crate::web::history::SharedHistoryView>,
+    web_url: Option<String>,
 ) -> anyhow::Result<()> {
     let tick = Duration::from_millis(runtime.config().runtime.tick_interval_ms);
     let render = Duration::from_millis(runtime.config().runtime.render_interval_ms);
@@ -86,6 +88,10 @@ fn run_loop(
     // SSH bastions and `LANG=C` environments. Not re-evaluated on
     // resize.
     let mut app = App::with_symbol_set(symbols::detect());
+    // TUI header web-link — the URL for the currently-running web
+    // companion, or `None` under `--no-web`. Sits on `App` because
+    // the header render reads it via `app.web_url()`.
+    app.set_web_url(web_url);
 
     // L16 / §5 — live-detail card slot. Lives here in the run_loop
     // rather than on `App` to keep app.rs unchanged (its `handle_escape`

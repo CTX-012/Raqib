@@ -99,10 +99,16 @@ impl TopProcessesSort {
 /// `ux_contract::top_processes::PANEL_TITLE_BY_*` constants in
 /// v0.3.4 (CAR-11 pending). Title shape matches the §1 region 5
 /// example ("Top processes (by RAM)").
+///
+/// CPU variant carries a `per-core` clarification — the value is
+/// raw per-core (Linux convention: N cores = N × 100 % max, matching
+/// `htop` / `top` / `ps`). Without the label, a `210 %` reading on a
+/// 4-core box reads as a bug; with it, the operator sees "two cores
+/// pinned" at a glance. Display-only; the arithmetic is unchanged.
 pub(crate) fn panel_title(sort: TopProcessesSort) -> &'static str {
     match sort {
         TopProcessesSort::Ram => "Top processes (by RAM)",
-        TopProcessesSort::Cpu => "Top processes (by CPU)",
+        TopProcessesSort::Cpu => "Top processes (by CPU %, per-core)",
         TopProcessesSort::Vram => "Top processes (by VRAM)",
     }
 }
@@ -670,8 +676,27 @@ mod tests {
     #[test]
     fn panel_title_reflects_current_sort_order() {
         assert_eq!(panel_title(TopProcessesSort::Ram), "Top processes (by RAM)");
-        assert_eq!(panel_title(TopProcessesSort::Cpu), "Top processes (by CPU)");
+        assert_eq!(
+            panel_title(TopProcessesSort::Cpu),
+            "Top processes (by CPU %, per-core)",
+        );
         assert_eq!(panel_title(TopProcessesSort::Vram), "Top processes (by VRAM)");
+    }
+
+    /// The CPU header MUST carry a `per-core` clarification. The value
+    /// is raw per-core (matches htop / top / ps); >100 % is honest on
+    /// multi-core boxes and the label prevents "is this a bug?" reads.
+    /// Pinning the exact substring so a future header refactor can't
+    /// silently drop it.
+    #[test]
+    fn cpu_panel_title_labels_as_per_core() {
+        assert!(
+            panel_title(TopProcessesSort::Cpu).contains("per-core"),
+            "CPU panel header MUST contain `per-core` — the >100 % reading \
+             is intentional (raw per-core, htop-style) and the label is \
+             the honesty pin. Got: {:?}",
+            panel_title(TopProcessesSort::Cpu),
+        );
     }
 
     // ── DISPATCH 3-panel — VRAM-honest filter tests ─────────────────

@@ -315,6 +315,14 @@ fn main() -> anyhow::Result<()> {
             .clone()
             .unwrap_or_else(|| runtime.config().ui.theme.clone());
         let theme = edge_monitor::ui::theme::current_theme(&theme_name);
+        // TUI header web-link — build from the actual CLI bind + port
+        // ONLY when the web server was successfully spawned. If we
+        // fell through to `None` above (either `--no-web` OR a bind
+        // failure), the URL is `None` and the header omits the "web:"
+        // tail — honest: no advertising a server that isn't there.
+        let web_url_for_header = web_tx_for_loop.as_ref().map(|_| {
+            edge_monitor::ui::panels::header::web_display_url(cli.bind, cli.port)
+        });
         // Returns the runtime back to us so we can flush state on the way out.
         let runtime = ui::run(
             runtime,
@@ -322,6 +330,7 @@ fn main() -> anyhow::Result<()> {
             theme,
             web_tx_for_loop,
             Some(shared_history_view.clone()),
+            web_url_for_header,
         )?;
         tracing::info!("exited cleanly after {} ticks", runtime.state().tick_count);
     }

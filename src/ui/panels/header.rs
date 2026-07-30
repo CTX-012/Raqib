@@ -25,12 +25,57 @@ use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use ux_contract::mission;
 
 use crate::ui::app::App;
 use crate::ui::symbols::SymbolSet;
 use crate::ui::theme::UiTheme;
+
+/// TUI header web-link — build the operator-facing URL from the
+/// runtime bind address + port. Pure; unit-testable without a Frame.
+///
+/// ## Bind-address mapping
+///
+/// * `127.0.0.1` / `::1` → `localhost` (nicer text than the IP form;
+///   equivalent from any browser on the same host).
+/// * `0.0.0.0` / `::` → `localhost` too. The zero-address is not
+///   browsable — 0.0.0.0 is a "listen on every interface" bind, not
+///   a routable target. `localhost` always works when the server is
+///   bound to it, and telling the operator "http://0.0.0.0:7070"
+///   would send them to a dead URL. LAN operators who want the
+///   remote-reachable form already know their host IP; we don't
+///   over-engineer per-interface discovery here (would need
+///   `getifaddrs` + a heuristic for "primary" LAN — brittle).
+/// * Any other IP (a specific bind like `192.168.1.21`) → verbatim,
+///   since the operator explicitly chose that address and it IS
+///   browsable.
+///
+/// Always emits `http://` (not `https://`) — the web companion
+/// doesn't terminate TLS itself (the README's trusted-LAN
+/// assumption). Operators fronting it with a reverse proxy get
+/// their real URL via other channels; the TUI reflects the actual
+/// bind.
+pub fn web_display_url(bind: IpAddr, port: u16) -> String {
+    let host = match bind {
+        IpAddr::V4(v4) if v4 == Ipv4Addr::UNSPECIFIED || v4.is_loopback() => {
+            "localhost".to_string()
+        }
+        IpAddr::V6(v6) if v6 == Ipv6Addr::UNSPECIFIED || v6.is_loopback() => {
+            "localhost".to_string()
+        }
+        IpAddr::V6(v6) => {
+            // Bracketed IPv6-literal form per RFC 3986 §3.2.2 —
+            // "http://[fe80::1]:7070" not "http://fe80::1:7070"
+            // (the latter parses the trailing ':7070' as part of
+            // the address).
+            format!("[{v6}]")
+        }
+        IpAddr::V4(v4) => v4.to_string(),
+    };
+    format!("http://{host}:{port}")
+}
 
 /// F1 — minimum gap between the contract mission text and the wall
 /// clock. Below this we hide the clock entirely; rendering with one
@@ -56,7 +101,12 @@ pub fn render(
     n_workloads: usize,
     n_degraded: usize,
 ) {
-    let label = mission_line_text(app.symbol_set(), n_workloads, n_degraded);
+    let label = mission_line_text_with_web(
+        app.symbol_set(),
+        n_workloads,
+        n_degraded,
+        app.web_url(),
+    );
     let now_str = Local::now().format(TIME_FORMAT).to_string();
     let assembled = assemble_mission_line(&label, &now_str, area.width);
     // Leading space mirrors the contract's render — the §0 example
@@ -119,14 +169,32 @@ pub fn assemble_mission_line(label: &str, time_str: &str, area_width: u16) -> St
 /// swap the contract's `·` for the set's `header_separator()` so the
 /// header matches the rest of the TUI's glyph regime.
 pub fn mission_line_text(set: SymbolSet, n_workloads: usize, n_degraded: usize) -> String {
+    mission_line_text_with_web(set, n_workloads, n_degraded, None)
+}
+
+/// Same as [`mission_line_text`], but appends a "web: <url>" tail
+/// when `web_url` is `Some(_)`. When the web companion is disabled
+/// (`--no-web`), the caller passes `None` and the header renders
+/// the pre-dispatch shape — honesty: we don't advertise a server
+/// that isn't running.
+///
+/// The URL is appended using the same `SymbolSet::header_separator`
+/// so the ASCII fallback stays consistent (` - web: …` vs
+/// ` · web: …`).
+pub fn mission_line_text_with_web(
+    set: SymbolSet,
+    n_workloads: usize,
+    n_degraded: usize,
+    web_url: Option<&str>,
+) -> String {
     let text = mission::TEMPLATE
         .replace("{n}", &n_workloads.to_string())
         .replace("{m}", &n_degraded.to_string());
     let sep = set.header_separator();
-    if sep == "·" {
-        text
-    } else {
-        text.replace('·', sep)
+    let base = if sep == "·" { text } else { text.replace('·', sep) };
+    match web_url {
+        Some(url) => format!("{base} {sep} web: {url}"),
+        None => base,
     }
 }
 
@@ -216,6 +284,133 @@ mod tests {
                 assert!(c.is_ascii_digit(), "expected digit at index {i} of {now:?}");
             }
         }
+    }
+
+    // ── TUI header web-link — URL builder + mission-line-with-URL ────
+
+    /// Loopback IPs render as `localhost` — nicer text than `127.0.0.1`
+    /// and identical to any local browser. The two IPv4 loopback
+    /// forms (127.0.0.1 explicitly + Ipv4Addr::LOCALHOST) both hit
+    /// the same branch.
+    #[test]
+    fn web_display_url_loopback_ipv4_renders_localhost() {
+        let url = web_display_url(IpAddr::V4(Ipv4Addr::LOCALHOST), 7070);
+        assert_eq!(url, "http://localhost:7070");
+    }
+
+    /// 0.0.0.0 is a listen-on-any-interface bind, NOT a routable
+    /// target — a browser can't fetch http://0.0.0.0:PORT. Render as
+    /// `localhost` so the operator gets a URL that WORKS locally.
+    /// LAN operators know their host IP through other channels; we
+    /// don't over-engineer per-interface discovery here.
+    #[test]
+    fn web_display_url_zero_ipv4_renders_localhost_not_zero() {
+        let url = web_display_url(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 7070);
+        assert_eq!(url, "http://localhost:7070",
+            "0.0.0.0 must render as `localhost` (0.0.0.0 is not browsable)");
+    }
+
+    /// A specific bind IP (LAN address the operator chose) renders
+    /// verbatim — that IS the URL the operator meant.
+    #[test]
+    fn web_display_url_specific_ipv4_renders_verbatim() {
+        let url = web_display_url(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 21)), 7070);
+        assert_eq!(url, "http://192.168.1.21:7070");
+    }
+
+    /// Custom port propagates faithfully — operator ran `--port 7099`
+    /// and the header must reflect that, not the 7070 default.
+    #[test]
+    fn web_display_url_custom_port_appears_verbatim() {
+        let url = web_display_url(IpAddr::V4(Ipv4Addr::LOCALHOST), 7099);
+        assert_eq!(url, "http://localhost:7099");
+    }
+
+    /// IPv6 loopback (::1) + unspecified (::) both map to `localhost`.
+    #[test]
+    fn web_display_url_loopback_and_zero_ipv6_render_localhost() {
+        let loopback = web_display_url(IpAddr::V6(Ipv6Addr::LOCALHOST), 7070);
+        assert_eq!(loopback, "http://localhost:7070");
+        let unspec = web_display_url(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 7070);
+        assert_eq!(unspec, "http://localhost:7070");
+    }
+
+    /// A specific IPv6 address is bracketed per RFC 3986 §3.2.2 —
+    /// `http://[fe80::1]:7070` not `http://fe80::1:7070` (which
+    /// parses as a different address).
+    #[test]
+    fn web_display_url_specific_ipv6_is_bracketed() {
+        let addr = "fe80::1".parse::<Ipv6Addr>().unwrap();
+        let url = web_display_url(IpAddr::V6(addr), 7070);
+        assert_eq!(url, "http://[fe80::1]:7070");
+    }
+
+    /// The mission line WITH a web URL appends " <sep> web: <url>"
+    /// to the base template. Verifies the append happens on the
+    /// Unicode symbol set with the `·` separator.
+    #[test]
+    fn mission_line_with_web_url_appends_via_separator() {
+        let text = mission_line_text_with_web(
+            SymbolSet::Unicode,
+            3,
+            1,
+            Some("http://localhost:7070"),
+        );
+        assert!(
+            text.contains("press ? for help · web: http://localhost:7070"),
+            "URL must append after the help hint via the ` · ` separator; got {text:?}",
+        );
+    }
+
+    /// ASCII fallback: the `·` separator stays `-`, so the appended
+    /// URL uses ` - ` too (glyph consistency).
+    #[test]
+    fn mission_line_with_web_url_ascii_uses_hyphen_separator() {
+        let text = mission_line_text_with_web(
+            SymbolSet::Ascii,
+            3,
+            1,
+            Some("http://localhost:7070"),
+        );
+        assert!(
+            text.contains("press ? for help - web: http://localhost:7070"),
+            "ASCII fallback must use ` - ` throughout; got {text:?}",
+        );
+    }
+
+    /// `None` (the `--no-web` case) emits the pre-dispatch mission
+    /// line unchanged — no "web:" tail, no trailing separator. The
+    /// honesty rule: don't advertise a server that isn't running.
+    #[test]
+    fn mission_line_with_no_web_url_hides_the_tail() {
+        let text = mission_line_text_with_web(SymbolSet::Unicode, 3, 1, None);
+        assert!(
+            !text.contains("web:"),
+            "no web URL → no 'web:' tail; got {text:?}",
+        );
+        // And it MUST equal the classic mission_line_text output.
+        assert_eq!(text, mission_line_text(SymbolSet::Unicode, 3, 1));
+    }
+
+    /// The URL text is emitted as-is (no ANSI/OSC 8 escape junk in
+    /// the string). This pins the "plain-text URL" decision from
+    /// the dispatch STOP #1: ratatui can't cleanly emit OSC 8, and
+    /// visible escape garbage would be worse than a plain URL. Most
+    /// modern terminals auto-linkify bare URLs for Ctrl-click, so
+    /// the operator still gets clickability on iTerm2/Kitty/WezTerm/
+    /// GNOME Terminal/Konsole/Windows Terminal without escape bytes.
+    #[test]
+    fn mission_line_web_url_has_no_ansi_escape_bytes() {
+        let text = mission_line_text_with_web(
+            SymbolSet::Unicode,
+            0,
+            0,
+            Some("http://localhost:7070"),
+        );
+        assert!(
+            !text.contains('\x1b'),
+            "URL text must be plain (no ANSI/OSC 8 escapes — ratatui filters them + visible garbage would be worse than plain); got {text:?}",
+        );
     }
 
     #[test]

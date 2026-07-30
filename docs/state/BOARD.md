@@ -5,7 +5,7 @@
 ## HEAD
 - Branch: `l14-top-processes-sort`
 - Last tag baseline: `v1.3.2-46-gf91742a` + local landings through the top-processes 3-panel commit (unpushed)
-- Rust tests: 1245 / 0 fail (workspace; +8 onboarding tests on top of top-processes 3-panel)
+- Rust tests: 1256 / 0 fail (workspace; +11 header web-link tests on top of onboarding)
 - Browser render-gate: 269 / 0 (`npm --prefix web run test:browser`, unchanged — onboarding is CLI + config path, no web-render surface)
 - SCHEMA firewall: 5 / 5
 - ux_contract: v0.3.21 (sibling repo `../ux_contract` — DO NOT EDIT)

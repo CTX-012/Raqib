@@ -75,3 +75,12 @@
 - STOP #1 (auth default): took dispatch's recommended option (a) — `allow_no_auth = true` with prominent comment explaining LAN/remote risk. First-run friendliness > paper-secure default that requires token-hunting.
 - Tests: 1237 → 1245 (+8 onboarding). Gate 269/0 unchanged (no web surface touched). clippy clean.
 - Notes: no governor / kill-path / contract change. Starter config ships SAFE-OFF (auto_actuate=false + default_ai_action=Allow — killer inert on fresh install). HARD STOP #3 (auth-default choice) surfaced in dispatch text; operator's dispatch already recommended option (a), so no ratification round-trip needed.
+
+## 2026-07-30 — TUI header web-link (URL shown in mission line)
+- NEW `panels/header::web_display_url(IpAddr, u16)`: pure fn, tests pin: loopback IPv4/IPv6 → `localhost`, 0.0.0.0/:: → `localhost` (not the un-browsable zero-address), specific IPv4 → verbatim, IPv6 bracketed per RFC 3986. 6 unit tests.
+- NEW `mission_line_text_with_web(set, n, m, Option<&str>)`: appends ` <sep> web: <url>` to the mission template when the URL is `Some(_)`. `None` (--no-web / bind failure) omits the tail entirely — no advertising a server that isn't running. 4 tests + a 5th pin that the emitted text carries NO ANSI/OSC-8 escape bytes.
+- `App.web_url: Option<String>` field + setter/accessor. `ui::run` gained a `web_url: Option<String>` param; main builds it via `web_display_url(cli.bind, cli.port)` ONLY when `web_tx_for_loop.is_some()` (i.e. web spawn succeeded — not just when --no-web was absent — so a bind failure also hides the link).
+- STOP #1 (OSC 8 clickability): shipped PLAIN-TEXT URL. ratatui doesn't cleanly emit OSC 8 through its `Span` layer (either filters or renders visible escape junk depending on backend); the dispatch's explicit fallback says "readable-not-clickable is fine; visible garbage is NOT." Modern terminals (iTerm2, Kitty, WezTerm, GNOME Terminal, Konsole, Windows Terminal) auto-linkify bare URLs for Ctrl-click anyway, so plain text gets ~90% of clickability for free.
+- Live verify: standalone rustc of the URL fn produced the expected 4 shapes (loopback/0.0.0.0/LAN-IP/custom-port). Full TUI render not exercised (no TTY in bash tool) but the render path is `header::render → mission_line_text_with_web(…, app.web_url())` — all three seams have unit tests.
+- Tests: 1245 → 1256 (+11). clippy clean. No web-render change (browser gate untouched).
+- Notes: TUI-only display change. No governor, no contract, no web/wire touch.

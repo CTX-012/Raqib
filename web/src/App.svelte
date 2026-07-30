@@ -23,6 +23,11 @@
     import ConnectionPill from './components/ConnectionPill.svelte';
     import AlertsPanel from './components/AlertsPanel.svelte';
     import SettingsPanel from './components/SettingsPanel.svelte';
+    // DISPATCH 3-panel — Top processes side-by-side (RAM/VRAM/CPU).
+    // Parity with the TUI's render_three_panels — same three
+    // sub-panels, same ranking (server-side sorted via
+    // WireSnapshot::build_top_processes).
+    import TopProcessesPanel from './components/TopProcessesPanel.svelte';
     // v1.3.2 / DISPATCH 101 / PHASE 5 display modes step 2 —
     // HistoryPage no longer lives inside the dashboard grid as a
     // collapsible panel; it's now the exclusive content of the
@@ -165,6 +170,16 @@
             (VitalsPanel / WorkloadsPanel / ActivityFeed /
             SettingsPanel / footer) is byte-identical to D100.
         -->
+
+        <!--
+            DISPATCH 3-panel — Top processes side-by-side (RAM /
+            VRAM / CPU). Full-width row below the main grid, above
+            the settings toggle. TUI + web parity: this is the web
+            side of the TUI's `render_three_panels`.
+        -->
+        <div class="px-6 pb-4">
+            <TopProcessesPanel top_processes={$snapshot.top_processes} />
+        </div>
 
         <!-- v1.3.2 / DISPATCH 86 — settings panel. Collapsed by default.
              Tunes thresholds + sustain windows; auto_actuate stays

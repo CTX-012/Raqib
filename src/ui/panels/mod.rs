@@ -31,7 +31,7 @@ mod history_overlay;
 pub mod kill_confirm;
 pub mod live_detail;
 pub mod postmortem;
-mod top_processes;
+pub mod top_processes;
 mod vitals;
 pub mod workloads;
 
@@ -259,7 +259,13 @@ fn render_default(
         activity::render(f, layout[5], state, app, theme);
         render_footer(f, layout[6], app, theme);
     } else {
-        top_processes::render(f, layout[5], state, app.top_processes_sort(), theme);
+        // DISPATCH 3-panel — expanded from the single cycled-by-`t`
+        // panel to three side-by-side sub-panels (RAM / VRAM / CPU),
+        // matching the operator's dispatch. The `t` key + the
+        // `TopProcessesSort` cycle state are still available on
+        // `App` for backwards compatibility, but this render path
+        // ignores them — all three metrics are always visible.
+        top_processes::render_three_panels(f, layout[5], state, theme);
         // layout[6] is the FIX-1 spacer (top → activity) — unrendered.
         activity::render(f, layout[7], state, app, theme);
         render_footer(f, layout[8], app, theme);

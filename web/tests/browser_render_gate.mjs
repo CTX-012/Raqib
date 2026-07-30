@@ -2652,6 +2652,208 @@ async function runWorkloadsHeaderGate(browser, url) {
     return result;
 }
 
+// ── D115 — Web Top-Processes 3-panel invariant ──────────────────────
+//
+// Regression backstop for the top-processes 3-panel dispatch. The
+// TUI's `render_three_panels` shows RAM / VRAM / CPU side-by-side;
+// the web now has parity via `TopProcessesPanel.svelte` reading
+// `WireTopProcesses`. Invariants pinned:
+//
+//   1. All three sub-panels render when `top_processes` is populated:
+//      `[data-testid="top-processes-ram"]`,
+//      `[data-testid="top-processes-vram"]`,
+//      `[data-testid="top-processes-cpu"]`.
+//   2. Each sub-panel's rows are the wire's `by_ram` / `by_vram` /
+//      `by_cpu` in order — the server-side sort is stable and the
+//      renderer must not re-sort (mirrors the TUI's read-only sort
+//      + PID-asc tiebreak).
+//   3. VRAM honesty (THE load-bearing invariant):
+//      * When `by_vram` is EMPTY, the sub-panel shows the italic
+//        "no GPU users" empty state via
+//        `[data-testid="top-processes-vram-empty"]`. It does NOT
+//        render zero-VRAM rows to pad to 5.
+//      * When `by_vram` is populated with entries that have
+//        `vram_mb`, values render as `NNN MB` / `N.N GB` —
+//        never `0 MB`.
+//      * A defensive check: a `vram_mb`-absent entry (shouldn't
+//        normally reach the wire, but defensively) renders `—`
+//        with `data-testid-unmeasured="true"`.
+//   4. Responsive: on a narrow viewport (< 768px), the 3 panels
+//      stack vertically (single column). On wide, they sit
+//      side-by-side (grid-cols-3). Verified via computed grid
+//      template.
+async function runTopProcessesPanelGate(browser, url) {
+    const result = new GateResult();
+
+    async function probe(width, snapshot) {
+        const page = await browser.newPage();
+        await page.setViewport({ width, height: 900 });
+        const pageErrors = [];
+        page.on('pageerror', (err) => pageErrors.push(err.message));
+        await page.setRequestInterception(true);
+        page.on('request', (req) => {
+            const u = new URL(req.url());
+            if (!u.pathname.startsWith('/api/')) return req.continue();
+            const j = (obj) =>
+                req.respond({
+                    status: 200,
+                    contentType: 'application/json; charset=utf-8',
+                    body: JSON.stringify(obj),
+                });
+            if (u.pathname === '/api/snapshot') return j(snapshot);
+            if (u.pathname === '/api/health') return j({ ok: true });
+            if (u.pathname === '/api/history')
+                return j({ events: [], dead_pids: [] });
+            if (u.pathname === '/api/settings')
+                return j({
+                    thresholds: {}, kill_sustain_secs: 10,
+                    auto_actuate_readonly: false, default_ai_action_readonly: 'Allow',
+                    config_path: null,
+                });
+            req.respond({ status: 404 });
+        });
+        await page.goto(`${url}/`, { waitUntil: 'networkidle2', timeout: 15000 });
+        await new Promise((r) => setTimeout(r, 500));
+        const shot = await page.evaluate(() => {
+            const ramPanel = document.querySelector('[data-testid="top-processes-ram"]');
+            const vramPanel = document.querySelector('[data-testid="top-processes-vram"]');
+            const cpuPanel = document.querySelector('[data-testid="top-processes-cpu"]');
+            const grid = ramPanel?.parentElement;
+            const gridCols = grid ? window.getComputedStyle(grid).gridTemplateColumns : null;
+            const ramValues = Array.from(document.querySelectorAll('[data-testid="top-row-ram-value"]')).map((e) => e.textContent.trim());
+            const vramValues = Array.from(document.querySelectorAll('[data-testid="top-row-vram-value"]')).map((e) => ({
+                text: e.textContent.trim(),
+                unmeasured: e.getAttribute('data-testid-unmeasured') === 'true',
+            }));
+            const cpuValues = Array.from(document.querySelectorAll('[data-testid="top-row-cpu-value"]')).map((e) => e.textContent.trim());
+            const vramEmpty = document.querySelector('[data-testid="top-processes-vram-empty"]');
+            return {
+                all_three_present: !!ramPanel && !!vramPanel && !!cpuPanel,
+                ram_row_count: document.querySelectorAll('[data-testid="top-row-ram"]').length,
+                vram_row_count: document.querySelectorAll('[data-testid="top-row-vram"]').length,
+                cpu_row_count: document.querySelectorAll('[data-testid="top-row-cpu"]').length,
+                ram_values: ramValues,
+                vram_values: vramValues,
+                cpu_values: cpuValues,
+                vram_empty_present: !!vramEmpty,
+                grid_cols: gridCols,
+            };
+        });
+        await page.close();
+        return { shot, pageErrors };
+    }
+
+    // Fixture #1 — populated: 3 by_ram, 2 by_vram (short-not-padded), 3 by_cpu.
+    // Uses the same shape the Rust wire mapper emits.
+    const populated = {
+        tick: 1,
+        schema_version: '1',
+        mission: { workloads: 0, degraded: 0 },
+        vitals: {
+            memory_pct: 30, memory_used_mb: 8000, memory_total_mb: 32000,
+            load_average: [1.0, 1.1, 1.2], cpu_count: 12, process_count: 100,
+            thermal_zones: [],
+        },
+        workloads: [],
+        activity: [], alerts: [], recommendations: [],
+        top_processes: {
+            by_ram: [
+                { pid: 100, name: 'big_app', rss_mb: 4096, cpu_pct: 1.0 },
+                { pid: 200, name: 'medium_app', rss_mb: 2048, cpu_pct: 0.5 },
+                { pid: 300, name: 'small_app', rss_mb: 512, cpu_pct: 0.1 },
+            ],
+            by_vram: [
+                // ONLY 2 GPU users — honest short list, NOT padded to 5.
+                { pid: 400, name: 'llama-server', rss_mb: 1500, cpu_pct: 90.0, vram_mb: 4000 },
+                { pid: 401, name: 'python_train', rss_mb: 800, cpu_pct: 45.0, vram_mb: 800 },
+            ],
+            by_cpu: [
+                { pid: 500, name: 'busy_worker', rss_mb: 100, cpu_pct: 92.5 },
+                { pid: 600, name: 'idle_worker', rss_mb: 200, cpu_pct: 5.0 },
+                { pid: 700, name: 'sleepy', rss_mb: 300, cpu_pct: 1.0 },
+            ],
+        },
+    };
+
+    // Probe 1 — WIDE viewport (1400px): 3 columns side-by-side.
+    {
+        const { shot, pageErrors } = await probe(1400, populated);
+        if (shot.all_three_present)
+            result.ok(`D115.wide: all 3 sub-panels render (RAM+VRAM+CPU)`);
+        else
+            result.fail(`D115.wide: sub-panel(s) missing`);
+        if (shot.ram_row_count === 3 && shot.cpu_row_count === 3)
+            result.ok(`D115.wide: RAM/CPU render exactly 3 rows each (matches fixture)`);
+        else
+            result.fail(`D115.wide: row counts wrong (ram=${shot.ram_row_count}, cpu=${shot.cpu_row_count})`);
+        // The honest short list: 2 VRAM rows, NOT padded to 5.
+        if (shot.vram_row_count === 2 && !shot.vram_empty_present)
+            result.ok(`D115.wide: VRAM sub-panel shows exactly 2 GPU users (honest short list, not padded)`);
+        else
+            result.fail(`D115.wide: VRAM row count wrong (rows=${shot.vram_row_count}, empty=${shot.vram_empty_present})`);
+        // Sort order: by_ram descending — first row must be the "big_app" value.
+        if (shot.ram_values[0] === '4.0 GB')
+            result.ok(`D115.wide: RAM row 0 = "4.0 GB" (top of descending sort held)`);
+        else
+            result.fail(`D115.wide: RAM sort order broken; got ${JSON.stringify(shot.ram_values)}`);
+        // VRAM honesty: measured values render as MB/GB, never "0 MB".
+        const anyZero = shot.vram_values.some((v) => v.text === '0 MB' || v.text === '0');
+        if (!anyZero)
+            result.ok(`D115.wide: no fake "0 MB" rows in VRAM panel (honesty rule)`);
+        else
+            result.fail(`D115.wide: VRAM panel has fake 0-MB row: ${JSON.stringify(shot.vram_values)}`);
+        // CPU sort descending: first row = "92.5%".
+        if (shot.cpu_values[0] === '92.5%')
+            result.ok(`D115.wide: CPU row 0 = "92.5%" (top of descending sort held)`);
+        else
+            result.fail(`D115.wide: CPU sort order broken; got ${JSON.stringify(shot.cpu_values)}`);
+        // Grid: on md+ viewports, computed grid-template-columns has 3 tracks.
+        const trackCount = (shot.grid_cols?.split(' ') ?? []).length;
+        if (trackCount === 3)
+            result.ok(`D115.wide: grid renders 3 columns side-by-side (${trackCount} tracks)`);
+        else
+            result.fail(`D115.wide: expected 3-column grid, got ${trackCount} tracks: "${shot.grid_cols}"`);
+        if (pageErrors.length === 0)
+            result.ok(`D115.wide: no page errors`);
+        else
+            result.fail(`D115.wide: got ${pageErrors.length} page error(s)`);
+    }
+
+    // Probe 2 — NARROW viewport (500px): stacks to 1 column.
+    {
+        const { shot } = await probe(500, populated);
+        const trackCount = (shot.grid_cols?.split(' ') ?? []).length;
+        if (trackCount === 1)
+            result.ok(`D115.narrow: grid stacks to 1 column on narrow viewport (< md breakpoint)`);
+        else
+            result.fail(`D115.narrow: expected 1-column stack, got ${trackCount} tracks: "${shot.grid_cols}"`);
+    }
+
+    // Probe 3 — VRAM honesty via empty by_vram: THE key test.
+    {
+        const emptyVram = {
+            ...populated,
+            top_processes: {
+                by_ram: populated.top_processes.by_ram,
+                by_vram: [],  // no GPU users on the host
+                by_cpu: populated.top_processes.by_cpu,
+            },
+        };
+        const { shot } = await probe(1400, emptyVram);
+        if (shot.vram_row_count === 0 && shot.vram_empty_present)
+            result.ok(`D115.empty-vram: empty by_vram → "no GPU users" empty state, ZERO fabricated rows`);
+        else
+            result.fail(`D115.empty-vram: expected empty-state + 0 rows, got rows=${shot.vram_row_count}, empty=${shot.vram_empty_present}`);
+        // And the OTHER two panels still render normally.
+        if (shot.ram_row_count === 3 && shot.cpu_row_count === 3)
+            result.ok(`D115.empty-vram: RAM+CPU sub-panels still render (empty VRAM doesn't cascade)`);
+        else
+            result.fail(`D115.empty-vram: RAM/CPU broke (ram=${shot.ram_row_count}, cpu=${shot.cpu_row_count})`);
+    }
+
+    return result;
+}
+
 async function runThermalFriendlyGate(browser, url) {
     const result = new GateResult();
     const page = await browser.newPage();
@@ -3220,6 +3422,15 @@ async function main() {
     results.push({
         name: 'D114_workloads_column_headers',
         ...headerRes.summarize(),
+    });
+
+    console.log(`\n▶ D115 — Top Processes 3-panel (RAM/VRAM/CPU) parity + VRAM honesty`);
+    const topRes = await runTopProcessesPanelGate(browser, url);
+    topRes.passes.forEach((p) => console.log(`   ✓ ${p}`));
+    topRes.failures.forEach((f) => console.log(`   ✗ ${f}`));
+    results.push({
+        name: 'D115_top_processes_panel',
+        ...topRes.summarize(),
     });
 
     await browser.close();

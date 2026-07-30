@@ -50,6 +50,13 @@ export interface WireSnapshot {
     // manual TUI `k` keybinding flow (the disclaimer reminds
     // them: "Suggestion only — press k to act manually").
     recommendations?: WireRecommendation[];
+    // DISPATCH 3-panel — top-N processes projected three ways
+    // (RAM / VRAM / CPU) for the standalone Top Processes panel.
+    // Populated by the Rust wire mapper via
+    // `WireSnapshot::build_top_processes` (reads the same sort fns
+    // the TUI uses, so TUI + web stay pinned to identical rankings).
+    // Optional for backward compat with pre-bump payloads.
+    top_processes?: WireTopProcesses;
 }
 
 export interface WireAlertEntry {
@@ -397,6 +404,37 @@ export interface WireDeadPidEntry {
 export interface WireHistorySnapshot {
     events: WireHistoryEvent[];
     dead_pids: WireDeadPidEntry[];
+}
+
+/**
+ * DISPATCH 3-panel — one entry in a top-N process projection.
+ * Wire-mirror of `AnnotatedProcess` fields the Top Processes panel
+ * needs. `vram_mb` is absent (undefined) for CPU-only processes —
+ * NOT `null`, NOT `0`. Renderers must treat absence as unmeasured
+ * and show "—", matching the VRAM-honesty rule.
+ */
+export interface WireTopProcess {
+    pid: number;
+    name: string;
+    rss_mb: number;
+    cpu_pct: number;
+    // Absent for processes with no measured VRAM (CPU-only,
+    // driver-unloaded, NVML not reporting for this PID). Never
+    // coerced to 0. Renderers show "—" when absent.
+    vram_mb?: number;
+}
+
+/**
+ * DISPATCH 3-panel — three top-N projections. `by_vram` is
+ * VRAM-honest (filters out unmeasured entries before truncation
+ * on the Rust side) so its length may be shorter than
+ * `by_ram.length` / `by_cpu.length` when few processes hold GPU
+ * allocations. An honest short list beats a padded fake one.
+ */
+export interface WireTopProcesses {
+    by_ram: WireTopProcess[];
+    by_vram: WireTopProcess[];
+    by_cpu: WireTopProcess[];
 }
 
 /** Empty snapshot used as the initial store value. */

@@ -37,7 +37,7 @@
 //! lands as a fourth fn without bloating one branch.
 
 use ratatui::Frame;
-use ratatui::layout::Rect;
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 
 use crate::ui::theme::UiTheme;
@@ -186,6 +186,44 @@ pub(crate) fn top_n_by_vram(
     procs
 }
 
+/// DISPATCH 3-panel — VRAM-honest projection for the standalone
+/// "Top by VRAM" panel. Filters OUT processes with
+/// `vram_bytes == None` BEFORE truncation, so the returned list
+/// contains ONLY processes that reported real VRAM. If fewer than
+/// `n` processes have measurable VRAM, the list is SHORTER than
+/// `n` — the panel then renders an honest short list (or an
+/// "no GPU users" empty state) instead of fabricating `0 MB`
+/// entries to pad to 5.
+///
+/// Contrast with [`top_n_by_vram`], which places `None` entries
+/// at the end and truncates to `n` — that behaviour is correct for
+/// the legacy cycle-through panel (`t` key), where the VRAM view
+/// falls back to name+RSS+CPU columns for the None-tail. The
+/// standalone panel needs the honest filter because its rendered
+/// value column IS the VRAM MB itself, and rendering `0 MB` for
+/// unmeasured VRAM would lie in the exact shape the CLAUDE.md
+/// VRAM-honesty rule forbids.
+pub(crate) fn top_n_by_vram_honest(
+    state: &RuntimeState,
+    self_pid: u32,
+    n: usize,
+) -> Vec<&AnnotatedProcess> {
+    let mut procs: Vec<&AnnotatedProcess> = state
+        .annotated
+        .iter()
+        .filter(|p| p.pid != self_pid)
+        .filter(|p| p.vram_bytes.is_some())
+        .collect();
+    // Both are Some by construction; sort descending by value, PID-asc tiebreak.
+    procs.sort_by(|a, b| {
+        let av = a.vram_bytes.unwrap_or(0);
+        let bv = b.vram_bytes.unwrap_or(0);
+        bv.cmp(&av).then(a.pid.cmp(&b.pid))
+    });
+    procs.truncate(n);
+    procs
+}
+
 fn format_rss(rss_mb: u64) -> String {
     if rss_mb >= 1024 {
         let gb = rss_mb as f64 / 1024.0;
@@ -257,6 +295,142 @@ pub fn render(
         .block(block)
         .style(Style::default().fg(theme.foreground));
     f.render_widget(list, area);
+}
+
+/// DISPATCH 3-panel — minimum column width (chars) before we
+/// stack vertically instead of splitting horizontally. Chosen so
+/// each column has room for a truncated-16 name + a padded value
+/// slot + the panel border overhead — anything narrower renders
+/// as garbage. Empirically the standard 100-col dashboard gives
+/// each column ~32-33 chars, which is comfortably above this.
+const MIN_HORIZONTAL_COL_WIDTH: u16 = 28;
+
+/// DISPATCH 3-panel — top-N-by-VRAM projection for the standalone
+/// 3-panel view. Uses the VRAM-honest filter
+/// ([`top_n_by_vram_honest`]) so the VRAM column never renders a
+/// lying `0 MB`.
+///
+/// Row shape: `<name-16>  <value>`. Value formatting depends on
+/// the sort: RAM/VRAM as MB (or GB above 1024), CPU as `NNN.N%`.
+fn top_row_for(proc: &AnnotatedProcess, sort: TopProcessesSort) -> String {
+    let name = truncate(&proc.name, 16);
+    match sort {
+        TopProcessesSort::Ram => format!("{:<16}  {:>10}", name, format_rss(proc.rss_mb)),
+        TopProcessesSort::Cpu => format!("{:<16}  {:>6.1}%", name, proc.cpu_pct),
+        TopProcessesSort::Vram => {
+            // Callers must have already filtered to Some(vram) via
+            // top_n_by_vram_honest — this format arm always has a
+            // measured value to render. Defensive fallback to `—`
+            // preserves the honesty rule if a future refactor
+            // accidentally lets a None through.
+            let mb_str = match proc.vram_bytes {
+                Some(bytes) => {
+                    let mb = bytes / (1024 * 1024);
+                    format_rss(mb)
+                }
+                None => "     — MB".to_string(),
+            };
+            format!("{:<16}  {:>10}", name, mb_str)
+        }
+    }
+}
+
+/// Render one of the three side-by-side sub-panels into `area`.
+/// Shared between the wide-tier horizontal split and the narrow-
+/// tier vertical stack. `procs` is already sorted+truncated by the
+/// caller (via [`top_n_by_rss`] / [`top_n_by_vram_honest`] /
+/// [`top_n_by_cpu`]).
+fn render_sub_panel(
+    f: &mut Frame,
+    area: Rect,
+    theme: &UiTheme,
+    sort: TopProcessesSort,
+    procs: &[&AnnotatedProcess],
+) {
+    let block = panel_block(panel_title(sort), false, theme);
+    if procs.is_empty() {
+        // Honest empty state — matches the panel-empty branch in
+        // `render()`. Used by the VRAM column on this operator's
+        // dev host (no process holds GPU allocations under normal
+        // load, so the honest short list is the empty list).
+        let empty_label = match sort {
+            TopProcessesSort::Vram => "  no GPU users",
+            TopProcessesSort::Ram => "  —",
+            TopProcessesSort::Cpu => "  —",
+        };
+        let lines = vec![
+            Line::from(""),
+            Line::from(Span::styled(
+                empty_label,
+                Style::default().fg(theme.muted).add_modifier(Modifier::ITALIC),
+            )),
+        ];
+        let paragraph = Paragraph::new(lines).block(block).wrap(Wrap { trim: false });
+        f.render_widget(paragraph, area);
+        return;
+    }
+    let items: Vec<ListItem<'_>> = procs
+        .iter()
+        .map(|p| ListItem::new(top_row_for(p, sort)))
+        .collect();
+    let list = List::new(items)
+        .block(block)
+        .style(Style::default().fg(theme.foreground));
+    f.render_widget(list, area);
+}
+
+/// DISPATCH 3-panel — render RAM / VRAM / CPU top-5 as three
+/// side-by-side sub-panels. Replaces the single-panel cycled-by-t
+/// render at the caller site in `ui/panels/mod.rs`.
+///
+/// ## Layout
+///
+/// * Wide (area.width ≥ 3 × [`MIN_HORIZONTAL_COL_WIDTH`]): three
+///   equal columns, RAM | VRAM | CPU left-to-right.
+/// * Narrow (area.width < that): stack VERTICALLY (three rows).
+///   Prevents each sub-panel's rows from truncating to
+///   unreadability at small widths.
+///
+/// The horizontal-vs-stacked choice is layout-only; row content
+/// and sort order are identical either way.
+///
+/// ## VRAM honesty
+///
+/// The VRAM column uses [`top_n_by_vram_honest`] — processes
+/// without a measured `vram_bytes` are DROPPED before truncation.
+/// If fewer than [`MAX_VISIBLE_ROWS`] processes hold VRAM, the
+/// column renders a shorter list; if none do, the column renders
+/// an italic "no GPU users" empty-state. Never a fabricated
+/// `0 MB` row (CLAUDE.md VRAM-honesty rule).
+pub fn render_three_panels(
+    f: &mut Frame,
+    area: Rect,
+    state: &RuntimeState,
+    theme: &UiTheme,
+) {
+    let self_pid = std::process::id();
+    let by_ram = top_n_by_rss(state, self_pid, MAX_VISIBLE_ROWS);
+    let by_vram = top_n_by_vram_honest(state, self_pid, MAX_VISIBLE_ROWS);
+    let by_cpu = top_n_by_cpu(state, self_pid, MAX_VISIBLE_ROWS);
+
+    let go_horizontal = area.width >= MIN_HORIZONTAL_COL_WIDTH.saturating_mul(3);
+    let direction = if go_horizontal {
+        Direction::Horizontal
+    } else {
+        Direction::Vertical
+    };
+    let cols = Layout::default()
+        .direction(direction)
+        .constraints([
+            Constraint::Ratio(1, 3),
+            Constraint::Ratio(1, 3),
+            Constraint::Ratio(1, 3),
+        ])
+        .split(area);
+
+    render_sub_panel(f, cols[0], theme, TopProcessesSort::Ram, &by_ram);
+    render_sub_panel(f, cols[1], theme, TopProcessesSort::Vram, &by_vram);
+    render_sub_panel(f, cols[2], theme, TopProcessesSort::Cpu, &by_cpu);
 }
 
 fn truncate(s: &str, max: usize) -> String {
@@ -498,5 +672,76 @@ mod tests {
         assert_eq!(panel_title(TopProcessesSort::Ram), "Top processes (by RAM)");
         assert_eq!(panel_title(TopProcessesSort::Cpu), "Top processes (by CPU)");
         assert_eq!(panel_title(TopProcessesSort::Vram), "Top processes (by VRAM)");
+    }
+
+    // ── DISPATCH 3-panel — VRAM-honest filter tests ─────────────────
+
+    /// The standalone Top-by-VRAM panel FILTERS OUT `None` entries
+    /// before truncation, so the returned list is at most `n` AND
+    /// every returned entry has `vram_bytes.is_some()`. Contrast
+    /// with `top_n_by_vram` (legacy cycle) which places `None` at
+    /// the end and truncates — that surfaces None-tail entries with
+    /// no VRAM value to render, which would force a lying `0 MB` in
+    /// the standalone panel's VRAM column.
+    #[test]
+    fn top_n_by_vram_honest_drops_none_entries() {
+        // 4 processes: 2 with GPU allocations, 2 CPU-only.
+        let state = state_with(vec![
+            proc_full(1, "cpu_only_a", 8_000, 0.0, None),
+            proc_full(2, "gpu_big", 1_000, 0.0, Some(4_000_000_000)),
+            proc_full(3, "cpu_only_b", 4_000, 0.0, None),
+            proc_full(4, "gpu_small", 500, 0.0, Some(800_000_000)),
+        ]);
+        let top = top_n_by_vram_honest(&state, 9999, 5);
+        // Length must be exactly 2 — the two GPU users, NOT padded
+        // to 5 with the CPU-only pair. An honest short list beats
+        // a padded fake one.
+        assert_eq!(top.len(), 2, "must not pad with None-vram entries");
+        let pids: Vec<u32> = top.iter().map(|p| p.pid).collect();
+        assert_eq!(pids, vec![2, 4], "descending by VRAM: 4GB then 800MB");
+        // Explicit: every returned entry is Some.
+        assert!(top.iter().all(|p| p.vram_bytes.is_some()));
+    }
+
+    /// Zero GPU users on the host → empty list, NOT a list of Nones.
+    /// This is the operator's dev-host reality (CPU-only agents +
+    /// ROS2 stack; the driver is loaded but no process holds VRAM).
+    #[test]
+    fn top_n_by_vram_honest_empty_when_no_gpu_users() {
+        let state = state_with(vec![
+            proc_full(1, "claude", 400, 5.0, None),
+            proc_full(2, "ros2", 44, 0.0, None),
+            proc_full(3, "robot_state_pub", 21, 8.0, None),
+        ]);
+        let top = top_n_by_vram_honest(&state, 9999, 5);
+        assert!(top.is_empty(), "no GPU users → honest empty list");
+    }
+
+    /// Descending sort holds among GPU users; PID-ascending
+    /// tiebreak when two processes hold equal VRAM (stable
+    /// rendering across ticks).
+    #[test]
+    fn top_n_by_vram_honest_tiebreaks_by_pid_ascending() {
+        let state = state_with(vec![
+            proc_full(50, "gpu_second", 1_000, 0.0, Some(1_000_000_000)),
+            proc_full(10, "gpu_first", 1_000, 0.0, Some(1_000_000_000)),
+        ]);
+        let top = top_n_by_vram_honest(&state, 9999, 5);
+        let pids: Vec<u32> = top.iter().map(|p| p.pid).collect();
+        assert_eq!(pids, vec![10, 50], "equal VRAM → PID-ascending tiebreak");
+    }
+
+    /// Self-PID exclusion mirrors the other top_n_by_* fns — the
+    /// edge_monitor's own VRAM (if any; nvml_wrapper is off-GPU) is
+    /// never surfaced in the operator-facing panel.
+    #[test]
+    fn top_n_by_vram_honest_excludes_self_pid() {
+        let state = state_with(vec![
+            proc_full(42, "edge_monitor", 50, 0.0, Some(2_000_000_000)),
+            proc_full(100, "python_train", 1_000, 0.0, Some(1_000_000_000)),
+        ]);
+        let top = top_n_by_vram_honest(&state, /* self_pid */ 42, 5);
+        let pids: Vec<u32> = top.iter().map(|p| p.pid).collect();
+        assert_eq!(pids, vec![100], "self-PID 42 must be filtered even if it holds VRAM");
     }
 }

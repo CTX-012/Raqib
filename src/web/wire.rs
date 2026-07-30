@@ -103,6 +103,16 @@ pub struct WireSnapshot {
     /// contract's discriminator-only `SuggestedAction` enum.
     #[serde(default)]
     pub recommendations: Vec<WireRecommendation>,
+    /// DISPATCH 3-panel — top-N processes projected three ways
+    /// (RAM / VRAM / CPU) for the standalone Top Processes panel.
+    /// TUI + web parity: the TUI's `render_three_panels` reads
+    /// state directly; the wire projection here lets the web
+    /// dashboard render the same 3 sub-panels without duplicating
+    /// the sort logic in TypeScript. `#[serde(default)]` for
+    /// additive-schema back-compat (pre-bump readers see empty
+    /// vecs).
+    #[serde(default)]
+    pub top_processes: WireTopProcesses,
 }
 
 /// Mission-line counts shown at the top of the dashboard.
@@ -780,6 +790,56 @@ pub struct WireRunRecord {
     pub exit_detail: Option<String>,
 }
 
+/// DISPATCH 3-panel — one entry in a top-N process projection.
+/// Wire-mirror of `AnnotatedProcess` fields the Top Processes
+/// panel needs, minus classification / model / lifecycle metadata
+/// that the workloads panel already carries.
+///
+/// VRAM honesty: `vram_mb` is `Option<u64>` and marked
+/// `skip_serializing_if = Option::is_none` — an unmeasured VRAM
+/// entry emits NO `vram_mb` field on the wire (not `null`, not
+/// `0`). The web renderer treats the field's ABSENCE as
+/// "unmeasured" and shows `—`, matching the VRAM-honesty rule
+/// applied everywhere else (D95 / D102 / D109 / thermal+VRAM
+/// dispatch).
+#[derive(Debug, Clone, Serialize)]
+pub struct WireTopProcess {
+    pub pid: u32,
+    pub name: String,
+    pub rss_mb: u64,
+    pub cpu_pct: f32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vram_mb: Option<u64>,
+}
+
+/// DISPATCH 3-panel — three top-N projections for the standalone
+/// Top Processes panel. Populated by
+/// [`WireSnapshot::build_top_processes`] from
+/// `RuntimeState.annotated` using the same sort fns the TUI reads.
+///
+/// * `by_ram`: top MAX_VISIBLE_ROWS by RSS descending. Includes
+///   every process (AI + non-AI); the TUI's
+///   `top_n_by_rss` self-PID exclusion also applies here.
+/// * `by_vram`: top MAX_VISIBLE_ROWS by measured VRAM descending.
+///   FILTERS OUT processes with `vram_bytes == None` before
+///   truncation (via [`top_n_by_vram_honest`]) so the list contains
+///   only processes that reported real VRAM. If fewer than
+///   MAX_VISIBLE_ROWS have measurable VRAM, the list is SHORTER —
+///   honest short-list beats padded-with-zeros.
+/// * `by_cpu`: top MAX_VISIBLE_ROWS by per-tick CPU% descending.
+///
+/// All three lists preserve the TUI's PID-ascending tiebreak so
+/// the rendering stays stable across ticks.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct WireTopProcesses {
+    #[serde(default)]
+    pub by_ram: Vec<WireTopProcess>,
+    #[serde(default)]
+    pub by_vram: Vec<WireTopProcess>,
+    #[serde(default)]
+    pub by_cpu: Vec<WireTopProcess>,
+}
+
 impl WireSnapshot {
     /// Compose a wire snapshot from the runtime's authoritative
     /// state. The activity feed is built directly from state in
@@ -825,6 +885,7 @@ impl WireSnapshot {
             .iter()
             .map(WireRecommendation::from_rec)
             .collect::<Vec<_>>();
+        let top_processes = Self::build_top_processes(state);
         Self {
             tick: state.tick_count,
             server_time: Utc::now(),
@@ -834,6 +895,43 @@ impl WireSnapshot {
             activity,
             alerts,
             recommendations,
+            top_processes,
+        }
+    }
+
+    /// DISPATCH 3-panel — build the three top-N projections for the
+    /// standalone Top Processes panel. Reads the same
+    /// `crate::ui::panels::top_processes` sort fns the TUI uses so
+    /// TUI + web are pinned to the SAME ranking + tiebreak logic.
+    ///
+    /// Self-PID exclusion matches TUI. VRAM uses the honest filter
+    /// (drops `None` entries before truncation) — the returned
+    /// `by_vram` list contains only processes that reported real VRAM.
+    fn build_top_processes(state: &RuntimeState) -> WireTopProcesses {
+        use crate::ui::panels::top_processes::{
+            top_n_by_cpu, top_n_by_rss, top_n_by_vram_honest, MAX_VISIBLE_ROWS,
+        };
+        let self_pid = std::process::id();
+        let to_wire = |p: &crate::runtime::AnnotatedProcess| WireTopProcess {
+            pid: p.pid,
+            name: p.name.clone(),
+            rss_mb: p.rss_mb,
+            cpu_pct: p.cpu_pct,
+            vram_mb: p.vram_bytes.map(|b| b / (1024 * 1024)),
+        };
+        WireTopProcesses {
+            by_ram: top_n_by_rss(state, self_pid, MAX_VISIBLE_ROWS)
+                .iter()
+                .map(|p| to_wire(p))
+                .collect(),
+            by_vram: top_n_by_vram_honest(state, self_pid, MAX_VISIBLE_ROWS)
+                .iter()
+                .map(|p| to_wire(p))
+                .collect(),
+            by_cpu: top_n_by_cpu(state, self_pid, MAX_VISIBLE_ROWS)
+                .iter()
+                .map(|p| to_wire(p))
+                .collect(),
         }
     }
 
@@ -862,6 +960,7 @@ impl WireSnapshot {
             activity: Vec::new(),
             alerts: Vec::new(),
             recommendations: Vec::new(),
+            top_processes: WireTopProcesses::default(),
         }
     }
 }

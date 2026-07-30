@@ -4,10 +4,9 @@
 
 ## HEAD
 - Branch: `l14-top-processes-sort`
-- Last tag baseline: `v1.3.2-46-gf91742a` (unpushed — Phase-1 + Phase-2 audit + Phase-3 hardening on top of D109 landings 1/3/4)
-- Rust tests: 1200 / 0 fail (workspace)
-- Rust lib tests: 1025 / 0 fail
-- Browser render-gate: 223 / 0 (`npm --prefix web run test:browser`)
+- Last tag baseline: `v1.3.2-46-gf91742a` + local landings through the top-processes 3-panel commit (unpushed)
+- Rust tests: 1237 / 0 fail (workspace, +4 top_n_by_vram_honest tests)
+- Browser render-gate: 269 / 0 (`npm --prefix web run test:browser`, +11 D115 top-processes assertions on top of D110/D111/D112/D113/D114)
 - SCHEMA firewall: 5 / 5
 - ux_contract: v0.3.21 (sibling repo `../ux_contract` — DO NOT EDIT)
 

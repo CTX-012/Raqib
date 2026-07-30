@@ -54,3 +54,13 @@
 - Live smoke: `/api/snapshot` returns `temp_c: 68.0`, `power_w: 123.276` on release binary (RTX 3060 driver LOADED this session; BOARD's "unmeasured common" note may be stale — driver state changes between reboots, both paths are pinned by tests regardless).
 - Dormant/pending: web consumers not yet built. Landings 1 + 3 both unpushed — await operator push.
 - Notes: no `ux_contract` touch (WireGpu lives in `src/web/wire.rs`). No governor touch. HARD STOP #2 didn't fire — additive consumer-side change.
+
+## 2026-07-29 — top-processes 3-panel: TUI+web parity (RAM/VRAM/CPU side-by-side)
+- Rust: `top_n_by_vram_honest` fn (VRAM-honest filter — drops `None` entries before truncation), `render_three_panels` TUI renderer (horizontal split with vertical-stack fallback on narrow area.width < 3×28). Callsite in `panels/mod.rs` swapped from the cycled-by-`t` single panel to the 3-column render. Legacy `TopProcessesSort` + `t` key stay for compat but no longer drive the render.
+- Wire: `WireTopProcess` + `WireTopProcesses` (repo-local, additive; `#[serde(default)]`, `#[serde(skip_serializing_if = "Option::is_none")]` on `vram_mb`). Mapper `WireSnapshot::build_top_processes` uses the same sort fns as TUI → identical ranking + PID-asc tiebreak on both surfaces.
+- Web: `TopProcessesPanel.svelte` (3 sub-panels, `grid-cols-1 md:grid-cols-3` responsive), types.ts mirror, App.svelte dashboard mount (between main grid and Settings toggle).
+- Tests: 1233 → 1237 (+4 top_n_by_vram_honest unit tests: drops-None-entries, empty-when-no-GPU-users, tiebreaks-by-PID, excludes-self-PID).
+- Gate: 258 → 269 (+11 D115 assertions: 3-panel present, sorted-descending on RAM/CPU, honest-short VRAM, no fake 0-MB rows, responsive 3→1 tracks, empty-vram → "no GPU users" empty state).
+- Live smoke: `/api/snapshot.top_processes.by_vram` returned 2 entries on host (Xorg 56MB + gnome-shell 4MB — real GPU users; honest short list held, NOT padded to 5). Screenshot confirms all 3 panels render side-by-side.
+- Commit: (pending — this landing).
+- Notes: no governor, no contract, no new sampling. Purely display + wire projection. HARD STOP #2 didn't fire — additive consumer-side change (D109 precedent).

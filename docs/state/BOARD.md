@@ -5,7 +5,7 @@
 ## HEAD
 - Branch: `l14-top-processes-sort`
 - Last tag baseline: `v1.3.2-46-gf91742a` + local landings through the top-processes 3-panel commit (unpushed)
-- Rust tests: 1259 / 0 fail (workspace; +3 onboarding legacy-fallback tests on top of the header web-link)
+- Rust tests: 1267 / 0 fail (workspace; +8 classifier tests: 7 Gazebo detect/precision + 2 rviz2 tripwire — one Gazebo test reused an assert)
 - Binary name: `raqib` (renamed 2026-07-30). Library crate `edge_monitor` (unchanged — internal identifier only).
 - Browser render-gate: 269 / 0 (`npm --prefix web run test:browser`, unchanged — onboarding is CLI + config path, no web-render surface)
 - SCHEMA firewall: 5 / 5

@@ -194,9 +194,26 @@ const ROS2_LIBRARY_MARKERS: &[&str] = &[
 /// case-insensitive prefix on `ProcessSample::name`; the entries
 /// are all ≤15 chars so the kernel's `TASK_COMM_LEN=16`
 /// truncation of `/proc/<pid>/comm` doesn't lose any of them.
+/// GAZEBO+RVIZ2 dispatch (2026-07-31) — REVERSES the v1.0.2
+/// Inspector #5 decision for `rviz` / `rviz2` specifically.
+///
+/// The original blacklist entry treated rviz as "tooling, not a
+/// graph participant." Post-dispatch: rviz2 is a real ROS2 node
+/// that holds GPU allocations (10-100+ MB via NVML graphics-
+/// processes attribution) and belongs on the operator's workloads
+/// panel — visible + governable when the killer is armed. The
+/// library signal (`librcl.so` in `/proc/<pid>/maps`) that Inspector
+/// #5 was worried would false-fire is exactly the RIGHT signal for
+/// rviz2, which IS a ROS2 process.
+///
+/// Kept in the blacklist: `rqt*`, `colcon`, `ament_*`, and
+/// `ament_lint*`. These are dev-time debug/build tools that link
+/// rcl but never hold sustained resources worth watching.
 const ROS2_TOOLING_NAMES: &[&str] = &[
-    "rviz",
-    "rviz2",
+    // rviz + rviz2 REMOVED 2026-07-31 (GAZEBO+RVIZ2 dispatch).
+    // Both classify as ROS2 workloads via the library signal now.
+    // See the converted `rviz2_now_classifies_as_ros2_via_library_signal`
+    // test (was `rviz2_does_not_classify_as_ros2` per Inspector #5).
     "rqt_graph",
     "rqt_plot",
     "rqt_console",
@@ -961,14 +978,75 @@ mod tests {
     // treat its own probes as new ROS2 nodes.
     // ────────────────────────────────────────────────────────────
 
+    /// GAZEBO+RVIZ2 dispatch (2026-07-31) — CONVERTED from the
+    /// pre-dispatch `rviz2_does_not_classify_as_ros2` tripwire
+    /// (Inspector #5 v1.0.2 decision, since REVERSED).
+    ///
+    /// Pre-dispatch behaviour: rviz2 was in `ROS2_TOOLING_NAMES`,
+    /// so `is_ros2_tooling_name` fired → `classify` returned None
+    /// → classifier stack fell through to NotAi → rviz2 was
+    /// invisible to the workloads panel + governor.
+    ///
+    /// Post-dispatch behaviour: rviz2 is a real GPU-holding ROS2
+    /// node (nvidia-smi shows it as graphics-type with per-PID
+    /// VRAM). The library-signal path is now the load-bearing
+    /// classifier — rviz2 links `librcl.so`, so a real
+    /// `/proc/<pid>/maps` read classifies it as ROS2. This test
+    /// exercises the pure `ros2_library_in_maps_text` helper
+    /// against a realistic rviz2 maps snippet (real fixture based
+    /// on `readlink /proc/<rviz2-pid>/exe` = `/opt/ros/humble/
+    /// lib/rviz2/rviz2`, which loads librcl via rviz_common).
+    ///
+    /// The unit test can't drive `classify()` end-to-end because
+    /// the fake pid has no /proc entry — the `ros2_library_signal`
+    /// path errors out silently. So we assert against the pure
+    /// text helper, which is what the runtime path collapses to
+    /// under real pids.
+    ///
+    /// The `is_ros2_tooling_name` guard for rviz2 is gone — a
+    /// separate assertion below confirms that.
     #[test]
-    fn rviz2_does_not_classify_as_ros2() {
-        // rviz2 links the rcl libraries (via the rviz_common
-        // packages) so the library signal WOULD fire on it
-        // without the tooling-name guard. The guard short-circuits
-        // before the library read happens.
-        let s = sample("rviz2", &["rviz2", "-d", "config.rviz"]);
-        assert!(classify(&s).is_none(), "rviz2 is tooling, not a graph node");
+    fn rviz2_now_classifies_as_ros2_via_library_signal() {
+        // Realistic rviz2 maps: it loads librcl (via rviz_common)
+        // + libfastdds (Fast-DDS RMW). Same shape as a real
+        // /proc/<pid>/maps snippet on Humble.
+        let maps = "\
+7f2000000000-7f2000100000 r-xp 00000000 00:00 0 /opt/ros/humble/lib/librcl.so.5.3.0
+7f2000100000-7f2000200000 r-xp 00000000 00:00 0 /opt/ros/humble/lib/librclcpp.so.18.1
+7f2000200000-7f2000300000 r-xp 00000000 00:00 0 /opt/ros/humble/lib/librmw_implementation.so.5.3.6
+7f2000300000-7f2000400000 r-xp 00000000 00:00 0 /opt/ros/humble/lib/libfastdds.so.2.10
+7f2000400000-7f2000500000 r-xp 00000000 00:00 0 /opt/ros/humble/lib/rviz2/rviz_common.so
+";
+        assert!(
+            ros2_library_in_maps_text(maps).is_some(),
+            "rviz2's realistic /proc/<pid>/maps must trigger the ROS2 \
+             library signal — this is the pin against re-adding rviz2 \
+             to ROS2_TOOLING_NAMES (which would short-circuit before \
+             the library read and re-hide rviz2 from the workloads panel)",
+        );
+    }
+
+    /// GAZEBO+RVIZ2 dispatch — second half of the tripwire
+    /// conversion: the tooling-name guard MUST NOT match rviz /
+    /// rviz2 anymore. If a future contributor re-adds either to
+    /// `ROS2_TOOLING_NAMES`, this test fires immediately.
+    #[test]
+    fn rviz2_no_longer_in_tooling_blacklist() {
+        assert!(
+            !is_ros2_tooling_name("rviz2"),
+            "rviz2 must NOT be in ROS2_TOOLING_NAMES — the guard was \
+             reversed in the 2026-07-31 dispatch so rviz2 could show \
+             up on the workloads panel and be governable",
+        );
+        assert!(
+            !is_ros2_tooling_name("rviz"),
+            "same for the classic rviz name (both removed together)",
+        );
+        // Other tooling names still guarded — the reversal was
+        // targeted, not a sweep.
+        assert!(is_ros2_tooling_name("rqt_graph"));
+        assert!(is_ros2_tooling_name("colcon"));
+        assert!(is_ros2_tooling_name("ament_lint"));
     }
 
     #[test]

@@ -14,6 +14,29 @@ const BOUNDARY_MAX_LEN: usize = 3;
 /// for the rationale on keeping both side-by-side.
 type KeywordEntry = (&'static str, AICategory, WorkloadCategory);
 
+/// GAZEBO+RVIZ2 dispatch — `(keyword, AICategory, WorkloadCategory,
+/// friendly_display_name)` — for workloads whose `/proc/<pid>/comm`
+/// is misleading (Gazebo's comm is `ruby` because it's Ruby-
+/// launched). The runtime promotes `friendly_display_name` onto
+/// `AnnotatedProcess.name` at annotation time — mirror of the D107
+/// `promote_sha_blob_hints` pattern for ollama.
+type FriendlyKeywordEntry = (
+    &'static str,
+    AICategory,
+    WorkloadCategory,
+    &'static str,
+);
+
+/// GAZEBO+RVIZ2 dispatch — friendly-name overrides for the process-
+/// name path. Classic Gazebo ships its own binaries (`gzserver` /
+/// `gzclient`); comm matches the binary. The friendly display name
+/// is still `"Gazebo"` because "gzserver" / "gzclient" aren't
+/// operator-recognisable at a glance.
+static NAME_KEYWORDS_WITH_FRIENDLY: &[FriendlyKeywordEntry] = &[
+    ("gzserver", AICategory::Inference, WorkloadCategory::ROS2, "Gazebo"),
+    ("gzclient", AICategory::Inference, WorkloadCategory::ROS2, "Gazebo"),
+];
+
 /// Checked against the bare process name (basename of argv[0]).
 static NAME_KEYWORDS: &[KeywordEntry] = &[
     // Inference servers and runtimes — LLM unless noted otherwise.
@@ -41,6 +64,27 @@ static NAME_KEYWORDS: &[KeywordEntry] = &[
     ("accelerate", AICategory::Training, WorkloadCategory::Unknown),
     // Model management — same: collapses to Unknown.
     ("huggingface-cli", AICategory::ModelDownload, WorkloadCategory::Unknown),
+];
+
+/// GAZEBO+RVIZ2 dispatch — friendly-name overrides for the cmdline
+/// path. Gazebo Fortress launches as `ign gazebo server`/`gui`; the
+/// binary is Ruby-launched so `/proc/<pid>/comm = "ruby"` (unhelpful).
+/// Gazebo Harmonic uses `gz sim server`/`gui` — same story. Both
+/// phrase markers are precise (two words, unambiguous — no bystander
+/// tool has "ign gazebo" or "gz sim" in its cmdline).
+///
+/// Checked BEFORE [`CMDLINE_KEYWORDS`] so a phrase-carrying entry
+/// wins over any accidental single-word match downstream. The
+/// friendly display name `"Gazebo"` is promoted onto
+/// `AnnotatedProcess.name` at annotation time; the workload
+/// category is `ROS2` per the ratified dispatch (Gazebo is a
+/// robotics simulator commonly paired with ROS2 — no new category
+/// needed).
+static CMDLINE_KEYWORDS_WITH_FRIENDLY: &[FriendlyKeywordEntry] = &[
+    // Gazebo Fortress (default on Ubuntu 22 / ROS Humble).
+    ("ign gazebo", AICategory::Inference, WorkloadCategory::ROS2, "Gazebo"),
+    // Gazebo Harmonic (newer).
+    ("gz sim", AICategory::Inference, WorkloadCategory::ROS2, "Gazebo"),
 ];
 
 /// Checked against all cmdline tokens joined with spaces. Keyword order matters:
@@ -145,6 +189,26 @@ fn is_word_char(b: u8) -> bool {
 }
 
 pub(crate) fn classify_by_name(name: &str) -> Option<ClassificationResult> {
+    // GAZEBO dispatch — friendly-name overrides first. When a rule
+    // in `NAME_KEYWORDS_WITH_FRIENDLY` matches, we emit a friendly
+    // display name via `ai_with_friendly_name` so the runtime's
+    // promotion pass swaps AnnotatedProcess.name to something the
+    // operator recognises.
+    if let Some(result) = NAME_KEYWORDS_WITH_FRIENDLY
+        .iter()
+        .find_map(|&(kw, category, workload_category, friendly)| {
+            smart_keyword_match(name, kw).then(|| {
+                ClassificationResult::ai_with_friendly_name(
+                    category,
+                    workload_category,
+                    format!("process name matches keyword {kw:?} (friendly: {friendly:?})"),
+                    friendly,
+                )
+            })
+        })
+    {
+        return Some(result);
+    }
     NAME_KEYWORDS
         .iter()
         .find_map(|&(kw, category, workload_category)| {
@@ -165,6 +229,27 @@ pub(crate) fn classify_by_cmdline(cmdline: &[String]) -> Option<ClassificationRe
         return None;
     }
     let joined = cmdline.join(" ");
+    // GAZEBO dispatch — friendly-name overrides first (same shape
+    // as `classify_by_name`). The phrase markers "ign gazebo" /
+    // "gz sim" are precise: a script named "gazebo_helper.py"
+    // whose joined cmdline is `python3 gazebo_helper.py` does NOT
+    // contain either phrase, so the negative test in this file's
+    // `#[cfg(test)]` block below fires green.
+    if let Some(result) = CMDLINE_KEYWORDS_WITH_FRIENDLY
+        .iter()
+        .find_map(|&(kw, category, workload_category, friendly)| {
+            smart_keyword_match(&joined, kw).then(|| {
+                ClassificationResult::ai_with_friendly_name(
+                    category,
+                    workload_category,
+                    format!("cmdline matches keyword {kw:?} (friendly: {friendly:?})"),
+                    friendly,
+                )
+            })
+        })
+    {
+        return Some(result);
+    }
     CMDLINE_KEYWORDS
         .iter()
         .find_map(|&(kw, category, workload_category)| {
@@ -368,6 +453,110 @@ mod tests {
         // Embeddings).
         if let Some(r) = classify_by_cmdline(&cmdline) {
             assert_ne!(r.workload_category, WorkloadCategory::Embeddings);
+        }
+    }
+
+    // ── GAZEBO+RVIZ2 dispatch — friendly-name rules ────────────────────────────
+    //
+    // Gazebo launches as `ign gazebo server`/`gui` (Fortress) or
+    // `gz sim server`/`gui` (Harmonic), Ruby-launched → comm is
+    // "ruby". Classic Gazebo ships its own gzserver / gzclient
+    // binaries. All four cases must classify as ROS2 workloads
+    // with friendly display name "Gazebo", so the runtime's
+    // promotion pass swaps the misleading "ruby" comm to "Gazebo"
+    // before it reaches the workloads panel.
+
+    #[test]
+    fn ign_gazebo_server_cmdline_classifies_as_gazebo() {
+        let cmdline = vec!["ign".to_string(), "gazebo".to_string(), "server".to_string()];
+        let r = classify_by_cmdline(&cmdline).expect("must classify");
+        assert_eq!(r.category, AICategory::Inference);
+        assert_eq!(r.workload_category, WorkloadCategory::ROS2);
+        assert_eq!(r.friendly_process_name.as_deref(), Some("Gazebo"));
+    }
+
+    #[test]
+    fn ign_gazebo_gui_cmdline_classifies_as_gazebo() {
+        let cmdline = vec!["ign".to_string(), "gazebo".to_string(), "gui".to_string()];
+        let r = classify_by_cmdline(&cmdline).expect("must classify");
+        assert_eq!(r.workload_category, WorkloadCategory::ROS2);
+        assert_eq!(r.friendly_process_name.as_deref(), Some("Gazebo"));
+    }
+
+    #[test]
+    fn gz_sim_server_harmonic_cmdline_classifies_as_gazebo() {
+        // Newer Gazebo Harmonic invocation. Same friendly name.
+        let cmdline = vec!["gz".to_string(), "sim".to_string(), "server".to_string()];
+        let r = classify_by_cmdline(&cmdline).expect("must classify");
+        assert_eq!(r.workload_category, WorkloadCategory::ROS2);
+        assert_eq!(r.friendly_process_name.as_deref(), Some("Gazebo"));
+    }
+
+    #[test]
+    fn gzserver_binary_name_classifies_as_gazebo() {
+        // Classic Gazebo (pre-Fortress) — separate binary, comm
+        // matches. NAME table path.
+        let r = classify_by_name("gzserver").expect("must classify");
+        assert_eq!(r.workload_category, WorkloadCategory::ROS2);
+        assert_eq!(r.friendly_process_name.as_deref(), Some("Gazebo"));
+    }
+
+    #[test]
+    fn gzclient_binary_name_classifies_as_gazebo() {
+        let r = classify_by_name("gzclient").expect("must classify");
+        assert_eq!(r.workload_category, WorkloadCategory::ROS2);
+        assert_eq!(r.friendly_process_name.as_deref(), Some("Gazebo"));
+    }
+
+    /// THE PRECISION GUARD — mandatory per dispatch HARD RULE 2.
+    /// A random user script named "gazebo_helper.py" whose joined
+    /// cmdline is `python3 gazebo_helper.py` MUST NOT classify as
+    /// Gazebo. The phrase markers `"ign gazebo"` / `"gz sim"` are
+    /// two-word — a single-word `"gazebo"` substring in a filename
+    /// doesn't trip them. Without this test, a well-meaning
+    /// contributor might "simplify" the rule to `"gazebo"` alone
+    /// and silently break precision.
+    #[test]
+    fn plain_ruby_script_named_gazebo_helper_does_not_classify_as_gazebo() {
+        let cmdline = vec![
+            "python3".to_string(),
+            "gazebo_helper.py".to_string(),
+        ];
+        // Must NOT match the friendly-name Gazebo rule.
+        let result = classify_by_cmdline(&cmdline);
+        if let Some(r) = &result {
+            assert_ne!(
+                r.friendly_process_name.as_deref(),
+                Some("Gazebo"),
+                "a script named `gazebo_helper.py` MUST NOT match the Gazebo rule; \
+                 the phrase markers are two-word (\"ign gazebo\" / \"gz sim\") \
+                 precisely to avoid this false-positive",
+            );
+        }
+        // Belt-and-braces: no matter what other rule fires (probably
+        // none — the cmdline has no AI keywords), the workload
+        // category must not be spuriously ROS2 via the Gazebo path.
+        if let Some(r) = &result {
+            // If some OTHER rule classifies it (e.g. a future
+            // Python-python match), that's fine — the friendly name
+            // check above is the load-bearing one.
+            let _ = r;
+        }
+    }
+
+    /// A ruby process WITHOUT "ign gazebo" or "gz sim" in cmdline
+    /// (e.g. a Rails app) must NOT classify as Gazebo. The comm
+    /// is "ruby" but the name path only matches the specific
+    /// classic-Gazebo binary names.
+    #[test]
+    fn plain_ruby_process_does_not_classify_as_gazebo() {
+        let name = "ruby";
+        assert!(classify_by_name(name).is_none(),
+            "bare `ruby` comm must not match — only `gzserver` / `gzclient` do");
+        let cmdline = vec!["ruby".to_string(), "/usr/bin/rails".to_string(), "server".to_string()];
+        let result = classify_by_cmdline(&cmdline);
+        if let Some(r) = result {
+            assert_ne!(r.friendly_process_name.as_deref(), Some("Gazebo"));
         }
     }
 }

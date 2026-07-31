@@ -1022,6 +1022,7 @@ impl Runtime {
                     evidence,
                     model_name,
                     model_path,
+                    friendly_process_name,
                 } = classifier::classify_process(p);
                 if let Some(path) = model_path {
                     // Tier 3.1 — remember which weight file each PID
@@ -1047,9 +1048,20 @@ impl Runtime {
                         &p.cmdline,
                         &p.environ,
                     );
+                // GAZEBO+RVIZ2 dispatch — friendly-name promotion.
+                // Mirror of `promote_sha_blob_hints` (D107): when the
+                // classifier surfaces a friendly name (Gazebo launches
+                // as `ruby`, but the "ign gazebo"/"gz sim" rule emits
+                // friendly_process_name="Gazebo"), promote it onto
+                // AnnotatedProcess.name so every downstream surface
+                // (TUI workloads panel, web WorkloadsPanel, top-
+                // processes list) shows the operator-meaningful name
+                // instead of the interpreter's comm. `None` (the
+                // common case — every other rule) keeps the raw comm.
+                let display_name = friendly_process_name.unwrap_or_else(|| p.name.clone());
                 AnnotatedProcess {
                     pid: p.pid,
-                    name: p.name.clone(),
+                    name: display_name,
                     category,
                     workload_category,
                     evidence,

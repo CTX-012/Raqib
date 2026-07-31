@@ -120,6 +120,15 @@ pub struct ClassificationResult {
     /// Short display name for the UI — file stem of `model_path` with the
     /// extension stripped. Pre-computed so render code stays allocation-free.
     pub model_name: Option<String>,
+    /// GAZEBO+RVIZ2 dispatch — friendly display name when the underlying
+    /// executable's `comm` (from `/proc/<pid>/comm`) is misleading. Gazebo
+    /// launches as `ign gazebo server` but its comm is `ruby` (the
+    /// interpreter); populating this with `"Gazebo"` lets the runtime
+    /// promote it onto `AnnotatedProcess.name` at annotation time —
+    /// mirror of the D107 `promote_sha_blob_hints` pattern for ollama
+    /// friendly names. `None` for every other classifier rule (their
+    /// comm is already meaningful — `ollama`, `python3`, `rviz2`, etc.).
+    pub friendly_process_name: Option<String>,
 }
 
 impl ClassificationResult {
@@ -135,6 +144,28 @@ impl ClassificationResult {
             evidence,
             model_path: None,
             model_name: None,
+            friendly_process_name: None,
+        }
+    }
+
+    /// GAZEBO+RVIZ2 dispatch — variant of [`Self::ai`] that carries a
+    /// friendly display name for the runtime to promote onto
+    /// `AnnotatedProcess.name`. Used ONLY for workloads whose comm
+    /// misleads (Gazebo launches as ruby); every other rule uses
+    /// [`Self::ai`] and inherits `friendly_process_name: None`.
+    pub fn ai_with_friendly_name(
+        category: AICategory,
+        workload_category: WorkloadCategory,
+        evidence: String,
+        friendly_process_name: &str,
+    ) -> Self {
+        Self {
+            category,
+            workload_category,
+            evidence,
+            model_path: None,
+            model_name: None,
+            friendly_process_name: Some(friendly_process_name.to_string()),
         }
     }
 
@@ -157,6 +188,7 @@ impl ClassificationResult {
             evidence,
             model_path: Some(path),
             model_name,
+            friendly_process_name: None,
         }
     }
 
@@ -171,6 +203,7 @@ impl ClassificationResult {
             evidence: String::new(),
             model_path: None,
             model_name: None,
+            friendly_process_name: None,
         }
     }
 

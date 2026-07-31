@@ -559,4 +559,38 @@ mod tests {
             assert_ne!(r.friendly_process_name.as_deref(), Some("Gazebo"));
         }
     }
+
+    /// LIVE-HOST INVARIANT: Gazebo's `ign` launcher uses Ruby's
+    /// `Process.setproctitle` to overwrite argv into a SINGLE
+    /// argv[0] string, padded with `\0` to the argv buffer length.
+    /// `linux_proc::read_cmdline` split-on-null therefore yields
+    /// `vec!["ign gazebo server"]` (ONE element), not
+    /// `vec!["ign", "gazebo", "server"]` (three elements).
+    ///
+    /// This shape is what actually lands from the live host —
+    /// verified 2026-07-31 against `/proc/19600/cmdline` hex-dump:
+    /// bytes 0..17 are `"ign gazebo server\0"` and the rest is
+    /// null padding. The joined-cmdline substring match still
+    /// fires because `"ign gazebo"` is a substring of the single
+    /// joined element. Without this test, a future refactor that
+    /// switched to per-token matching (e.g. checking `argv[0] ==
+    /// "ign" && argv[1] == "gazebo"`) would silently break the
+    /// real-world case.
+    #[test]
+    fn setproctitle_single_token_cmdline_still_classifies_as_gazebo() {
+        // Fortress — the operator's live cmdline shape.
+        let cmdline = vec!["ign gazebo server".to_string()];
+        let r = classify_by_cmdline(&cmdline).expect("live-host setproctitle shape must classify");
+        assert_eq!(r.workload_category, WorkloadCategory::ROS2);
+        assert_eq!(r.friendly_process_name.as_deref(), Some("Gazebo"));
+
+        let gui = vec!["ign gazebo gui".to_string()];
+        let r = classify_by_cmdline(&gui).expect("gui setproctitle shape must classify");
+        assert_eq!(r.friendly_process_name.as_deref(), Some("Gazebo"));
+
+        // Harmonic setproctitle shape (same pattern, different phrase).
+        let harmonic = vec!["gz sim server".to_string()];
+        let r = classify_by_cmdline(&harmonic).expect("Harmonic setproctitle shape must classify");
+        assert_eq!(r.friendly_process_name.as_deref(), Some("Gazebo"));
+    }
 }

@@ -586,6 +586,171 @@ impl Config {
         Ok(cfg)
     }
 
+    /// Human-readable dump of the resolved config sections that
+    /// determine the governor's kill decisions: `[governor]`,
+    /// `[policy]` (INCLUDING the full `allowlist` / `blocklist`
+    /// contents — the fields no wire endpoint surfaces), and
+    /// `[thresholds]` (resolved values, post-defaults).
+    ///
+    /// Called by `raqib config check` to give the operator a
+    /// pre-arm view of what the running binary WOULD load. This is
+    /// the operator's pre-arm safety gate — without it, the parsed
+    /// `[policy]` was memory-only, invisible on every log / metric
+    /// / wire channel (see PENDING.md 2026-07-30 finding).
+    ///
+    /// Format shape modeled on `nginx -T` — deterministic, grep-able,
+    /// stable enough to script against. If a downstream test asserts
+    /// on the exact text, that's fine — the text IS the contract for
+    /// this command.
+    ///
+    /// `thresholds` is passed in already-resolved (via
+    /// [`crate::thresholds::EffectiveThresholds::resolve`]) so this
+    /// helper stays a pure formatter — no fallible calls, no
+    /// re-resolution surprise.
+    pub fn pretty_dump(
+        &self,
+        thresholds: &crate::thresholds::EffectiveThresholds,
+    ) -> String {
+        use std::fmt::Write;
+        let mut out = String::new();
+
+        // ── [governor] ──────────────────────────────────────────
+        writeln!(&mut out, "[governor]").ok();
+        writeln!(
+            &mut out,
+            "  auto_actuate      = {}      {}",
+            self.governor.auto_actuate,
+            if self.governor.auto_actuate {
+                "← KILLER IS ARMED"
+            } else {
+                "← KILLER IS DISARMED"
+            },
+        )
+        .ok();
+        writeln!(
+            &mut out,
+            "  kill_sustain_secs = {}",
+            self.governor.kill_sustain_secs
+        )
+        .ok();
+        writeln!(&mut out).ok();
+
+        // ── [policy] ────────────────────────────────────────────
+        // Sort allowlist/blocklist so the output is deterministic
+        // across runs (HashSet iteration order is unstable).
+        let mut allowlist: Vec<&str> =
+            self.policy.allowlist.iter().map(String::as_str).collect();
+        allowlist.sort_unstable();
+        let mut blocklist: Vec<&str> =
+            self.policy.blocklist.iter().map(String::as_str).collect();
+        blocklist.sort_unstable();
+
+        writeln!(&mut out, "[policy]").ok();
+        writeln!(
+            &mut out,
+            "  default_ai_action     = \"{:?}\"",
+            self.policy.default_ai_action
+        )
+        .ok();
+        writeln!(
+            &mut out,
+            "  allowlist ({} name{}): {}",
+            allowlist.len(),
+            if allowlist.len() == 1 { "" } else { "s" },
+            if allowlist.is_empty() {
+                "(empty — every AI process is killable if default_ai_action=Kill)"
+                    .to_string()
+            } else {
+                allowlist.join(", ")
+            },
+        )
+        .ok();
+        writeln!(
+            &mut out,
+            "  blocklist ({} name{}): {}",
+            blocklist.len(),
+            if blocklist.len() == 1 { "" } else { "s" },
+            if blocklist.is_empty() {
+                "(empty)".to_string()
+            } else {
+                blocklist.join(", ")
+            },
+        )
+        .ok();
+        writeln!(
+            &mut out,
+            "  sigterm_grace_secs    = {}",
+            self.policy.sigterm_grace_secs
+        )
+        .ok();
+        writeln!(
+            &mut out,
+            "  rate_limit_max_kills  = {} per {}s",
+            self.policy.rate_limit_max_kills, self.policy.rate_limit_window_secs
+        )
+        .ok();
+        writeln!(&mut out).ok();
+
+        // ── [thresholds] (resolved) ─────────────────────────────
+        writeln!(&mut out, "[thresholds]  (resolved — post-defaults)").ok();
+        writeln!(
+            &mut out,
+            "  ram_attention_pct    = {:.1}",
+            thresholds.ram_attention_pct
+        )
+        .ok();
+        writeln!(
+            &mut out,
+            "  ram_critical_pct     = {:.1}",
+            thresholds.ram_critical_pct
+        )
+        .ok();
+        writeln!(
+            &mut out,
+            "  vram_attention_pct   = {:.1}",
+            thresholds.vram_attention_pct
+        )
+        .ok();
+        writeln!(
+            &mut out,
+            "  vram_critical_pct    = {:.1}",
+            thresholds.vram_critical_pct
+        )
+        .ok();
+        writeln!(
+            &mut out,
+            "  thermal_amber_c      = {:.1}",
+            thresholds.thermal_amber_c
+        )
+        .ok();
+        writeln!(
+            &mut out,
+            "  thermal_red_c        = {:.1}",
+            thresholds.thermal_red_c
+        )
+        .ok();
+        writeln!(
+            &mut out,
+            "  kv_attention_pct     = {:.1}",
+            thresholds.kv_attention_pct
+        )
+        .ok();
+        writeln!(
+            &mut out,
+            "  kv_critical_pct      = {:.1}",
+            thresholds.kv_critical_pct
+        )
+        .ok();
+        writeln!(
+            &mut out,
+            "  alert_sustain_secs   = {}",
+            thresholds.alert_sustain_secs
+        )
+        .ok();
+
+        out
+    }
+
     /// Reject impossible values that would otherwise cause silent misbehavior.
     pub fn validate(&self) -> Result<(), ConfigError> {
         if self.runtime.tick_interval_ms == 0 {

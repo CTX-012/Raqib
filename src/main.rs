@@ -169,6 +169,45 @@ enum Commands {
         #[arg(long, value_name = "PATH")]
         path: Option<PathBuf>,
     },
+    /// Config-tooling subcommands. Mirrors the `nginx -t` /
+    /// `sshd -t` / `visudo -c` pattern — read-only inspection of
+    /// a config file WITHOUT starting the monitor / arming the
+    /// governor. The pre-arm safety gate.
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommand,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum ConfigCommand {
+    /// Load + validate the config the SAME way `raqib` would
+    /// load it, then pretty-print the resolved `[governor]`,
+    /// `[policy]` (INCLUDING the full `allowlist` / `blocklist`),
+    /// and `[thresholds]` to stdout. Prints the file that was
+    /// loaded up front. Exits with `VALIDATION: OK` + code 0 on a
+    /// valid config; prints the validator error to stderr and
+    /// exits non-zero on any invalid config OR missing file.
+    ///
+    /// Scriptable as a pre-arm gate:
+    ///
+    /// ```bash
+    /// raqib config check --path ~/.config/raqib/raqib.toml || exit 1
+    /// ```
+    ///
+    /// Fills the "no shipped mechanism observes the loaded policy
+    /// content" gap surfaced by the 2026-07-30 investigator finding
+    /// — before this subcommand, the parsed allowlist/blocklist
+    /// were memory-only, never enumerated on any wire/log/metric.
+    Check {
+        /// Path to the config file to check. When omitted, walks
+        /// the SAME discovery chain the running binary uses:
+        /// `./raqib.toml` → `~/.config/raqib/raqib.toml` →
+        /// `/etc/raqib/raqib.toml`, plus the legacy `edge_monitor.toml`
+        /// fallback locations for one release of overlap.
+        #[arg(long, value_name = "PATH")]
+        path: Option<PathBuf>,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -186,6 +225,15 @@ fn main() -> anyhow::Result<()> {
     // the CLI options directly and short-circuits.
     if let Some(Commands::Init { force, path }) = &cli.command {
         return run_init_subcommand(*force, path.as_deref());
+    }
+
+    // `config check` also runs BEFORE the runtime's load_config —
+    // the subcommand OWNS its own load + validate so it can print
+    // structured errors to stderr and set a non-zero exit code
+    // WITHOUT the anyhow-wrapped context chain the runtime path
+    // uses. Matches nginx -t / sshd -t exit-code discipline.
+    if let Some(Commands::Config { command: ConfigCommand::Check { path } }) = &cli.command {
+        return run_config_check_subcommand(path.as_deref());
     }
 
     let (config, config_source) = load_config(cli.config.as_deref())?;
@@ -213,6 +261,11 @@ fn main() -> anyhow::Result<()> {
                 // Handled above before load_config; the match arm exists
                 // only to make the enum exhaustive.
                 unreachable!("Commands::Init is dispatched before load_config")
+            }
+            Commands::Config { .. } => {
+                // Handled above before load_config; the match arm exists
+                // only to make the enum exhaustive.
+                unreachable!("Commands::Config is dispatched before load_config")
             }
         };
     }
@@ -862,6 +915,126 @@ fn run_init_subcommand(force: bool, path: Option<&std::path::Path>) -> anyhow::R
             )
         }
     }
+}
+
+/// Handle the `raqib config check [--path FILE]` subcommand: mirrors
+/// the runtime's config-discovery + validation exactly, then pretty-
+/// prints the resolved `[governor]`, `[policy]` (INCLUDING full
+/// `allowlist` / `blocklist` contents), and `[thresholds]` to stdout.
+///
+/// Exit codes (nginx -t / sshd -t discipline):
+///   * 0  — config loaded + validated + resolved-thresholds pass
+///   * 1  — no config file found in any discovery location
+///   * 2  — file found but parse/validate/threshold-resolve failed
+///
+/// Error diagnostics go to stderr; the pretty-printed successful
+/// output goes to stdout so scripts can `raqib config check --path X
+/// > /tmp/loaded.txt` and grep the actual policy without noise.
+///
+/// Discovery mirrors `load_config` exactly, minus the `tracing::info!`
+/// side effects (this subcommand OWNS its output; extra INFO lines
+/// would pollute the deterministic pretty-print).
+fn run_config_check_subcommand(explicit: Option<&std::path::Path>) -> anyhow::Result<()> {
+    use edge_monitor::config::{Config, ConfigError};
+    use edge_monitor::thresholds::EffectiveThresholds;
+
+    // Locate + load the file, mirroring `load_config` without the
+    // tracing calls. Path resolution order MUST match the runtime.
+    let (config, resolved_path, source_label) = match explicit {
+        Some(p) => match Config::from_file(p) {
+            Ok(cfg) => (cfg, p.to_path_buf(), "explicit --path"),
+            Err(e) => {
+                eprintln!("raqib config check: failed to load {}: {e}", p.display());
+                std::process::exit(2);
+            }
+        },
+        None => {
+            let discovery = edge_monitor::onboarding::config_search_paths();
+            let legacy = edge_monitor::onboarding::legacy_config_search_paths();
+            let mut hit: Option<(std::path::PathBuf, &'static str)> = None;
+            for p in &discovery {
+                if p.exists() {
+                    hit = Some((p.clone(), "discovered"));
+                    break;
+                }
+            }
+            if hit.is_none() {
+                for p in &legacy {
+                    if p.exists() {
+                        hit = Some((p.clone(), "legacy edge_monitor.toml fallback"));
+                        break;
+                    }
+                }
+            }
+            match hit {
+                Some((path, label)) => match Config::from_file(&path) {
+                    Ok(cfg) => (cfg, path, label),
+                    Err(e) => {
+                        eprintln!(
+                            "raqib config check: failed to load {}: {e}",
+                            path.display()
+                        );
+                        std::process::exit(2);
+                    }
+                },
+                None => {
+                    // Enumerate every path we tried so the operator
+                    // can see WHERE to place a config.
+                    eprintln!(
+                        "raqib config check: no config file found in any search location."
+                    );
+                    eprintln!("searched (in order):");
+                    for p in discovery.iter().chain(legacy.iter()) {
+                        eprintln!("  {}", p.display());
+                    }
+                    eprintln!();
+                    eprintln!("Run `raqib init` to create a starter config, or pass");
+                    eprintln!("`--path <FILE>` to check a specific file.");
+                    std::process::exit(1);
+                }
+            }
+        }
+    };
+
+    // Validate — same call the runtime makes at main.rs:192. Any
+    // failure lands here (invalid TOML combos, threshold ordering,
+    // web auth posture, etc.) and stops the check with exit 2.
+    if let Err(e) = config.validate() {
+        eprintln!("raqib config check: validation FAILED for {}", resolved_path.display());
+        eprintln!("  {e}");
+        std::process::exit(2);
+    }
+
+    // Resolve the effective thresholds so the pretty-print shows the
+    // ACTUAL values the runtime would use (post-defaults). A resolver
+    // failure here is a validation failure too — treat it identically.
+    let thresholds = match EffectiveThresholds::resolve(&config.thresholds) {
+        Ok(t) => t,
+        Err(ConfigError::Invalid(msg)) => {
+            eprintln!(
+                "raqib config check: threshold resolution FAILED for {}",
+                resolved_path.display()
+            );
+            eprintln!("  {msg}");
+            std::process::exit(2);
+        }
+        Err(e) => {
+            eprintln!(
+                "raqib config check: threshold resolution FAILED for {}: {e}",
+                resolved_path.display()
+            );
+            std::process::exit(2);
+        }
+    };
+
+    // Success. Print header + the resolved pretty-dump + validation
+    // footer. All to stdout so scripts can capture it cleanly.
+    println!("raqib config check — {}", resolved_path.display());
+    println!("  ({source_label})");
+    println!("{}", "─".repeat(64));
+    println!("{}", config.pretty_dump(&thresholds));
+    println!("VALIDATION: OK");
+    Ok(())
 }
 
 /// Install Ctrl-C / SIGTERM / SIGHUP shutdown handler (S.0.8). Returns

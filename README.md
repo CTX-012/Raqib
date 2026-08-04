@@ -1,240 +1,102 @@
-# edge_monitor
+<div align="center">
 
-**Model-aware resource monitor and governor for edge AI workloads.**
+# raqib
 
-On a shared edge box running ROS + YOLO + a local LLM, `edge_monitor`
-sees which model each Python process is running and kills the offender
-before the kernel OOM-killer takes the whole robot stack down.
+**The watcher for your GPU box.**
 
-Target platforms: Ubuntu 22.04+ x86_64 and NVIDIA Jetson (JetPack 6).
-Windows is out of scope.
+One screen for every workload competing for your GPU — ROS 2 nodes, LLM servers, agents — and a governor that can evict the one starving the rest.
 
-> **Status — 2026-04-24:** Phase 0 complete. 150 tests pass on the
-> primary dev host (bare Ubuntu 22.04 + RTX 3060). Pre-launch (Phase 1)
-> work in progress: demo recording on Jetson Orin, CI, `.deb`
-> packaging. No stable release yet; API may still shift before
-> `v0.1.0` is tagged.
+![status](https://img.shields.io/badge/status-beta-orange)
+![platform](https://img.shields.io/badge/platform-Linux-blue)
+![license](https://img.shields.io/badge/license-TBD-lightgrey)
 
-## Why not `htop` / `nvtop` / `jtop`
+<!-- DEMO GIF HERE — the single most important thing in this README.
+     10-second loop of the TUI + a glance of the web kiosk. Record with
+     asciinema+agg or a screen recorder -> docs/demo.gif -->
 
-| Tool                      | What it misses                                   |
-| ------------------------- | ------------------------------------------------ |
-| `htop` / `btop`           | Shows `python` — no idea what model is loaded   |
-| `nvtop` / `nvidia-smi`    | VRAM per PID, but no model name, no governor    |
-| `jtop`                    | Jetson-specific, no model awareness, no governor |
-| `systemd-oomd` / earlyoom | Generic memory killer, zero model awareness      |
+*demo GIF goes here*
 
-Nobody combines **model identification + resource attribution + safe
-governor + edge-first**. That's the gap `edge_monitor` fills.
+**[Full documentation](https://ctx-012.github.io/Raqib/)**
+
+</div>
+
+---
+
+## Why raqib?
+
+You run more than one thing on one GPU — a ROS 2 stack, an LLM server, a couple of agents. They fight over the same VRAM. One balloons, and everything else grinds, or the box OOMs and takes your work down with it.
+
+Tools like `nvtop`, `btop`, and `ollama ps` show you *that* it happened — all read-only, five terminals deep. **raqib is one screen for all of it, and it can act.**
+
+- **One pane of glass** for every GPU/VRAM/CPU/thermal workload — ROS 2, ollama, vLLM, llama.cpp, agents.
+- **Honest metrics** — unmeasurable VRAM shows an em dash, never a fake 0.
+- **Live LLM health** — reachability + tokens/sec for ollama, vLLM, llama.cpp.
+- **The governor** — can terminate a workload starving the others. **Off by default, opt-in.**
+- **Built for a shared robotics + AI box.**
+
+---
 
 ## Quick start
 
 ```bash
-# Build the Svelte web companion first so the Rust binary can
-# embed the compiled assets. Skip this if you only want the TUI
-# (the binary still ships a "frontend not built" placeholder page
-# in that case).
-cd web
-npm install
-npm run build
-cd ..
+# prerequisites: build-essential, pkg-config, libssl-dev, git, Rust
+git clone https://github.com/CTX-012/Raqib.git raqib
+cd raqib && cargo build --release
+sudo install -m755 target/release/raqib /usr/local/bin/raqib
 
-# Build release binary (~2.6 MB stripped)
-cargo build --release
-
-# Headless smoke test — two ticks, logs to stderr
-./target/release/edge_monitor --no-ui --ticks 2
-
-# Interactive TUI + web dashboard on http://<host>:7070
-# (defaults to 0.0.0.0 bind — see "Web UI security" below)
-./target/release/edge_monitor
-
-# Disable the web companion (TUI-only)
-./target/release/edge_monitor --no-web
-
-# Override the web port
-./target/release/edge_monitor --port 8080
-
-# Restrict web to localhost-only (recommended on untrusted networks)
-./target/release/edge_monitor --bind 127.0.0.1
-
-# Point at a custom config
-./target/release/edge_monitor --config ./edge_monitor.toml
+# first run
+raqib init      # writes a safe-by-default config to ~/.config/raqib/raqib.toml
+raqib           # TUI + web dashboard on http://localhost:7070
 ```
 
-The web UI is **read-only** for v1.0 — kill confirmation, theme
-selection, and navigation stay TUI-only. The TUI is the
-authoritative control surface; the web dashboard is for at-a-glance
-monitoring from a browser tab.
+Monitoring is on; the governor is off. Open `http://localhost:7070` for the web view.
 
-### Web UI security
-
-**v1.0 has no authentication on the web companion.** The default
-bind address is `0.0.0.0:7070`, which means the dashboard is
-reachable from any host on the same LAN. The design assumes a
-**trusted LAN** — workstation, lab network, robot dev fleet on a
-private subnet. Do not expose the binary directly to the
-internet.
-
-If the host runs on an untrusted network (shared coworking, hotel
-Wi-Fi, cloud VM with a public IP), restrict the listener to
-localhost only:
+**Common commands:**
 
 ```bash
-edge_monitor --bind 127.0.0.1
+raqib --no-ui        # web only (use for background/service runs)
+raqib --no-web       # TUI only
+raqib config check   # validate config + print the loaded policy
+raqib --help
 ```
 
-A future release will add auth (token / mTLS) so the wider bind
-is safe by default; until then, treat the open listener like any
-other unauthenticated dashboard (Grafana on `:3000`, Prometheus
-on `:9090`, etc.) and put a reverse proxy in front of it if you
-need network access with auth.
+---
 
-See [`edge_monitor.toml.example`](edge_monitor.toml.example) for a
-commented config file.
+## Safety in one line
 
-### Web display modes
+raqib can kill processes, but **out of the box it kills nothing** — it observes. The governor only acts after you deliberately set `auto_actuate = true` *and* `default_ai_action = "Kill"` in your config, and the web API can never arm it. Before arming, run `raqib config check` to see exactly what will and won't be killed. See the [governor guide](https://ctx-012.github.io/Raqib/governor).
 
-The web dashboard has **five modes**, each answering one distinct
-operator question. Switch via the `mode` dropdown in the header, or
-by setting `?mode=X` in the URL (bookmarkable, refresh-safe).
+---
 
-| Mode | URL | Purpose |
-| --- | --- | --- |
-| **Dashboard** | `/` (default) | "What's the whole system doing?" — the full grid: vitals, workloads, activity, alerts, settings |
-| **Focus** | `?mode=focus&pid=N` | "What's THIS workload doing under load?" — big-number tiles + a rolling 60-second sparkline for one selected PID. Picker side rail lists other live workloads |
-| **Timeline** | `?mode=timeline` | "What happened when?" — chronological alerts + activity feed dominate the viewport, with a compact vitals strip and workloads side rail |
-| **Kiosk** | `?mode=kiosk` | "Is anything on fire right now?" — glance-only wall view with a big overall-severity banner and three big-number tiles. No interactive elements; auto-selects the high-contrast theme on first load |
-| **History** | `?mode=history` | "What happened before I got here?" — full-viewport event archive + dead-PID trajectory drill-in. Snapshot-on-open (not a live poll), reload to re-fetch |
+## Documentation
 
-Bookmark `http://<host>:7070/?mode=kiosk` on a wall monitor to
-land straight in the glance view every time. Focus mode carries
-an extra `&pid=N` for deep-linking a specific workload —
-`?mode=focus&pid=42` sends you to workload PID 42's live vitals.
-An invalid or unknown `?mode=X` value silently falls back to
-Dashboard.
+Full guides, config reference, examples, and troubleshooting live on the **[documentation site](https://ctx-012.github.io/Raqib/)**:
 
-Design + full build history in
-[`docs/PHASE5_DISPLAY_MODES_DESIGN.md`](docs/PHASE5_DISPLAY_MODES_DESIGN.md).
+- **[Getting started](https://ctx-012.github.io/Raqib/getting-started)** — install, first run, the five views
+- **[Configuration](https://ctx-012.github.io/Raqib/configuration)** — every setting, explained
+- **[The governor](https://ctx-012.github.io/Raqib/governor)** — how the kill switch works, safely
+- **[Experiments](https://ctx-012.github.io/Raqib/experiments)** — hands-on walkthroughs (incl. a safe kill demo)
+- **[Integrations](https://ctx-012.github.io/Raqib/integrations)** — ollama, vLLM, llama.cpp, ROS 2, Gazebo
+- **[Troubleshooting](https://ctx-012.github.io/Raqib/troubleshooting)**
 
-### CLI flags
+---
 
-| Flag                  | Effect                                                       |
-| --------------------- | ------------------------------------------------------------ |
-| `--config <PATH>`     | Load TOML config (default: `./edge_monitor.toml` if present) |
-| `--no-ui`             | Run headless; log to stderr only                             |
-| `--ticks <N>`         | Exit after N ticks (`0` = run until killed). Useful in CI    |
-| `--log-level <LEVEL>` | `trace` / `debug` / `info` / `warn` / `error`                |
-| `--log-format <FMT>`  | `human` (default K=V text) or `json` (one JSON object per line, `jq`-pipeable) |
-| `--log-stderr`        | Force tracing to stderr while running the TUI (default: write to log file) |
-| `--theme <NAME>`      | `dark` (default), `light`, or `high-contrast` (UX_CONTRACT.md §13) |
-| `--no-web`            | Disable the embedded web companion                           |
-| `--port <N>`          | Web companion listen port (default `7070`)                   |
-| `--bind <IP>`         | Web companion listen address (default `0.0.0.0`, LAN-accessible — see "Web UI security") |
+## About the name
 
-Logs default to `~/.cache/edge_monitor/edge_monitor.log` when running
-the dashboard so tracing output cannot bleed into the alternate-screen
-TUI. `--no-ui` and the subcommands keep using stderr; pass
-`--log-stderr` to opt back into stderr while the TUI is active.
+**raqib** (Arabic) — *"the watchful one, who observes and guards."* A tool that watches over your workloads so you don't have to.
 
-## History
+---
 
-Every AI process exit is appended to a typed run store under
-`~/.local/share/edge_monitor`. Inspect it with the `history`
-subcommand:
+## Contributing
+
+Issues and PRs welcome — especially first-run friction reports.
 
 ```bash
-# Summary table — one row per known model.
-edge_monitor history
-
-# Recent runs of one specific model.
-edge_monitor history phi3-mini
-
-# Bigger window, JSON output for scripting.
-edge_monitor history phi3-mini --limit 50 --json
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
+npm --prefix web run test:browser
 ```
-
-Sample output:
-
-```
-$ edge_monitor history phi3-mini
-TIMESTAMP             UPTIME  EXIT  CPU%avg  RSSpk_MB  VRAMpk_MB  TPSavg
-2026-04-28 09:12:04   00:03:42  ok      48.1      1812       4096    36.7
-2026-04-28 08:14:53   00:00:11  ok      63.2      1804       4096    34.9
-2026-04-27 22:58:11   00:08:01  ok      45.0      1820       4096    37.4
-```
-
-The store path, retention cap, and regression-detector thresholds are
-configurable — see [docs/configuration.md](docs/configuration.md)
-sections `[storage]` and `[regression]`.
-
-## Safety defaults
-
-1. **Dry-run is the default.** No kill signals are sent unless
-   `policy.enforce = true` in config.
-2. **Allowlist is honored first.** Allowlisted processes are never
-   killed by automated policy.
-3. **SIGTERM before SIGKILL.** Configurable grace period (default 5s,
-   minimum 1s).
-4. **Rate limit.** At most 3 automated kills per 60s window.
-5. **Every kill is audited** — PID, name, model, reason, timestamp,
-   policy snapshot.
-6. **Manual kill respects allowlist** with an explicit override
-   confirm in the TUI.
-
-## Architecture (one tick)
-
-```
-Platform → Classifier → Lifecycle → Governor → UI
- (/proc,    (annotate    (track    (decide    (render)
-  sysinfo,   with model   spawns    SIGTERM/
-  NVML)      + category)  & exits)  SIGKILL,
-                                    audit)
-```
-
-Default tick rate: 1 Hz. TUI renders at 10 Hz with cached data between
-samples. The tick loop uses `event::poll` / `recv_timeout` — never
-`std::thread::sleep`.
-
-## Scope
-
-### In scope (v1, Phase 0 — complete)
-
-- `/proc` + `sysinfo` process sampling, CPU%, RSS, global network
-- NVML for GPU utilization, VRAM, per-process VRAM (graceful fallback
-  when no NVIDIA GPU)
-- Classifier: cmdline / env / script-sniff model identification;
-  Inference / Training / ModelDownload / Framework categories
-- Governor: allowlist, kill_confirm card (CAR-17), SIGTERM→grace
-  →SIGKILL, audit log, rate limit
-- Manual kill by serial ID (allowlist-respecting)
-- Process run summary on termination
-- ratatui TUI
-
-### Out of scope (deferred to Phase 2+)
-
-tegrastats, thermal zones, ROS2 node detection, Prometheus exporter,
-OOM post-mortem, Intel NPU, AMD ROCm, Hailo, web UI, Windows support,
-cgroup enforcement, rosbag correlation.
-
-See [HANDOFF.md](HANDOFF.md) for the phase map.
-
-## Development
-
-```bash
-cargo test                                   # 150 tests
-cargo clippy --all-targets -- -D warnings    # must be clean
-cargo build --release
-```
-
-See [src/CLAUDE.md](src/CLAUDE.md) for coding conventions and safety
-rules that must not be violated when extending the code.
 
 ## License
 
-Dual-licensed under either of:
-
-- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
-- MIT license ([LICENSE-MIT](LICENSE-MIT))
-
-at your option. Contributions are accepted under the same dual license.
+*TBD — add before publishing (MIT / Apache-2.0 dual recommended).*

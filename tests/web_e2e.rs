@@ -853,6 +853,60 @@ async fn history_endpoint_paths_match_contract_constants() {
     );
 }
 
+/// REGRESSION — `/api/settings` MUST emit `config_path` (as a real
+/// string) whenever the runtime resolved a config file to load. The
+/// prior bug in `main.rs` sourced `config_path` only from
+/// `cli.config`, so instances launched via the discovery chain
+/// (~/.config/raqib/raqib.toml — the common case) reported
+/// `"config_path": null` despite the config being live. That masked
+/// the loader outcome and silently disabled web-POST persistence.
+///
+/// This test drives axum with a WebState carrying a real path and
+/// asserts the JSON round-trip preserves it. If a future refactor
+/// re-breaks the wire projection, this fires immediately.
+#[tokio::test]
+async fn settings_endpoint_emits_config_path_when_state_has_one() {
+    let (tx, rx) = watch::channel(WireSnapshot::empty());
+    let cfg = edge_monitor::config::Config::default();
+    let tunables = shared_from_config(&cfg);
+    let cfg_path =
+        std::path::PathBuf::from("/home/tester/.config/raqib/raqib.toml");
+    let state = WebState {
+        rx,
+        auth_token: None,
+        tunables: Some(tunables),
+        config_path: Some(cfg_path.clone()),
+        auto_actuate_at_load: false,
+        default_ai_action_at_load: "Allow".into(),
+        history_view: None,
+    };
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let app = edge_monitor::web::router(state);
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let _ = tx; // keep sender alive so the router doesn't drop.
+
+    let body = reqwest::get(format!("http://{addr}/api/settings"))
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+
+    let parsed: serde_json::Value = serde_json::from_str(&body)
+        .expect("/api/settings body must be valid JSON");
+    assert_eq!(
+        parsed.get("config_path").and_then(|v| v.as_str()),
+        Some(cfg_path.display().to_string().as_str()),
+        "/api/settings.config_path must be a real string when WebState \
+         carries a resolved path — a discovery-launched raqib reporting \
+         null here was the bug main.rs FIX 1 targets. Got body: {body}",
+    );
+}
+
 #[tokio::test]
 async fn snapshot_route_unaffected_by_history_wiring() {
     // Regression pin: adding /api/history endpoints must NOT

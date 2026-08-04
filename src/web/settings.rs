@@ -428,6 +428,70 @@ vram_critical_pct = 95.0
         );
     }
 
+    /// REGRESSION — `SettingsView.config_path` must be `Some(path
+    /// as string)` whenever `WebState.config_path` is populated. This
+    /// pins the wire-side projection that FIX 1 (main.rs sourcing
+    /// config_path from `ConfigSource` instead of `cli.config`)
+    /// relies on: main.rs now supplies the real path for both
+    /// `--config`-launched AND discovery-launched instances, and
+    /// this test ensures the wire mapper doesn't quietly drop it.
+    #[test]
+    fn build_view_emits_config_path_when_state_has_one() {
+        use crate::web::WebState;
+        use std::sync::Arc;
+        use tokio::sync::watch;
+
+        let (_tx, rx) = watch::channel(crate::web::WireSnapshot::empty());
+        let path = std::path::PathBuf::from("/home/tester/.config/raqib/raqib.toml");
+        let cfg = crate::config::Config::default();
+        let tunables = crate::web::tunables::shared_from_config(&cfg);
+        let state = WebState {
+            rx,
+            auth_token: None::<Arc<str>>,
+            tunables: Some(tunables),
+            config_path: Some(path.clone()),
+            auto_actuate_at_load: false,
+            default_ai_action_at_load: "Allow".into(),
+            history_view: None,
+        };
+        let view = build_view(&state);
+        assert_eq!(
+            view.config_path.as_deref(),
+            Some(path.display().to_string().as_str()),
+            "SettingsView.config_path must reflect WebState.config_path — \
+             a Some(path) in state cannot be silently dropped to null",
+        );
+    }
+
+    /// Complementary pin: when `WebState.config_path` is None
+    /// (running on built-in defaults, no config file anywhere),
+    /// the wire view honestly reports null. The two-case pin
+    /// prevents a lazy fix that hard-codes Some(...) unconditionally.
+    #[test]
+    fn build_view_reports_none_when_no_config_path() {
+        use crate::web::WebState;
+        use std::sync::Arc;
+        use tokio::sync::watch;
+
+        let (_tx, rx) = watch::channel(crate::web::WireSnapshot::empty());
+        let cfg = crate::config::Config::default();
+        let tunables = crate::web::tunables::shared_from_config(&cfg);
+        let state = WebState {
+            rx,
+            auth_token: None::<Arc<str>>,
+            tunables: Some(tunables),
+            config_path: None,
+            auto_actuate_at_load: false,
+            default_ai_action_at_load: "Allow".into(),
+            history_view: None,
+        };
+        let view = build_view(&state);
+        assert!(
+            view.config_path.is_none(),
+            "SettingsView.config_path must be None when no config was loaded (defaults path)",
+        );
+    }
+
     #[test]
     fn shared_from_config_produces_resolvable_tunables() {
         let cfg = crate::config::Config::default();

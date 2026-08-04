@@ -39,13 +39,10 @@ pub struct PerPidStats {
 
     // KV cache.
     kv_pct_peak: f32,
-    /// Counts samples where a *new* peak was set. Kept for backward
-    /// compatibility with the original peak-presence flag; the proper
-    /// sample count for averaging lives in `kv_pct_count` below.
-    kv_pct_samples: u32,
-    /// Tier 3.3 — sum + count of every finite kv_cache_pct reading,
-    /// for `kv_cache_avg_pct`. Distinct from `kv_pct_samples` (which
-    /// only ticks on new peaks).
+    /// Sum + count of every finite kv_cache_pct reading. Feeds both
+    /// `kv_cache_avg_pct` (sum / count) and `kv_cache_peak_pct`'s
+    /// presence gate (`count > 0` ⇒ we observed the metric, even if
+    /// every observation was 0.0). Mirrors the tps counter shape.
     kv_pct_sum: f32,
     kv_pct_count: u32,
     /// Tier 3.3 — first and last KV-eviction counter values observed
@@ -147,7 +144,6 @@ impl PerPidStats {
             self.kv_pct_count = self.kv_pct_count.saturating_add(1);
             if kv > self.kv_pct_peak {
                 self.kv_pct_peak = kv;
-                self.kv_pct_samples += 1;
             }
         }
         // Eviction counter: monotonic from the runtime. Latch first-
@@ -235,7 +231,15 @@ impl PerPidStats {
             tokens_per_sec_avg: avg(self.tps_sum, self.tps_samples),
             tokens_per_sec_peak: opt_finite(self.tps_peak, self.tps_samples > 0),
 
-            kv_cache_peak_pct: opt_finite(self.kv_pct_peak, self.kv_pct_samples > 0),
+            // Gate on `kv_pct_count` — the count increments on every
+            // valid reading, so `Some(peak)` surfaces whenever we
+            // observed the metric AT ALL (including a peak of 0.0:
+            // "server observed, KV was empty" is measurably
+            // different from "we never scraped a kv reading"). A
+            // prior version gated on a counter that only ticked on
+            // NEW-peak events, which reported None for an all-zero
+            // KV stream even though we had scraped it many times.
+            kv_cache_peak_pct: opt_finite(self.kv_pct_peak, self.kv_pct_count > 0),
             kv_cache_avg_pct: avg(self.kv_pct_sum, self.kv_pct_count),
             kv_cache_evictions_total: match (self.kv_evictions_first, self.kv_evictions_last) {
                 (Some(first), Some(last)) => Some(last.saturating_sub(first)),
@@ -597,6 +601,58 @@ mod tests {
         let m = acc.snapshot(1).unwrap();
         assert!((m.kv_cache_avg_pct.unwrap() - 50.0).abs() < 1e-3);
         assert!((m.kv_cache_peak_pct.unwrap() - 90.0).abs() < 1e-3);
+    }
+
+    /// REGRESSION — the peak-presence gate must fire whenever a
+    /// valid kv reading arrived, even if every reading was 0.0.
+    /// Old shape gated on a counter that only ticked on a NEW peak,
+    /// so an all-zero-but-observed stream produced `None` — masking
+    /// the fact that we DID scrape the metric (misread as
+    /// "unmeasured" downstream). Post-fix, the peak surfaces as
+    /// `Some(0.0)`: honest "we saw the KV cache, it was empty".
+    #[test]
+    fn kv_cache_peak_pct_populates_for_all_zero_readings() {
+        let mut acc = TelemetryAccumulator::new();
+        for _ in 0..5 {
+            acc.record(TelemetryFrame {
+                pid: 1,
+                kv_cache_pct: Some(0.0),
+                ..TelemetryFrame::new(1)
+            });
+        }
+        let m = acc.snapshot(1).unwrap();
+        assert_eq!(
+            m.kv_cache_peak_pct,
+            Some(0.0),
+            "an all-zero-but-observed kv stream MUST report the peak as \
+             Some(0.0), not None (that was the bug that hid vLLM/llama.cpp \
+             kv_cache in the wire snapshot)",
+        );
+        assert_eq!(m.kv_cache_avg_pct, Some(0.0));
+    }
+
+    /// REGRESSION — the specific first-sample-is-zero case: the
+    /// bug used to compare `kv > peak` (0 > 0 = false) so the very
+    /// first observation was silently discarded from the presence
+    /// signal. If a later scrape produces a real peak the gate now
+    /// fires cleanly (this was masked before as long as at least
+    /// one non-zero came in).
+    #[test]
+    fn kv_cache_peak_pct_populates_when_first_sample_is_zero() {
+        let mut acc = TelemetryAccumulator::new();
+        acc.record(TelemetryFrame {
+            pid: 1,
+            kv_cache_pct: Some(0.0),
+            ..TelemetryFrame::new(1)
+        });
+        // No further samples — bug would leave peak-pct None
+        // because samples-tick was inside the peak conditional.
+        let m = acc.snapshot(1).unwrap();
+        assert_eq!(
+            m.kv_cache_peak_pct,
+            Some(0.0),
+            "a single 0.0 kv reading MUST surface as Some(0.0), not None",
+        );
     }
 
     /// Out-of-range KV percentages (negative, >100, NaN) are dropped —

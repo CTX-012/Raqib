@@ -295,7 +295,19 @@ fn main() -> anyhow::Result<()> {
     // /api/history handlers read. Built here so the same Arc is
     // shared with the web state (below).
     let shared_history_view = edge_monitor::web::history::shared_view();
-    let config_path = cli.config.as_deref().map(std::path::Path::to_path_buf);
+    // Resolve the loaded config's on-disk path from the LOADER's
+    // outcome — NOT from `cli.config`, which only tells us whether
+    // the operator passed `--config`. Discovery-launched runs
+    // (the common case: `~/.config/raqib/raqib.toml`) also have a
+    // real path; ignoring it made `/api/settings.config_path`
+    // report null despite the config being loaded, and it silently
+    // suppressed web-POST persistence (settings.rs:201 branches on
+    // this) for discovery-launched instances. Both symptoms clear
+    // when we source the path from `config_source` instead.
+    let config_path = match &config_source {
+        ConfigSource::Explicit(p) | ConfigSource::Discovered(p) => Some(p.clone()),
+        ConfigSource::Defaults { .. } => None,
+    };
     let mut runtime = Runtime::new(config)
         .with_context(|| "invalid configuration; aborting startup")?;
     runtime.attach_shared_tunables(shared_tunables.clone());
@@ -808,10 +820,9 @@ fn init_tracing(level: &str, format: &str, log_to_file: bool) -> anyhow::Result<
 /// the actionable message that fits.
 ///
 /// `Explicit(_)` / `Discovered(_)` payloads carry the resolved path
-/// even though only `Defaults { searched }` is currently matched on —
-/// having the paths on the enum keeps future extension (e.g. showing
-/// the loaded path in the auth-error footer) a one-line change.
-#[allow(dead_code)]
+/// so `/api/settings.config_path` can display the file the running
+/// instance actually loaded from, and so the settings POST handler
+/// can persist partial threshold updates against that exact path.
 enum ConfigSource {
     /// Loaded from an operator-supplied `--config <path>`.
     Explicit(PathBuf),

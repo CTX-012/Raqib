@@ -39,15 +39,27 @@ Tools like `nvtop`, `btop`, and `ollama ps` show you *that* it happened — all 
 ## Quick start
 
 ```bash
-# prerequisites: build-essential, pkg-config, libssl-dev, git, Rust
+# prerequisites: build-essential, pkg-config, libssl-dev, git, Rust, Node.js (18+)
 git clone https://github.com/CTX-012/Raqib.git raqib
-cd raqib && cargo build --release
+cd raqib
+
+# build the web dashboard assets (they get embedded into the raqib binary)
+npm --prefix web install
+npm --prefix web run build
+
+# build the raqib binary
+cargo build --release
 sudo install -m755 target/release/raqib /usr/local/bin/raqib
 
 # first run
 raqib init      # writes a safe-by-default config to ~/.config/raqib/raqib.toml
 raqib           # TUI + web dashboard on http://localhost:7070
 ```
+
+The `npm` step builds the Svelte dashboard into `web/dist/`; those assets are
+embedded into the raqib binary at compile time. Skip the `npm` step only if
+you'll always run with `--no-web` — otherwise the dashboard shows a "Frontend
+not built" placeholder.
 
 Monitoring is on; the governor is off. Open `http://localhost:7070` for the web view.
 

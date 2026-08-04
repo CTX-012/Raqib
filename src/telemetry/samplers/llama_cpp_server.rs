@@ -1,10 +1,22 @@
 //! llama.cpp server Prometheus scraper (latest.md Tier 1.2b).
 //!
 //! Same architecture as the vLLM scraper but watches for the
-//! `llama-server` binary and consumes the `llama_server_*` metric
-//! namespace. llama.cpp doesn't expose a direct tokens/sec gauge —
-//! we derive it from the `llama_server_n_decode_total` counter divided
-//! by elapsed wall time (the spec calls this out).
+//! `llama-server` binary. Consumes BOTH metric-name schemes emitted
+//! by upstream builds:
+//!
+//! * NEW (current llama.cpp / BitNet) — `llamacpp:*` prefix, with a
+//!   direct rate gauge `llamacpp:predicted_tokens_seconds` that
+//!   avoids the two-sample warmup entirely, plus a matched pair of
+//!   counters `llamacpp:tokens_predicted_total` /
+//!   `llamacpp:tokens_predicted_seconds_total` (tokens per
+//!   generation-second — excludes idle wall time).
+//! * OLD (pre-rename builds) — `llama_server_*` prefix, no direct
+//!   rate gauge; we derive tokens/sec from
+//!   `llama_server_n_decode_total` divided by elapsed wall time.
+//!
+//! Reads are prefer-new-fall-back-to-old at every metric site, so a
+//! mixed fleet (some hosts on new upstream, some pinned to old) still
+//! populates the same `TelemetryFrame` fields.
 //!
 //! Endpoint: llama-server defaults to `--port 8080`, distinct from
 //! vLLM's 8000. We re-use the parser from `vllm_prometheus` because
@@ -25,12 +37,22 @@ use crate::telemetry::source::{
 const DEFAULT_PORT: u16 = 8080;
 const SCRAPE_TIMEOUT: Duration = Duration::from_millis(500);
 
-/// Per-PID state needed to derive a tokens/sec rate from the
-/// `n_decode_total` counter (which is monotonic).
+/// Per-PID state needed to derive a tokens/sec rate from monotonic
+/// counters. Holds the last-scraped tokens-count counter (either
+/// old-format `llama_server_n_decode_total` or new-format
+/// `llamacpp:tokens_predicted_total` — semantically equivalent), plus
+/// the optional new-format cumulative generation-seconds counter
+/// which enables delta-over-delta (tokens per generation-second)
+/// when both samples have it.
 #[derive(Debug, Clone)]
 struct LastSample {
-    decode_total: f64,
-    /// Wall-clock instant at which `decode_total` was read. Tokio
+    /// Monotonic count of tokens predicted so far.
+    tokens_total: f64,
+    /// New-format cumulative generation-seconds counter. `None` when
+    /// upstream is on the old metric names (or the field wasn't in
+    /// the last scrape). Used for the delta-over-delta path.
+    tokens_seconds_total: Option<f64>,
+    /// Wall-clock instant at which the counters were read. Tokio
     /// runs are not real-time but `Instant` is monotonic, which is
     /// what we need for delta arithmetic.
     when: Instant,
@@ -132,11 +154,22 @@ impl TelemetrySource for LlamaCppServerSource {
         let frame = compute_frame(proc.pid, &metrics, self.state.get(&proc.pid), now);
 
         // Persist last sample for next call's rate calculation.
-        if let Some(decode_total) = metrics.get("llama_server_n_decode_total") {
+        // Prefer the new-format counter name; fall back to old for
+        // pre-rename builds. Also snapshot the optional generation-
+        // seconds counter to enable delta-over-delta derivation.
+        let tokens_total = metrics
+            .get("llamacpp:tokens_predicted_total")
+            .or_else(|| metrics.get("llama_server_n_decode_total"))
+            .copied();
+        if let Some(tt) = tokens_total {
+            let tokens_seconds_total = metrics
+                .get("llamacpp:tokens_predicted_seconds_total")
+                .copied();
             self.state.insert(
                 proc.pid,
                 LastSample {
-                    decode_total: *decode_total,
+                    tokens_total: tt,
+                    tokens_seconds_total,
                     when: now,
                     url: Some(url),
                 },
@@ -154,27 +187,89 @@ fn compute_frame(
 ) -> TelemetryFrame {
     let mut frame = TelemetryFrame::new(pid);
 
-    // Direct gauges first (some llama.cpp builds expose the rate).
-    if let Some(v) = m.get("llama_server_tokens_per_sec_avg") {
+    // Direct rate gauge — NEW format only. `llamacpp:predicted_tokens_
+    // seconds` is a per-scrape rate (tokens/sec), so no two-sample
+    // warmup is needed. Old-format builds have no rate-gauge
+    // equivalent (the old `llama_server_tokens_per_sec_avg` was never
+    // shipped in mainline; it lives here for pre-rename local
+    // patches). Prefer new; fall back to the historical name for any
+    // fleet still emitting it.
+    if let Some(v) = m
+        .get("llamacpp:predicted_tokens_seconds")
+        .or_else(|| m.get("llama_server_tokens_per_sec_avg"))
+    {
         frame.tokens_per_sec = Some(*v as f32);
     }
-    if let Some(v) = m.get("llama_server_n_busy_slots") {
+
+    // Busy slots — NEW `llamacpp:requests_processing` → OLD
+    // `llama_server_n_busy_slots`. Semantics identical (in-flight
+    // request count).
+    if let Some(v) = m
+        .get("llamacpp:requests_processing")
+        .or_else(|| m.get("llama_server_n_busy_slots"))
+    {
         frame.concurrent_requests = Some(*v as u32);
     }
-    if let Some(v) = m.get("llama_server_kv_cache_usage") {
+
+    // KV cache — NEW `llamacpp:kv_cache_usage_ratio` → OLD
+    // `llama_server_kv_cache_usage`. Both are 0..1 fractions;
+    // normalise to %.
+    if let Some(v) = m
+        .get("llamacpp:kv_cache_usage_ratio")
+        .or_else(|| m.get("llama_server_kv_cache_usage"))
+    {
         frame.kv_cache_pct = Some((*v as f32) * 100.0);
     }
 
-    // Derive tokens/sec from the n_decode_total counter when no direct
-    // gauge is present. Spec calls this out for older llama.cpp builds.
+    // Counter-derived tokens/sec — only used if the direct rate gauge
+    // was absent (old builds, or the newer gauge is momentarily
+    // missing). Requires a prior sample.
     if frame.tokens_per_sec.is_none()
-        && let Some(decode_now) = m.get("llama_server_n_decode_total")
         && let Some(prev) = last
     {
-        let dt = now.saturating_duration_since(prev.when).as_secs_f32();
-        let dn = (*decode_now - prev.decode_total) as f32;
-        if dt > 0.0 && dn >= 0.0 {
-            frame.tokens_per_sec = Some(dn / dt);
+        // Path A: NEW counter pair. `tokens_predicted_total /
+        // tokens_predicted_seconds_total` — dividing the deltas gives
+        // tokens per *generation*-second, excluding idle wall time
+        // (more accurate than wall-time division when the server is
+        // mostly idle between requests). Requires both current
+        // readings AND a prior seconds-counter reading.
+        if let (Some(t_now), Some(s_now), Some(s_prev)) = (
+            m.get("llamacpp:tokens_predicted_total"),
+            m.get("llamacpp:tokens_predicted_seconds_total"),
+            prev.tokens_seconds_total,
+        ) {
+            let dn = (*t_now - prev.tokens_total) as f32;
+            let dt_gen = (*s_now - s_prev) as f32;
+            if dt_gen > 0.0 && dn >= 0.0 {
+                frame.tokens_per_sec = Some(dn / dt_gen);
+            }
+        }
+
+        // Path B: NEW tokens counter, no seconds pair — fall back to
+        // wall-time delta. Handles the transitional case where
+        // upstream emits the tokens counter but the run started
+        // before we captured a matching seconds-counter sample.
+        if frame.tokens_per_sec.is_none()
+            && let Some(t_now) = m.get("llamacpp:tokens_predicted_total")
+        {
+            let dt = now.saturating_duration_since(prev.when).as_secs_f32();
+            let dn = (*t_now - prev.tokens_total) as f32;
+            if dt > 0.0 && dn >= 0.0 {
+                frame.tokens_per_sec = Some(dn / dt);
+            }
+        }
+
+        // Path C: OLD counter — the pre-rename
+        // `llama_server_n_decode_total` divided by wall time. Kept
+        // for backward compatibility with older llama.cpp builds.
+        if frame.tokens_per_sec.is_none()
+            && let Some(t_now) = m.get("llama_server_n_decode_total")
+        {
+            let dt = now.saturating_duration_since(prev.when).as_secs_f32();
+            let dn = (*t_now - prev.tokens_total) as f32;
+            if dt > 0.0 && dn >= 0.0 {
+                frame.tokens_per_sec = Some(dn / dt);
+            }
         }
     }
 
@@ -257,8 +352,11 @@ mod tests {
     fn compute_frame_derives_tps_from_counter_delta() {
         let t0 = Instant::now();
         // Simulate a 1s window during which 100 tokens decoded.
+        // Backward-compat path: OLD counter name only, no seconds
+        // pair — uses wall-time division (Path C).
         let prev = LastSample {
-            decode_total: 1000.0,
+            tokens_total: 1000.0,
+            tokens_seconds_total: None,
             when: t0,
             url: None,
         };
@@ -282,7 +380,8 @@ mod tests {
     fn compute_frame_no_tps_when_counter_unchanged() {
         let t0 = Instant::now();
         let prev = LastSample {
-            decode_total: 500.0,
+            tokens_total: 500.0,
+            tokens_seconds_total: None,
             when: t0,
             url: None,
         };
@@ -323,7 +422,8 @@ mod tests {
         s.state.insert(
             7,
             LastSample {
-                decode_total: 0.0,
+                tokens_total: 0.0,
+                tokens_seconds_total: None,
                 when: Instant::now(),
                 url: Some(format!("http://127.0.0.1:{}/metrics", port)),
             },
@@ -334,5 +434,191 @@ mod tests {
         let frame = s.sample(&p).await.expect("scrape should succeed");
         assert!((frame.tokens_per_sec.unwrap() - 99.5).abs() < 1e-3);
         assert_eq!(frame.concurrent_requests, Some(2));
+    }
+
+    // -----------------------------------------------------------------
+    // NEW metric-name scheme tests (`llamacpp:*` prefix).
+    //
+    // Upstream llama.cpp renamed its Prometheus metrics from
+    // `llama_server_*` to `llamacpp:*` — raqib was reading only the
+    // old names, so tok/s / kv_cache / activity were ALWAYS null on
+    // current builds. These pin the fix: the sampler MUST populate
+    // frame fields from the new names too, and the direct rate gauge
+    // `llamacpp:predicted_tokens_seconds` MUST let tok/s populate from
+    // a single scrape (no two-sample warmup).
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn compute_frame_new_scheme_direct_rate_gauge_populates_tps_from_single_scrape() {
+        // The bug: current llama.cpp emits `llamacpp:predicted_tokens_
+        // seconds` (a direct rate gauge). Prior code only read
+        // `llama_server_tokens_per_sec_avg`, so tok/s stayed null even
+        // when the server was actively generating.
+        let mut m: HashMap<String, f64> = HashMap::new();
+        m.insert("llamacpp:predicted_tokens_seconds".into(), 14.9);
+        m.insert("llamacpp:kv_cache_usage_ratio".into(), 0.42);
+        m.insert("llamacpp:requests_processing".into(), 1.0);
+        // No prior sample — the direct gauge must be enough.
+        let f = compute_frame(11, &m, None, Instant::now());
+        assert!(
+            (f.tokens_per_sec.unwrap() - 14.9).abs() < 1e-3,
+            "tokens_per_sec must populate from the direct rate gauge on a single scrape"
+        );
+        assert!((f.kv_cache_pct.unwrap() - 42.0).abs() < 1e-3);
+        assert_eq!(f.concurrent_requests, Some(1));
+    }
+
+    #[test]
+    fn compute_frame_new_scheme_counter_pair_uses_delta_over_generation_seconds() {
+        // Delta-over-delta: (tokens_predicted_total delta) /
+        // (tokens_predicted_seconds_total delta) = tokens per
+        // generation-second (excludes idle wall time). Prior sample
+        // holds both counters; current sample supplies both.
+        let t0 = Instant::now();
+        let prev = LastSample {
+            tokens_total: 500.0,
+            tokens_seconds_total: Some(20.0),
+            when: t0,
+            url: None,
+        };
+        let mut m: HashMap<String, f64> = HashMap::new();
+        m.insert("llamacpp:tokens_predicted_total".into(), 650.0);
+        m.insert("llamacpp:tokens_predicted_seconds_total".into(), 30.0);
+        // Wall time between samples is 100 s (mostly idle), but the
+        // server spent 10 s actually generating, producing 150 tokens.
+        // Correct rate is 150 / 10 = 15.0 tok/generation-sec — the
+        // naive wall-time divide would give 1.5, so this discriminates.
+        let now = t0 + Duration::from_secs(100);
+        let f = compute_frame(7, &m, Some(&prev), now);
+        assert!(
+            (f.tokens_per_sec.unwrap() - 15.0).abs() < 1e-3,
+            "delta-over-delta path must use generation-seconds, not wall time"
+        );
+    }
+
+    #[test]
+    fn compute_frame_new_scheme_falls_back_to_wall_time_when_no_seconds_prior() {
+        // New tokens counter present, but no prior seconds-counter
+        // reading (first scrape after upstream upgrade caught the
+        // seconds counter mid-run). Path B: wall-time division.
+        let t0 = Instant::now();
+        let prev = LastSample {
+            tokens_total: 1000.0,
+            tokens_seconds_total: None,
+            when: t0,
+            url: None,
+        };
+        let mut m: HashMap<String, f64> = HashMap::new();
+        m.insert("llamacpp:tokens_predicted_total".into(), 1200.0);
+        // No `llamacpp:tokens_predicted_seconds_total` in this scrape
+        // either — should still yield tps from wall-time.
+        let now = t0 + Duration::from_secs(2);
+        let f = compute_frame(7, &m, Some(&prev), now);
+        // dt=2s, dn=200 → 100 tps.
+        assert!((f.tokens_per_sec.unwrap() - 100.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn compute_frame_new_scheme_wins_when_both_schemes_present() {
+        // Prefer-new: if a mixed-emitter build somehow reports both,
+        // the new-format value must be authoritative for every field.
+        let mut m: HashMap<String, f64> = HashMap::new();
+        m.insert("llamacpp:predicted_tokens_seconds".into(), 20.0);
+        m.insert("llama_server_tokens_per_sec_avg".into(), 5.0);
+        m.insert("llamacpp:kv_cache_usage_ratio".into(), 0.9);
+        m.insert("llama_server_kv_cache_usage".into(), 0.1);
+        m.insert("llamacpp:requests_processing".into(), 4.0);
+        m.insert("llama_server_n_busy_slots".into(), 1.0);
+        let f = compute_frame(0, &m, None, Instant::now());
+        assert!((f.tokens_per_sec.unwrap() - 20.0).abs() < 1e-3);
+        assert!((f.kv_cache_pct.unwrap() - 90.0).abs() < 1e-3);
+        assert_eq!(f.concurrent_requests, Some(4));
+    }
+
+    #[tokio::test]
+    async fn end_to_end_scrape_new_scheme_populates_all_fields() {
+        // Fixture using the REAL current llama.cpp metric names from
+        // the live-validation finding. Reproduces what raqib sees
+        // against a running llama-server / BitNet today; asserts the
+        // fields the old code left null now populate.
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        tokio::spawn(async move {
+            // Metric names are verbatim from the upstream rename +
+            // observed on live `/metrics`. Values are illustrative
+            // but include the ~14.9 tok/s the operator flagged.
+            let body = "\
+# HELP llamacpp:predicted_tokens_seconds tokens/sec (direct rate)
+# TYPE llamacpp:predicted_tokens_seconds gauge
+llamacpp:predicted_tokens_seconds 14.9
+# HELP llamacpp:tokens_predicted_total total tokens predicted
+# TYPE llamacpp:tokens_predicted_total counter
+llamacpp:tokens_predicted_total 8421
+# HELP llamacpp:tokens_predicted_seconds_total seconds spent predicting
+# TYPE llamacpp:tokens_predicted_seconds_total counter
+llamacpp:tokens_predicted_seconds_total 564.3
+# HELP llamacpp:kv_cache_usage_ratio 0..1
+# TYPE llamacpp:kv_cache_usage_ratio gauge
+llamacpp:kv_cache_usage_ratio 0.31
+# HELP llamacpp:requests_processing in-flight requests
+# TYPE llamacpp:requests_processing gauge
+llamacpp:requests_processing 2
+";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            if let Ok((mut sock, _)) = listener.accept().await {
+                let mut buf = [0u8; 1024];
+                let _ = sock.read(&mut buf).await;
+                let _ = sock.write_all(response.as_bytes()).await;
+                let _ = sock.shutdown().await;
+            }
+        });
+
+        let mut s = LlamaCppServerSource::new();
+        // Pin the URL so we hit the local test listener.
+        s.state.insert(
+            9,
+            LastSample {
+                tokens_total: 0.0,
+                tokens_seconds_total: None,
+                when: Instant::now(),
+                url: Some(format!("http://127.0.0.1:{}/metrics", port)),
+            },
+        );
+
+        let mut p = snap(&["llama-server"]);
+        p.pid = 9;
+        let frame = s.sample(&p).await.expect("scrape should succeed");
+        assert!(
+            (frame.tokens_per_sec.unwrap() - 14.9).abs() < 1e-3,
+            "tok/s must populate from llamacpp:predicted_tokens_seconds"
+        );
+        assert!(
+            (frame.kv_cache_pct.unwrap() - 31.0).abs() < 1e-3,
+            "kv_cache_pct must populate from llamacpp:kv_cache_usage_ratio"
+        );
+        assert_eq!(
+            frame.concurrent_requests,
+            Some(2),
+            "concurrent_requests must populate from llamacpp:requests_processing"
+        );
+    }
+
+    #[test]
+    fn compute_frame_new_scheme_kv_cache_only_populates_from_ratio() {
+        // Regression guard: if only the new kv_cache_usage_ratio is
+        // present, we must NOT leave kv_cache_pct null (that was the
+        // live-observed bug for the KV field specifically).
+        let mut m: HashMap<String, f64> = HashMap::new();
+        m.insert("llamacpp:kv_cache_usage_ratio".into(), 0.75);
+        let f = compute_frame(1, &m, None, Instant::now());
+        assert!((f.kv_cache_pct.unwrap() - 75.0).abs() < 1e-3);
     }
 }

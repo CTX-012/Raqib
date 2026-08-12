@@ -84,3 +84,37 @@ jobs:
           name: edge_monitor-deb
           path: target/debian/*.deb
           if-no-files-found: error
+
+  # Freshness gate for the committed web/dist/ bundle. `cargo build`
+  # embeds web/dist/ via rust-embed at compile time; the bundle is
+  # committed so end users don't need Node. This job rebuilds the
+  # bundle from web/src/ against a pinned Node version and fails the
+  # PR if the committed bundle drifted from a fresh build. That's the
+  # discipline that keeps "committed dist" from silently going stale.
+  #
+  # Node version is pinned because vite's minifier output is stable
+  # WITHIN a Node major but can drift ACROSS majors. Bumping this
+  # version is a deliberate action (regenerate + recommit dist).
+  web-dist-freshness:
+    name: web/dist freshness
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: web/package-lock.json
+      - name: npm ci
+        run: npm --prefix web ci
+      - name: npm run build (fresh)
+        run: npm --prefix web run build
+      - name: verify committed dist matches fresh build
+        run: |
+          if ! git diff --exit-code -- web/dist/ ; then
+            echo "::error::web/dist/ is out of date. Regenerate with:" >&2
+            echo "::error::  npm --prefix web ci && npm --prefix web run build" >&2
+            echo "::error::  git add web/dist/ && commit" >&2
+            exit 1
+          fi

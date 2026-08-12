@@ -1,0 +1,6 @@
+# Committed web/dist/ contains built bundle artifacts (minified JS/CSS,
+# gzip-optimised HTML). They're regenerated from web/src/ on every
+# build, and their diffs are not human-reviewable. Mark them binary so
+# `git diff` / GitHub PR review show file-level "changed" only, not
+# line-by-line noise.
+web/dist/** binary

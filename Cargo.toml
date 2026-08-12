@@ -8,6 +8,12 @@
 name = "edge_monitor"
 version = "1.3.2"
 edition = "2024"
+# Minimum supported Rust version. `edition = "2024"` requires 1.85+,
+# and we use let-chains + if-let-guards throughout the tick-loop hot
+# paths, which stabilised in 1.88. Users on distro-packaged rustc
+# (usually 1.70-ish) get a clear "rustc too old" error instead of an
+# opaque syntax failure deep in the compile.
+rust-version = "1.88"
 authors = ["Mohaaxa"]
 license = "MIT OR Apache-2.0"
 description = "raqib — model-aware resource monitor and governor for edge AI workloads"

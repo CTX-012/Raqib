@@ -39,15 +39,12 @@ Tools like `nvtop`, `btop`, and `ollama ps` show you *that* it happened — all 
 ## Quick start
 
 ```bash
-# prerequisites: build-essential, pkg-config, libssl-dev, git, Rust, Node.js (18+)
+# prerequisites: build-essential, pkg-config, libssl-dev, git,
+#                Rust 1.88+ (install via rustup — distro packages are usually too old)
 git clone https://github.com/CTX-012/Raqib.git raqib
 cd raqib
 
-# build the web dashboard assets (they get embedded into the raqib binary)
-npm --prefix web install
-npm --prefix web run build
-
-# build the raqib binary
+# build the raqib binary (web dashboard assets are pre-built + committed)
 cargo build --release
 sudo install -m755 target/release/raqib /usr/local/bin/raqib
 
@@ -56,10 +53,12 @@ raqib init      # writes a safe-by-default config to ~/.config/raqib/raqib.toml
 raqib           # TUI + web dashboard on http://localhost:7070
 ```
 
-The `npm` step builds the Svelte dashboard into `web/dist/`; those assets are
-embedded into the raqib binary at compile time. Skip the `npm` step only if
-you'll always run with `--no-web` — otherwise the dashboard shows a "Frontend
-not built" placeholder.
+The web dashboard's built bundle (`web/dist/`) is committed to the repo, so
+`cargo build --release` works standalone — no Node.js required for end users.
+Contributors who modify anything under `web/src/` need Node.js 20+ and must
+regenerate the bundle with `npm --prefix web ci && npm --prefix web run build`
+before committing; CI enforces that the committed `web/dist/` matches a fresh
+build.
 
 Monitoring is on; the governor is off. Open `http://localhost:7070` for the web view.
 

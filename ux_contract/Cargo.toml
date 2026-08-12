@@ -2,6 +2,15 @@
 name = "ux_contract"
 version = "0.3.22"
 edition = "2024"
+# Minimum supported Rust version. Uniform with the root crate — see
+# root Cargo.toml's `rust-version` comment for rationale (edition 2024
+# + let-chains stabilised in 1.88).
+# NOTE: this is a divergence from the upstream-verbatim ux_contract.
+# The rust-version metadata is a compat gate, not a functional change;
+# it does not touch any wire type / string / constant. The vendoring
+# note in the root Cargo.toml records this as the sole intentional
+# edit vs. upstream.
+rust-version = "1.88"
 description = "UX contract for raqib — copy strings, alert IDs, thresholds, keymap, themes."
 license = "MIT OR Apache-2.0"
 publish = false

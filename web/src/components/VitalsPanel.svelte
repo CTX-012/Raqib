@@ -31,13 +31,16 @@
         }
     }
 
-    // v1.1.12 / CAR-22 — match the TUI's top-3 + count behaviour so
-    // both surfaces show the same hottest zones in the same order
-    // (the operator can glance at either and see the same signal).
-    // Picking the same K=3 instead of "show all on web because more
-    // screen space" because the operator decision in DISPATCH 39
-    // leaned toward consistent presentation.
-    const TOP_THERMAL_ZONES = 3;
+    // Match the TUI's cap so both surfaces show the same hottest
+    // zones in the same order (operator glances at either and sees
+    // the same signal). Kept in lockstep with
+    // `TUI_TOP_THERMAL_ZONES` in `src/ui/panels/vitals.rs` — bump
+    // both together. Original CAR-22 value was 3 and hid the 4th
+    // zone on a common 4-zone x86 dev box; raised to 10 so every
+    // realistic host (x86: 3-5, Jetson AGX: ~9) shows every zone,
+    // with the "N of M zones shown" nag only appearing for exotic
+    // hosts with more than 10 zones.
+    const TOP_THERMAL_ZONES = 10;
 
     $: thermalAll = vitals.thermal_zones ?? [];
     $: thermalSorted = [...thermalAll].sort(

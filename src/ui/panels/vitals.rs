@@ -12,13 +12,21 @@ use ux_contract::host_vitals::ThermalZone;
 
 use super::panel_block;
 
-/// v1.1.12 / CAR-22 — number of hottest thermal zones to show
-/// inline. Jetson Orin AGX exposes ~9 zones, x86 dev hosts ~3;
-/// 3 covers a typical x86 host in full and gives the operator
-/// the headline signal on Jetson with a "+N more" hint. Sized
-/// to fit alongside the existing RAM / VRAM / load / proc rows
-/// without growing the panel.
-const TUI_TOP_THERMAL_ZONES: usize = 3;
+/// Number of hottest thermal zones to show inline. Sized to cover
+/// every currently-known real-world host in full: x86 dev boxes
+/// (3-5 zones typical), Jetson Orin AGX (~9 zones), most
+/// workstations (2-6). Only truly-exotic hosts with more than 10
+/// zones fall back to the "N of M zones shown" honest truncation.
+///
+/// Original CAR-22 cap was 3 — operator-visible on any host with
+/// more than 3 zones (~40% of dev machines). Raised to 10 so the
+/// common case (all realistic zone counts) shows every zone in
+/// full; the truncation nag only appears when it's genuinely
+/// warranted. Wide terminals (100+ cols) fit ~5 zones per line
+/// comfortably; narrower terminals rely on Paragraph's default
+/// truncation, which drops the coldest (least interesting) zones
+/// off the right edge because the list is sorted hottest-first.
+const TUI_TOP_THERMAL_ZONES: usize = 10;
 
 /// v1.1.12 / DISPATCH 107 FIX 4 — vitals-row label column width.
 /// Covers the longest tag ("Processes ", 10 chars) plus trailing
@@ -103,11 +111,11 @@ fn thermal_color(theme: &UiTheme, temp_celsius: f32, thresholds: &EffectiveThres
     }
 }
 
-/// v1.1.12 / CAR-22 — pick the `TUI_TOP_THERMAL_ZONES` hottest
-/// zones from the snapshot, sorted descending by temperature.
-/// Stable on ties (preserves the producer's label sort).
-/// Returns `(top_3, total_zone_count)` so the renderer can show
-/// "3 of 9 zones shown" when there are more.
+/// Pick the `TUI_TOP_THERMAL_ZONES` hottest zones from the
+/// snapshot, sorted descending by temperature. Stable on ties
+/// (preserves the producer's label sort). Returns
+/// `(top_N, total_zone_count)` so the renderer can show
+/// "N of M zones shown" when there are more.
 ///
 /// Public-in-module so the unit test can drive it directly without
 /// instantiating a `Frame`.
@@ -364,14 +372,16 @@ mod tests {
         }
     }
 
-    /// v1.1.12 / CAR-22 — `top_hottest` picks the three HIGHEST
-    /// temperatures from a >3 zone set and reports the total count
-    /// so the renderer can show "3 of 9 zones shown". Pinned because
+    /// `top_hottest` picks the N HIGHEST temperatures from a
+    /// zone set exceeding the cap, and reports the total count so
+    /// the renderer can show "N of M zones shown". Pinned because
     /// the descending-sort + truncate ordering is the property
     /// operators rely on to spot the worst thermal signal at a
-    /// glance.
+    /// glance. Fixture size (12) is chosen to exceed the current
+    /// cap so the truncation path is exercised — if the cap ever
+    /// rises above 12, bump this fixture in lockstep.
     #[test]
-    fn thermal_summary_top3_hottest() {
+    fn thermal_summary_top_hottest_truncates_and_reports_total() {
         let zones = vec![
             z("acpitz", 48.0),
             z("TCPU", 38.5),
@@ -379,16 +389,61 @@ mod tests {
             z("nvme_composite", 52.0),
             z("iwlwifi_1", 41.0),
             z("pch_skylake", 47.0),
+            z("gpu_therm", 65.0),
+            z("cpu_therm_zone_a", 42.0),
+            z("cpu_therm_zone_b", 43.0),
+            z("chipset", 40.0),
+            z("battery", 35.0),
+            z("ambient", 22.0),
         ];
         let (top, total) = top_hottest(&zones);
 
-        assert_eq!(total, 6, "total reports the full zone count");
-        assert_eq!(top.len(), 3, "exactly TUI_TOP_THERMAL_ZONES zones");
-        // Descending by temperature: 71.2, 52.0, 48.0.
+        assert_eq!(total, 12, "total reports the full zone count");
+        assert_eq!(
+            top.len(),
+            TUI_TOP_THERMAL_ZONES,
+            "truncated to exactly TUI_TOP_THERMAL_ZONES entries",
+        );
+        // Hottest-first ordering: 71.2 (x86_pkg_temp) is the
+        // hottest; 22.0 (ambient) is the coldest and should be
+        // dropped by the truncate.
         assert_eq!(top[0].label, "x86_pkg_temp");
         assert!((top[0].temp_celsius - 71.2).abs() < 0.01);
-        assert_eq!(top[1].label, "nvme_composite");
-        assert_eq!(top[2].label, "acpitz");
+        // The two coldest (battery @35, ambient @22) fall off the
+        // top-N slice — verify neither appears.
+        assert!(top.iter().all(|z| z.label != "ambient"));
+        assert!(top.iter().all(|z| z.label != "battery"));
+    }
+
+    /// Common-case regression: a host with ≤ cap zones (e.g. the
+    /// 4-zone x86 dev box that originally triggered this fix) must
+    /// show every zone, no truncation, no "N of M shown" nag. This
+    /// pins the operator-facing behavior of the raised cap.
+    #[test]
+    fn thermal_summary_common_case_four_zones_all_shown() {
+        // Exactly the shape of the operator's dev box that surfaced
+        // the "3 of 4 zones shown" bug pre-fix.
+        let zones = vec![
+            z("acpitz", 43.0),
+            z("acpitz", 45.0),
+            z("x86_pkg_temp", 40.0),
+            z("iwlwifi_1", 30.0),
+        ];
+        let (top, total) = top_hottest(&zones);
+        assert_eq!(total, 4);
+        assert_eq!(
+            top.len(),
+            4,
+            "4 zones ≤ cap ⇒ every zone shown, no truncation (the fix)",
+        );
+        // The renderer's `if total > TUI_TOP_THERMAL_ZONES` guard
+        // means the "N of M" nag is suppressed in this case — pin
+        // that here since it's the whole point of the fix.
+        assert!(
+            total <= TUI_TOP_THERMAL_ZONES,
+            "common-case 4-zone host must be ≤ cap so the 'N of M' \
+             message is hidden by the renderer's guard",
+        );
     }
 
     /// When `zones.len() <= TUI_TOP_THERMAL_ZONES`, `top_hottest`

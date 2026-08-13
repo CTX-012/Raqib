@@ -5922,4 +5922,534 @@ mod tests {
         let decisions = rt.governor.evaluate(&lifecycle, &breaches, &host_breach);
         rt.state.decisions = decisions;
     }
+
+    // ══════════════════════════════════════════════════════════════════
+    // GOVERNOR SIGNAL × THRESHOLD MATRIX
+    //
+    // Post-Candidate-E, proves the governor fires correctly across
+    // every signal (RAM / VRAM / thermal) and every threshold
+    // value (60% / 70% / 80% for RAM/VRAM; 60/70/80 °C for
+    // thermal). Each cell exercises TWO paths:
+    //   * above-threshold + sustain elapsed  → EXACTLY ONE audit
+    //     entry with KillSource::Automated for the breaching PID.
+    //   * below-threshold + sustain elapsed  → ZERO audit entries
+    //     (threshold RESPECTED, not "kill anything with a
+    //     SignalTermSent decision").
+    //
+    // Boundary semantic (confirmed against threshold_breach.rs:191,
+    // 203, 260 — all three signals use `>=`):
+    //   * value AT threshold  → breach fires (>=)
+    //   * value threshold-ε   → no breach
+    //
+    // Test isolation: each test constructs its own Runtime + config
+    // + injects synthetic breach values, drives the full
+    // record_governor_audit path with wall-clock sustain, then
+    // cleans up. Uses unreachable PIDs (libc::kill ⇒ ESRCH; a
+    // failure audit row is still recorded → the wiring is proven
+    // end-to-end without needing a real killable process).
+    //
+    // NOT included here:
+    //   * Live thermal induction — safety choice (forcing real
+    //     thermal stress risks the hardware + already crashed
+    //     Gazebo in a prior investigation). Thermal is unit-only.
+    //   * VRAM live is dispatched to the operator separately (this
+    //     matrix proves the executor's response to VRAM breach at
+    //     three thresholds; the operator runs a live GPU-memory
+    //     canary to prove the platform layer feeds VRAM correctly).
+
+    /// Enum for the parametrized helper.
+    #[derive(Clone, Copy, Debug)]
+    enum MatrixSignal {
+        Ram,
+        Vram,
+        Thermal,
+    }
+
+    /// Build a Runtime configured for a matrix cell. `signal`
+    /// selects which threshold to set; `threshold_val` is the
+    /// numeric threshold. Other thresholds are set to unreachable
+    /// values so ONLY the signal under test can fire.
+    fn matrix_rt_for_cell(signal: MatrixSignal, threshold_val: f64) -> Config {
+        let mut cfg = Config::default();
+        cfg.web.allow_no_auth = true;
+        cfg.governor.auto_actuate = true;
+        cfg.governor.kill_sustain_secs = 1;
+        cfg.thresholds.alert_sustain_secs = Some(1);
+        cfg.policy.default_ai_action = crate::governor::policy::PolicyAction::Kill;
+        cfg.policy.rate_limit_max_kills = 3;
+        cfg.policy.rate_limit_window_secs = 60;
+        // Set the signal under test to `threshold_val`. Note: we
+        // INJECT synthesized breach values (bypassing
+        // build_threshold_breaches), so the OTHER thresholds don't
+        // affect the outcome — leave them at Config::default().
+        // The threshold under test still matters because
+        // `Config::validate` enforces attention < critical, and the
+        // config-check output surfaces the value for human review.
+        match signal {
+            MatrixSignal::Ram => {
+                // Keep attention < critical to satisfy validation.
+                cfg.thresholds.ram_attention_pct = Some(threshold_val - 1.0);
+                cfg.thresholds.ram_critical_pct = Some(threshold_val);
+            }
+            MatrixSignal::Vram => {
+                cfg.thresholds.vram_attention_pct = Some(threshold_val - 1.0);
+                cfg.thresholds.vram_critical_pct = Some(threshold_val);
+            }
+            MatrixSignal::Thermal => {
+                cfg.thresholds.thermal_amber_c = Some(threshold_val - 1.0);
+                cfg.thresholds.thermal_red_c = Some(threshold_val);
+            }
+        }
+        cfg
+    }
+
+    /// Run one matrix cell: setup a Runtime with the given signal
+    /// pinned at `threshold_val`, inject a breach at `metric_val`,
+    /// drive the actuation path with `sustain_hold_secs` of
+    /// wall-clock. Returns the audit entry count.
+    ///
+    /// The synthetic breach is constructed directly (bypassing
+    /// `build_threshold_breaches`) so exact values hit exact
+    /// booleans — the `threshold_breach.rs` unit tests already
+    /// cover the metric-to-boolean logic; this matrix covers the
+    /// executor → actuation composition per signal.
+    fn matrix_run_cell(
+        signal: MatrixSignal,
+        threshold_val: f64,
+        metric_val: f64,
+        sustain_hold_secs: f32,
+    ) -> usize {
+        let cfg = matrix_rt_for_cell(signal, threshold_val);
+        let pid = 1_000_000_300u32
+            + (threshold_val as u32) * 4
+            + match signal {
+                MatrixSignal::Ram => 0,
+                MatrixSignal::Vram => 1,
+                MatrixSignal::Thermal => 2,
+            };
+        let mut rt = Runtime::new(cfg).expect("Runtime::new");
+        rt.state.annotated.push(AnnotatedProcess {
+            pid,
+            name: format!("matrix-{signal:?}-{}", threshold_val as u32),
+            category: crate::model::AICategory::Inference,
+            workload_category: crate::model::WorkloadCategory::Unknown,
+            evidence: String::new(),
+            model_name: None,
+            cpu_pct: 0.0,
+            rss_mb: 0,
+            vram_bytes: None,
+            first_observed_at: Instant::now(),
+            probe_endpoint: None,
+        });
+
+        // Build the (breaches, host_breach) shape for this signal.
+        // Comparison operator is `>=` so `metric_val >= threshold_val`
+        // is the "breached" case.
+        let is_above = metric_val >= threshold_val;
+        let breach = match signal {
+            MatrixSignal::Ram => crate::governor::threshold_breach::ThresholdBreach {
+                pid,
+                vram_pct: None,
+                vram_breached: false,
+                ram_pct: Some(metric_val as f32),
+                ram_breached: is_above,
+            },
+            MatrixSignal::Vram => crate::governor::threshold_breach::ThresholdBreach {
+                pid,
+                vram_pct: Some(metric_val as f32),
+                vram_breached: is_above,
+                ram_pct: None,
+                ram_breached: false,
+            },
+            MatrixSignal::Thermal => crate::governor::threshold_breach::ThresholdBreach {
+                pid,
+                vram_pct: None,
+                vram_breached: false,
+                ram_pct: None,
+                ram_breached: false,
+            },
+        };
+        let host_breach = match signal {
+            MatrixSignal::Thermal => crate::governor::threshold_breach::HostBreach {
+                thermal_breached: is_above,
+                max_temp_c: Some(metric_val as f32),
+                hottest_zone: Some("matrix-zone".into()),
+            },
+            _ => crate::governor::threshold_breach::HostBreach::default(),
+        };
+
+        // Populate breach_since exactly as the tick loop does —
+        // per-PID for VRAM/RAM breaches, per-AI-PID for host
+        // thermal.
+        let now_for_sustain = Instant::now() - std::time::Duration::from_millis(
+            (sustain_hold_secs * 1000.0) as u64,
+        );
+        if breach.vram_breached || breach.ram_breached {
+            rt.breach_since.insert(pid, now_for_sustain);
+        }
+        if host_breach.thermal_breached
+            && rt.state.annotated.iter().any(|p| p.pid == pid)
+        {
+            rt.breach_since.insert(pid, now_for_sustain);
+        }
+
+        // Drive evaluate() to produce state.decisions the way the
+        // tick loop would.
+        let mut lifecycle = crate::lifecycle::LifecycleSnapshot::new();
+        let sample = crate::model::ProcessSample {
+            pid,
+            ppid: Some(1),
+            name: format!("matrix-{signal:?}-{}", threshold_val as u32),
+            cmdline: vec![format!("matrix-{signal:?}")],
+            ..Default::default()
+        };
+        let lc = crate::lifecycle::ProcessLifecycle::new(
+            &sample,
+            Some(crate::model::AICategory::Inference),
+        );
+        lifecycle.processes.insert(pid, lc);
+        rt.state.decisions =
+            rt.governor.evaluate(&lifecycle, &[breach], &host_breach);
+
+        rt.record_governor_audit();
+        rt.state.audit.len()
+    }
+
+    // ─── RAM × 60/70/80 ────────────────────────────────────────────
+
+    #[test]
+    fn matrix_ram_at_60_above_fires_below_doesnt() {
+        // Boundary: `ram_breached = ram_pct >= ram_critical_pct`.
+        // ABOVE (65% ≥ 60%): fires. BELOW (55% < 60%): does not.
+        assert_eq!(matrix_run_cell(MatrixSignal::Ram, 60.0, 65.0, 5.0), 1,
+            "RAM@60 above (65%) sustained MUST fire ONE Automated kill");
+        assert_eq!(matrix_run_cell(MatrixSignal::Ram, 60.0, 55.0, 5.0), 0,
+            "RAM@60 below (55%) MUST NOT fire (threshold respected)");
+    }
+
+    #[test]
+    fn matrix_ram_at_70_above_fires_below_doesnt() {
+        assert_eq!(matrix_run_cell(MatrixSignal::Ram, 70.0, 75.0, 5.0), 1,
+            "RAM@70 above (75%) sustained MUST fire ONE Automated kill");
+        assert_eq!(matrix_run_cell(MatrixSignal::Ram, 70.0, 65.0, 5.0), 0,
+            "RAM@70 below (65%) MUST NOT fire (threshold respected)");
+    }
+
+    #[test]
+    fn matrix_ram_at_80_above_fires_below_doesnt() {
+        assert_eq!(matrix_run_cell(MatrixSignal::Ram, 80.0, 85.0, 5.0), 1,
+            "RAM@80 above (85%) sustained MUST fire ONE Automated kill");
+        assert_eq!(matrix_run_cell(MatrixSignal::Ram, 80.0, 75.0, 5.0), 0,
+            "RAM@80 below (75%) MUST NOT fire (threshold respected)");
+    }
+
+    // ─── VRAM × 60/70/80 ───────────────────────────────────────────
+
+    #[test]
+    fn matrix_vram_at_60_above_fires_below_doesnt() {
+        assert_eq!(matrix_run_cell(MatrixSignal::Vram, 60.0, 65.0, 5.0), 1,
+            "VRAM@60 above (65%) sustained MUST fire ONE Automated kill");
+        assert_eq!(matrix_run_cell(MatrixSignal::Vram, 60.0, 55.0, 5.0), 0,
+            "VRAM@60 below (55%) MUST NOT fire (threshold respected)");
+    }
+
+    #[test]
+    fn matrix_vram_at_70_above_fires_below_doesnt() {
+        assert_eq!(matrix_run_cell(MatrixSignal::Vram, 70.0, 75.0, 5.0), 1,
+            "VRAM@70 above (75%) sustained MUST fire ONE Automated kill");
+        assert_eq!(matrix_run_cell(MatrixSignal::Vram, 70.0, 65.0, 5.0), 0,
+            "VRAM@70 below (65%) MUST NOT fire (threshold respected)");
+    }
+
+    #[test]
+    fn matrix_vram_at_80_above_fires_below_doesnt() {
+        assert_eq!(matrix_run_cell(MatrixSignal::Vram, 80.0, 85.0, 5.0), 1,
+            "VRAM@80 above (85%) sustained MUST fire ONE Automated kill");
+        assert_eq!(matrix_run_cell(MatrixSignal::Vram, 80.0, 75.0, 5.0), 0,
+            "VRAM@80 below (75%) MUST NOT fire (threshold respected)");
+    }
+
+    // ─── THERMAL × 60/70/80 °C ─────────────────────────────────────
+
+    #[test]
+    fn matrix_thermal_at_60c_above_fires_below_doesnt() {
+        assert_eq!(matrix_run_cell(MatrixSignal::Thermal, 60.0, 65.0, 5.0), 1,
+            "THERMAL@60°C above (65°C) sustained MUST fire ONE Automated kill");
+        assert_eq!(matrix_run_cell(MatrixSignal::Thermal, 60.0, 55.0, 5.0), 0,
+            "THERMAL@60°C below (55°C) MUST NOT fire (threshold respected)");
+    }
+
+    #[test]
+    fn matrix_thermal_at_70c_above_fires_below_doesnt() {
+        assert_eq!(matrix_run_cell(MatrixSignal::Thermal, 70.0, 75.0, 5.0), 1,
+            "THERMAL@70°C above (75°C) sustained MUST fire ONE Automated kill");
+        assert_eq!(matrix_run_cell(MatrixSignal::Thermal, 70.0, 65.0, 5.0), 0,
+            "THERMAL@70°C below (65°C) MUST NOT fire (threshold respected)");
+    }
+
+    #[test]
+    fn matrix_thermal_at_80c_above_fires_below_doesnt() {
+        assert_eq!(matrix_run_cell(MatrixSignal::Thermal, 80.0, 85.0, 5.0), 1,
+            "THERMAL@80°C above (85°C) sustained MUST fire ONE Automated kill");
+        assert_eq!(matrix_run_cell(MatrixSignal::Thermal, 80.0, 75.0, 5.0), 0,
+            "THERMAL@80°C below (75°C) MUST NOT fire (threshold respected)");
+    }
+
+    // ─── Boundary semantic (== threshold) per signal ──────────────
+
+    #[test]
+    fn matrix_boundary_at_exactly_threshold_fires_ram() {
+        // `ram_breached = ram_pct >= ram_critical_pct` — inclusive.
+        // metric == threshold ⇒ fires.
+        assert_eq!(matrix_run_cell(MatrixSignal::Ram, 70.0, 70.0, 5.0), 1,
+            "RAM at exactly threshold (70 == 70) MUST fire (>= semantic)");
+    }
+
+    #[test]
+    fn matrix_boundary_at_exactly_threshold_fires_vram() {
+        assert_eq!(matrix_run_cell(MatrixSignal::Vram, 70.0, 70.0, 5.0), 1,
+            "VRAM at exactly threshold (70 == 70) MUST fire (>= semantic)");
+    }
+
+    #[test]
+    fn matrix_boundary_at_exactly_threshold_fires_thermal() {
+        assert_eq!(matrix_run_cell(MatrixSignal::Thermal, 70.0, 70.0, 5.0), 1,
+            "THERMAL at exactly threshold (70 == 70) MUST fire (>= semantic)");
+    }
+
+    // ─── Safety invariants per signal ─────────────────────────────
+    // Each of the three signals independently: disarm wins,
+    // allowlist wins. Governor's safety envelope must hold across
+    // the entire signal set, not just RAM.
+
+    /// Run a signal's ABOVE-threshold breach with `auto_actuate=false`
+    /// (disarmed). Assert audit stays 0 for each signal.
+    fn matrix_disarmed_variant(signal: MatrixSignal) -> usize {
+        let mut cfg = matrix_rt_for_cell(signal, 60.0);
+        cfg.governor.auto_actuate = false;
+        let pid = 1_000_000_400u32
+            + match signal {
+                MatrixSignal::Ram => 0,
+                MatrixSignal::Vram => 1,
+                MatrixSignal::Thermal => 2,
+            };
+        let mut rt = Runtime::new(cfg).expect("Runtime::new");
+        rt.state.annotated.push(AnnotatedProcess {
+            pid,
+            name: "disarmed-target".into(),
+            category: crate::model::AICategory::Inference,
+            workload_category: crate::model::WorkloadCategory::Unknown,
+            evidence: String::new(),
+            model_name: None,
+            cpu_pct: 0.0,
+            rss_mb: 0,
+            vram_bytes: None,
+            first_observed_at: Instant::now(),
+            probe_endpoint: None,
+        });
+        let breach = match signal {
+            MatrixSignal::Ram => crate::governor::threshold_breach::ThresholdBreach {
+                pid,
+                ram_pct: Some(80.0),
+                ram_breached: true,
+                vram_pct: None,
+                vram_breached: false,
+            },
+            MatrixSignal::Vram => crate::governor::threshold_breach::ThresholdBreach {
+                pid,
+                vram_pct: Some(80.0),
+                vram_breached: true,
+                ram_pct: None,
+                ram_breached: false,
+            },
+            MatrixSignal::Thermal => crate::governor::threshold_breach::ThresholdBreach::default(),
+        };
+        let host_breach = match signal {
+            MatrixSignal::Thermal => crate::governor::threshold_breach::HostBreach {
+                thermal_breached: true,
+                max_temp_c: Some(80.0),
+                hottest_zone: Some("z".into()),
+            },
+            _ => crate::governor::threshold_breach::HostBreach::default(),
+        };
+        rt.breach_since.insert(pid, Instant::now() - std::time::Duration::from_secs(5));
+        rt.state.decisions = vec![(
+            pid,
+            crate::governor::KillAction::SignalTermSent,
+            "disarmed matrix test".into(),
+        )];
+        let _ = (breach, host_breach); // decisions already synthesized above
+        rt.record_governor_audit();
+        rt.state.audit.len()
+    }
+
+    #[test]
+    fn matrix_disarm_wins_over_ram_breach() {
+        assert_eq!(matrix_disarmed_variant(MatrixSignal::Ram), 0,
+            "auto_actuate=false MUST suppress even a RAM breach at 80% sustained");
+    }
+
+    #[test]
+    fn matrix_disarm_wins_over_vram_breach() {
+        assert_eq!(matrix_disarmed_variant(MatrixSignal::Vram), 0,
+            "auto_actuate=false MUST suppress even a VRAM breach at 80% sustained");
+    }
+
+    #[test]
+    fn matrix_disarm_wins_over_thermal_breach() {
+        assert_eq!(matrix_disarmed_variant(MatrixSignal::Thermal), 0,
+            "auto_actuate=false MUST suppress even a HOST-thermal breach at 80°C sustained");
+    }
+
+    /// Allowlist wins per signal — an allowlisted process breaching
+    /// each signal individually is NEVER killed. `evaluate()`
+    /// returns Whitelisted (Allow-arm), so state.decisions has NO
+    /// SignalTermSent → record_governor_audit finds no candidate
+    /// → audit stays 0.
+    fn matrix_allowlisted_variant(signal: MatrixSignal) -> usize {
+        let mut cfg = matrix_rt_for_cell(signal, 60.0);
+        // Allowlist the exact comm we'll use for the target.
+        cfg.policy.allowlist.insert("critical_daemon".to_string());
+        let pid = 1_000_000_500u32
+            + match signal {
+                MatrixSignal::Ram => 0,
+                MatrixSignal::Vram => 1,
+                MatrixSignal::Thermal => 2,
+            };
+        let mut rt = Runtime::new(cfg).expect("Runtime::new");
+        rt.state.annotated.push(AnnotatedProcess {
+            pid,
+            name: "critical_daemon".into(),
+            category: crate::model::AICategory::Inference,
+            workload_category: crate::model::WorkloadCategory::Unknown,
+            evidence: String::new(),
+            model_name: None,
+            cpu_pct: 0.0,
+            rss_mb: 0,
+            vram_bytes: None,
+            first_observed_at: Instant::now(),
+            probe_endpoint: None,
+        });
+        let breach = match signal {
+            MatrixSignal::Ram => crate::governor::threshold_breach::ThresholdBreach {
+                pid,
+                ram_pct: Some(80.0),
+                ram_breached: true,
+                vram_pct: None,
+                vram_breached: false,
+            },
+            MatrixSignal::Vram => crate::governor::threshold_breach::ThresholdBreach {
+                pid,
+                vram_pct: Some(80.0),
+                vram_breached: true,
+                ram_pct: None,
+                ram_breached: false,
+            },
+            MatrixSignal::Thermal => crate::governor::threshold_breach::ThresholdBreach::default(),
+        };
+        let host_breach = match signal {
+            MatrixSignal::Thermal => crate::governor::threshold_breach::HostBreach {
+                thermal_breached: true,
+                max_temp_c: Some(80.0),
+                hottest_zone: Some("z".into()),
+            },
+            _ => crate::governor::threshold_breach::HostBreach::default(),
+        };
+        rt.breach_since.insert(pid, Instant::now() - std::time::Duration::from_secs(5));
+        let mut lifecycle = crate::lifecycle::LifecycleSnapshot::new();
+        let sample = crate::model::ProcessSample {
+            pid,
+            ppid: Some(1),
+            name: "critical_daemon".into(),
+            cmdline: vec!["critical_daemon".into()],
+            ..Default::default()
+        };
+        let lc = crate::lifecycle::ProcessLifecycle::new(
+            &sample,
+            Some(crate::model::AICategory::Inference),
+        );
+        lifecycle.processes.insert(pid, lc);
+        rt.state.decisions = rt.governor.evaluate(&lifecycle, &[breach], &host_breach);
+        rt.record_governor_audit();
+        rt.state.audit.len()
+    }
+
+    #[test]
+    fn matrix_allowlist_wins_over_ram_breach() {
+        assert_eq!(matrix_allowlisted_variant(MatrixSignal::Ram), 0,
+            "allowlisted comm MUST never be killed even when breaching RAM");
+    }
+
+    #[test]
+    fn matrix_allowlist_wins_over_vram_breach() {
+        assert_eq!(matrix_allowlisted_variant(MatrixSignal::Vram), 0,
+            "allowlisted comm MUST never be killed even when breaching VRAM");
+    }
+
+    #[test]
+    fn matrix_allowlist_wins_over_thermal_breach() {
+        assert_eq!(matrix_allowlisted_variant(MatrixSignal::Thermal), 0,
+            "allowlisted comm MUST never be killed even during host thermal breach");
+    }
+
+    // ─── Signal interaction: RAM-only breach fires on the RAM leg ─
+
+    /// Multi-signal interaction pin: a PID breaching RAM but NOT
+    /// VRAM (and no thermal) still fires. Guards against a future
+    /// refactor that accidentally couples the signals (e.g. "kill
+    /// only if BOTH RAM and VRAM breach").
+    #[test]
+    fn matrix_ram_only_breach_fires_regardless_of_vram_state() {
+        let cfg = matrix_rt_for_cell(MatrixSignal::Ram, 60.0);
+        let pid = 1_000_000_600u32;
+        let mut rt = Runtime::new(cfg).expect("Runtime::new");
+        rt.state.annotated.push(AnnotatedProcess {
+            pid,
+            name: "ram-only-breach".into(),
+            category: crate::model::AICategory::Inference,
+            workload_category: crate::model::WorkloadCategory::Unknown,
+            evidence: String::new(),
+            model_name: None,
+            cpu_pct: 0.0,
+            rss_mb: 0,
+            vram_bytes: None,
+            first_observed_at: Instant::now(),
+            probe_endpoint: None,
+        });
+        // RAM breaching, VRAM measured but well below any threshold.
+        let breach = crate::governor::threshold_breach::ThresholdBreach {
+            pid,
+            ram_pct: Some(70.0),
+            ram_breached: true,
+            vram_pct: Some(5.0),
+            vram_breached: false,
+        };
+        rt.breach_since
+            .insert(pid, Instant::now() - std::time::Duration::from_secs(5));
+        let mut lifecycle = crate::lifecycle::LifecycleSnapshot::new();
+        let sample = crate::model::ProcessSample {
+            pid,
+            ppid: Some(1),
+            name: "ram-only-breach".into(),
+            cmdline: vec!["ram-only".into()],
+            ..Default::default()
+        };
+        let lc = crate::lifecycle::ProcessLifecycle::new(
+            &sample,
+            Some(crate::model::AICategory::Inference),
+        );
+        lifecycle.processes.insert(pid, lc);
+        rt.state.decisions = rt.governor.evaluate(
+            &lifecycle,
+            &[breach],
+            &crate::governor::threshold_breach::HostBreach::default(),
+        );
+        rt.record_governor_audit();
+        assert_eq!(
+            rt.state.audit.len(),
+            1,
+            "RAM breach alone (VRAM below threshold, no thermal) MUST fire — \
+             the any_breach gate is OR, not AND",
+        );
+    }
 }

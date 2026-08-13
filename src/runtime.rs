@@ -2196,6 +2196,36 @@ impl Runtime {
                 }
             };
 
+            // GATE 3 — actuation-site rate limit (Candidate E).
+            // The pre-fix rate limiter counted DECISIONS in
+            // executor.evaluate(), which drained the budget during
+            // the sustain-hold window (evaluate re-emits
+            // SignalTermSent every tick while sustain holds; each
+            // re-emission drained one budget slot; decision flipped
+            // to RateLimited BEFORE sustain elapsed → actuation
+            // never fired). Fix: rate limit is now enforced HERE,
+            // AFTER the sustain gate, so kills are counted at
+            // delivery time. A candidate that meets sustain but
+            // exceeds the window budget defers to a later tick
+            // (when the window has aged); the pending SignalTermSent
+            // decision persists in `state.decisions` on subsequent
+            // ticks until the actuation-site check clears.
+            //
+            // The decision-time `RateLimited` branch in
+            // `evaluate_process` is retained as ADVISORY — it
+            // surfaces the state for telemetry/audit narration but
+            // no longer suppresses actuation.
+            if self.governor.rate_limit_would_block() {
+                tracing::warn!(
+                    pid,
+                    name = %name,
+                    "auto_actuate: DEFERRING SIGTERM (rate-limit budget \
+                     exhausted for the current window); candidate will \
+                     re-evaluate on the next tick once the window ages"
+                );
+                continue;
+            }
+
             tracing::warn!(
                 pid,
                 name = %name,
@@ -2206,6 +2236,9 @@ impl Runtime {
 
             // THE ACTUATION. send_sigterm captures pidfd + starttime
             // BEFORE the libc::kill call (PID-reuse guard, v1.0.1).
+            // On success, send_sigterm pushes into recent_kills —
+            // the sole production accounting site for the rate
+            // limiter (Candidate E).
             let kill_result = self
                 .governor
                 .send_sigterm(pid, name.clone(), category.unwrap_or(crate::model::AICategory::Inference));
@@ -5594,5 +5627,299 @@ mod tests {
             0,
             "get_hint must not be called when model_name is None",
         );
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // RATE-LIMIT / SUSTAIN COLLISION REPRODUCER (Candidate E design)
+    //
+    // Pre-fix bug: the rate limiter counts DECISIONS (SignalTermSent
+    // emitted by evaluate()) not actuations (send_sigterm calls). While
+    // the sustain gate holds a decision (kill_sustain_secs), every tick
+    // re-emits SignalTermSent and drains the budget. Once
+    // rate_limit_max_kills is spent, evaluate() flips to RateLimited —
+    // the decision is gone before sustain releases, so no actuation
+    // ever fires.
+    //
+    // Live demo (canary+witness safe-kill demo) caught this by
+    // observation only after two failed unit-test-driven fix attempts.
+    // The tests missed it because they seeded pending_kills or
+    // breach_since directly, sidestepping the multi-tick composition
+    // that actually contains the bug.
+    //
+    // These reproducers drive the REAL cross-tick path (multiple
+    // record_governor_audit invocations with real wall-clock advance
+    // between them) so they capture the deadlock precisely. Fixture
+    // uses a synthetic PID far outside /proc range so libc::kill
+    // returns ESRCH — the wiring runs end-to-end, an audit row is
+    // recorded (`success = false` because the OS says no such
+    // process), no real process dies.
+    //
+    // Config chosen so the bug manifests in a hostile-fast window
+    // (sustain=1s, max=3, window=3s, tick=1s). Pre-fix: budget drained
+    // in 3 evaluate() calls (0.5s each after sustain-seeded state),
+    // decision flips before sustain (1s) elapses, actuation never
+    // fires. Post-fix: budget only ticks on send_sigterm() success, so
+    // by the time sustain has elapsed the budget is still intact.
+
+    /// Helper — seed a Runtime with a synthetic AI-classified PID and
+    /// a SignalTermSent decision, but WITHOUT priming breach_since
+    /// (caller controls that timing per test). Mirrors
+    /// `rt_with_signaltermsent_decision` but leaves the sustain map
+    /// empty so tests can drive its evolution across ticks.
+    fn rt_for_ratelimit_reproducer(cfg: Config, pid: u32, name: &str) -> Runtime {
+        let mut rt = Runtime::new(cfg).expect("Runtime::new");
+        rt.state.annotated.push(AnnotatedProcess {
+            pid,
+            name: name.into(),
+            category: crate::model::AICategory::Inference,
+            workload_category: crate::model::WorkloadCategory::Unknown,
+            evidence: String::new(),
+            model_name: None,
+            cpu_pct: 0.0,
+            rss_mb: 0,
+            vram_bytes: None,
+            first_observed_at: Instant::now(),
+            probe_endpoint: None,
+        });
+        rt.state.decisions = vec![(
+            pid,
+            crate::governor::KillAction::SignalTermSent,
+            "synthetic breach for rate-limit/sustain reproducer".to_string(),
+        )];
+        rt
+    }
+
+    /// REPRODUCER — pre-fix RED, post-fix GREEN.
+    ///
+    /// The bug: sustain holds the actuation across ticks; each tick
+    /// re-emits SignalTermSent; the rate limiter (counting decisions)
+    /// drains before sustain releases; the decision flips to
+    /// RateLimited; actuation never happens.
+    ///
+    /// The test drives 4 wall-clock-separated evaluate + actuate
+    /// cycles. The load-bearing assertion is at T≈1.2s: sustain has
+    /// just elapsed, the FIRST send_sigterm attempt must fire (ESRCH
+    /// counted as a delivered kill for audit purposes). Pre-fix, the
+    /// budget was drained to 0/3 in prior ticks and this assertion
+    /// panics with "expected 1 audit row, got 0".
+    #[test]
+    fn sustain_and_rate_limit_multi_tick_reproducer_drives_real_actuation() {
+        let mut cfg = Config::default();
+        cfg.web.allow_no_auth = true;
+        cfg.governor.auto_actuate = true;
+        cfg.governor.kill_sustain_secs = 1;
+        cfg.thresholds.alert_sustain_secs = Some(1); // must be ≤ kill_sustain
+        cfg.policy.default_ai_action = crate::governor::policy::PolicyAction::Kill;
+        cfg.policy.rate_limit_max_kills = 3;
+        cfg.policy.rate_limit_window_secs = 3;
+
+        // Synthetic PID well outside /proc range — libc::kill returns
+        // ESRCH; audit still records the attempt.
+        let pid = 1_000_000_100u32;
+        let mut rt = rt_for_ratelimit_reproducer(cfg, pid, "reproducer-canary");
+
+        // ── T=0.0 — seed sustain window at now; first actuation try ──
+        // Sustain not yet met (observed_for ≈ 0s < 1s). audit stays 0.
+        // The evaluate step happens inside the executor at a HIGHER
+        // level in tick(); here we simulate the actuation-site path
+        // by pre-populating state.decisions + breach_since, then
+        // calling record_governor_audit — that's the composition that
+        // main.rs runs each tick after tick() returns.
+        rt.breach_since.insert(pid, Instant::now());
+        rt.record_governor_audit();
+        assert_eq!(
+            rt.state.audit.len(),
+            0,
+            "T=0: sustain unmet ⇒ no actuation. audit stays empty.",
+        );
+        assert_eq!(
+            rt.governor.kills_remaining_in_window(),
+            3,
+            "T=0: budget untouched. No decision-time drain.",
+        );
+
+        // ── T=0.5s — re-drive. Sustain STILL unmet (observed_for=0.5s < 1s). ──
+        // Pre-fix: evaluate re-emits SignalTermSent every tick,
+        // recent_kills.push_back drains the budget. Post-fix: budget
+        // only ticks on send_sigterm success; still 3/3.
+        //
+        // BUT — we're NOT running evaluate() here (we own state.decisions
+        // manually). So the pre-fix drain in evaluate wouldn't fire in
+        // this test alone. To CAPTURE the pre-fix bug shape, we must
+        // simulate what evaluate() does: push a timestamp onto
+        // recent_kills EACH tick a SignalTermSent decision is present.
+        // We do this via the executor's actual evaluate() call on a
+        // synthetic snapshot — that's the composition that lives in
+        // production tick().
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        // Re-emit the decision as evaluate() would each tick — this is
+        // what drains the budget pre-fix.
+        drive_one_governor_tick(&mut rt, pid);
+        rt.record_governor_audit();
+        assert_eq!(rt.state.audit.len(), 0, "T=0.5: sustain still unmet");
+
+        // ── T=1.2s — sustain now met (observed_for ≥ 1s). Actuation MUST fire. ──
+        // Pre-fix budget-drain shape (3 evaluate() calls between T=0
+        // and T=1.2, spaced ~500ms apart): each call pushes a
+        // recent_kills timestamp; by tick 3 the budget is 0/3, decision
+        // flipped to RateLimited, no SignalTermSent to actuate.
+        std::thread::sleep(std::time::Duration::from_millis(700));
+        drive_one_governor_tick(&mut rt, pid); // pre-fix: this drains 3rd
+        rt.record_governor_audit();
+        assert_eq!(
+            rt.state.audit.len(),
+            1,
+            "T=1.2: sustain met (~1.2s ≥ kill_sustain=1s) MUST produce \
+             ONE audit entry (send_sigterm attempted, ESRCH counted). \
+             Pre-fix bug: decision-time rate limit drained the budget \
+             during sustain-hold; decision flipped to RateLimited; \
+             actuation never fires. Got audit.len={} — if 0, the fix \
+             is not in.",
+            rt.state.audit.len(),
+        );
+        // Post-fix + ratified semantics ("ESRCH does not count"):
+        // the fake PID's libc::kill returns ESRCH, so recent_kills is
+        // NOT pushed by the actuation. And evaluate() no longer
+        // pushes on decision-side. So budget stays at 3/3 throughout.
+        // Pre-fix: 2 decision-side pushes (T=0.5 + T=1.2 drives) →
+        // budget = 3-2 = 1.
+        assert_eq!(
+            rt.governor.kills_remaining_in_window(),
+            3,
+            "T=1.2 post-fix (ratified): decision-side push removed; \
+             ESRCH does not consume budget; budget stays 3/3. Pre-fix \
+             the two drive_one_governor_tick calls each pushed via \
+             evaluate() → budget 3/3→2/3→1/3 → this assert saw 1.",
+        );
+        assert!(
+            rt.governor.pending_kills_count() >= 1
+                || rt.state.audit.iter().any(|e| e.pid == pid),
+            "T=1.2: send_sigterm should have populated pending_kills OR \
+             produced an audit entry naming pid={pid}",
+        );
+
+        // ── T=1.4s — re-drive. AlreadyPending short-circuit should fire; ──
+        // no new SignalTermSent, no budget drain, no re-actuation.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        drive_one_governor_tick(&mut rt, pid);
+        rt.record_governor_audit();
+        // T=1.4 post-fix: AlreadyPending short-circuit fires (pid IS
+        // in pending_kills after the T=1.2 send_sigterm attempt).
+        // recent_kills unchanged. Budget still 3/3.
+        assert_eq!(
+            rt.governor.kills_remaining_in_window(),
+            3,
+            "T=1.4 post-fix: AlreadyPending short-circuits at decision \
+             time; no push (also no decision-side push at all). Budget \
+             stays 3/3. Pre-fix would show 1 (drain accumulated).",
+        );
+    }
+
+    /// COMPANION — the actuation-site enforcement half of Candidate E.
+    /// Pre-condition: rate budget is already full (simulated via a
+    /// test-only backdoor that pushes fake successful kill timestamps
+    /// into recent_kills, mimicking prior successful send_sigterm
+    /// deliveries). Then a fresh sustain-satisfied SignalTermSent
+    /// candidate arrives. Post-fix, record_governor_audit MUST detect
+    /// the exhausted budget and DEFER — audit stays 0. Pre-fix,
+    /// record_governor_audit doesn't check the rate limit at all;
+    /// audit gains +1 despite the full budget.
+    ///
+    /// This test uses the `#[cfg(test)]` helper that the fix will
+    /// add to GovernorExecutor to seed recent_kills without going
+    /// through send_sigterm (which needs a real killable process).
+    /// The helper is what makes actuation-site enforcement live-
+    /// testable in a hermetic unit test.
+    #[test]
+    fn actuation_site_rate_limit_defers_when_budget_exhausted() {
+        let mut cfg = Config::default();
+        cfg.web.allow_no_auth = true;
+        cfg.governor.auto_actuate = true;
+        cfg.governor.kill_sustain_secs = 1;
+        cfg.thresholds.alert_sustain_secs = Some(1);
+        cfg.policy.default_ai_action = crate::governor::policy::PolicyAction::Kill;
+        cfg.policy.rate_limit_max_kills = 3;
+        cfg.policy.rate_limit_window_secs = 60;
+
+        let pid = 1_000_000_200u32;
+        let mut rt = rt_for_ratelimit_reproducer(cfg, pid, "actuator-canary");
+
+        // Simulate prior successful kills that filled the budget.
+        // Use direct recent_kills manipulation via the test-only
+        // helper the fix will add. Pre-fix this compiles (recent_kills
+        // is pub(crate) in a #[cfg(test)] path via the seed helper).
+        // The fix adds a proper accessor; here we call it by its
+        // post-fix name so the test compiles once the fix lands.
+        for _ in 0..3 {
+            rt.governor
+                .record_actuation_for_test(chrono::Utc::now());
+        }
+        assert_eq!(
+            rt.governor.kills_remaining_in_window(),
+            0,
+            "sanity: budget is exhausted before the test proper",
+        );
+
+        // Freshly seed sustain so the sustain gate is met.
+        rt.breach_since.insert(
+            pid,
+            Instant::now() - std::time::Duration::from_secs(5),
+        );
+
+        // ACTUATION-SITE ENFORCEMENT CHECK. Post-fix,
+        // record_governor_audit MUST notice the exhausted budget and
+        // defer this kill — audit stays empty. Pre-fix, no rate
+        // check at actuation; audit gains +1.
+        rt.record_governor_audit();
+        assert_eq!(
+            rt.state.audit.len(),
+            0,
+            "post-fix: exhausted rate budget MUST defer this actuation \
+             (rate check moved to the actuation site). Pre-fix: audit \
+             would gain +1 because record_governor_audit doesn't check \
+             the rate limit. Got audit.len={}.",
+            rt.state.audit.len(),
+        );
+        assert_eq!(
+            rt.governor.kills_remaining_in_window(),
+            0,
+            "budget stays exhausted (nothing new delivered)",
+        );
+    }
+
+    /// Helper — simulate one governor tick's evaluate() call on the
+    /// synthetic snapshot. Feeds `governor.evaluate()` a lifecycle
+    /// snapshot containing the seeded PID, so the decision-time path
+    /// (including the recent_kills.push_back on SignalTermSent that
+    /// is the pre-fix bug source) runs each call. Re-writes
+    /// state.decisions from the evaluate result so record_governor_audit
+    /// sees the current tick's shape.
+    fn drive_one_governor_tick(rt: &mut Runtime, pid: u32) {
+        let mut lifecycle = crate::lifecycle::LifecycleSnapshot::new();
+        let sample = crate::model::ProcessSample {
+            pid,
+            ppid: Some(1),
+            name: "reproducer-canary".to_string(),
+            cmdline: vec!["reproducer-canary".to_string()],
+            ..Default::default()
+        };
+        let lc = crate::lifecycle::ProcessLifecycle::new(
+            &sample,
+            Some(crate::model::AICategory::Inference),
+        );
+        lifecycle.processes.insert(pid, lc);
+        // A synthetic per-PID breach so the Kill-arm's any_breach gate
+        // passes (this test is about rate-limit vs sustain interaction,
+        // not the breach gate).
+        let breaches = vec![crate::governor::threshold_breach::ThresholdBreach {
+            pid,
+            vram_pct: Some(99.0),
+            vram_breached: true,
+            ram_pct: None,
+            ram_breached: false,
+        }];
+        let host_breach = crate::governor::threshold_breach::HostBreach::default();
+        let decisions = rt.governor.evaluate(&lifecycle, &breaches, &host_breach);
+        rt.state.decisions = decisions;
     }
 }

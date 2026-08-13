@@ -5,3 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc e790b4f5572d0cb868d429338c89d510d2c19db3394dba04211cb876252d2aa3 # shrinks to max = 0, n_candidates = 1
+cc a278d8455cbc365ac31de969e106eeac99adf622f98213acce0fb14af5fd7357 # shrinks to max = 1, n_candidates = 2

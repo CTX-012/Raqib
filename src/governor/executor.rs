@@ -101,23 +101,19 @@ impl GovernorExecutor {
             // to a HashMap built once at evaluate() entry.
             let breach = breaches.iter().find(|b| b.pid == pid);
             let (action, reason) = self.evaluate_process(pid, lifecycle, breach, host_breach);
-            // Record enforced kills against the window so subsequent
-            // candidates in the same tick see the budget drop.
-            //
-            // v1.3.2 / DISPATCH 77 / 62-E — `AlreadyPending` is
-            // deliberately EXCLUDED from this counter. A stubborn
-            // post-SIGTERM PID returns `AlreadyPending` every tick
-            // (`evaluate_process`'s pending-check short-circuit
-            // below); counting those would re-drain the budget the
-            // pre-fix code drained by re-emitting `SignalTermSent`.
-            // Only the FIRST `SignalTermSent` for a given PID
-            // counts against the 3-per-60s window; subsequent
-            // ticks for the same PID surface as `AlreadyPending`
-            // and leave the budget free for OTHER PIDs that need
-            // fresh kills.
-            if matches!(action, KillAction::SignalTermSent) {
-                self.recent_kills.push_back(Utc::now());
-            }
+            // Candidate E (ratified): rate-limit accounting lives at
+            // the ACTUATION site (`send_sigterm` on success) —
+            // decisions no longer drain the budget. The pre-fix
+            // decision-side push here caused a deadlock during
+            // sustain-hold: every tick re-emitted `SignalTermSent`
+            // for the same PID, pushing on each, exhausting the
+            // budget in `rate_limit_max_kills` ticks — decisions
+            // then flipped to `RateLimited` before sustain
+            // (`kill_sustain_secs`) elapsed, so actuation never
+            // fired. Removed. The rate-limit accessor
+            // (`rate_limit_would_block`) below reads recent_kills;
+            // the actual push happens in `send_sigterm` after a
+            // successful `libc::kill(SIGTERM)`.
             decisions.push((pid, action, reason));
         }
         decisions
@@ -241,10 +237,21 @@ impl GovernorExecutor {
                     );
                 }
                 if self.rate_limit_exceeded() {
+                    // Candidate E: this branch is now ADVISORY only.
+                    // It surfaces the RateLimited state for
+                    // telemetry / UI / audit narration BUT does not
+                    // suppress downstream actuation on its own — the
+                    // load-bearing enforcement now lives at the
+                    // actuation site (`record_governor_audit` calls
+                    // `rate_limit_would_block()` before invoking
+                    // `send_sigterm`). This means an operator can
+                    // still see "3 kills in 60s window — deferring"
+                    // in the audit trail; the actuator will simply
+                    // hold the SIGTERM until the window ages.
                     (
                         KillAction::RateLimited,
                         format!(
-                            "rate limit: {} kills in {}s window — deferring {}",
+                            "rate limit ADVISORY: {} kills in {}s window — actuator will defer {}",
                             self.policy.rate_limit_max_kills,
                             self.policy.rate_limit_window_secs,
                             lifecycle.name,
@@ -306,6 +313,31 @@ impl GovernorExecutor {
         self.recent_kills.len() as u32 >= max
     }
 
+    /// Candidate E: the actuation-site rate-limit predicate. Called
+    /// from `Runtime::record_governor_audit` right before
+    /// `send_sigterm` — if it returns true, the actuator DEFERS the
+    /// SIGTERM (audit records a "rate-limited defer" entry, or the
+    /// candidate is silently held for a later tick). This is the
+    /// LOAD-BEARING enforcement of the "N kills per window"
+    /// invariant post-fix; the executor's decision-time
+    /// `rate_limit_exceeded()` branch is now advisory only.
+    ///
+    /// Ratified semantics for "kill" counted here:
+    ///   * successful `send_sigterm` (libc::kill returned 0) — PUSH
+    ///   * ESRCH (already-dead target) — DO NOT PUSH
+    ///   * SIGKILL escalation (`execute_after_grace`) of a
+    ///     previously-SIGTERM'd PID — DO NOT PUSH (same kill, not a
+    ///     new one)
+    ///   * SIGTERM syscall failure other than ESRCH — DO NOT PUSH
+    ///     (we didn't actually deliver anything)
+    ///
+    /// Trims the sliding window before evaluating so callers get an
+    /// accurate read against the current instant.
+    pub fn rate_limit_would_block(&mut self) -> bool {
+        self.trim_rate_limit_window();
+        self.rate_limit_exceeded()
+    }
+
     /// Exposes the kill-budget remaining in the current window. Meant for
     /// UI surface ("3/3 kills left") and tests.
     pub fn kills_remaining_in_window(&mut self) -> u32 {
@@ -344,6 +376,25 @@ impl GovernorExecutor {
                 )));
             }
         }
+
+        // Candidate E — rate-limit accounting. Push into
+        // `recent_kills` ONLY on a successful SIGTERM delivery
+        // (`libc::kill` returned 0 above; any non-zero return
+        // exited via `?` before this point). This is the ONE place
+        // production code pushes into `recent_kills` — the pre-fix
+        // decision-side push in `evaluate()` was removed to close
+        // the rate-limit / sustain collision.
+        //
+        // Ratified semantics reminder:
+        //   * ESRCH (already-dead target) NEVER reaches this line
+        //     — `libc::kill` returns EFAULT/ESRCH, we bail via `?`
+        //     above. Correct: no delivery, no count.
+        //   * SIGKILL escalation lives in `send_sigkill`
+        //     (`execute_after_grace`) and MUST NOT re-push here —
+        //     that's the SAME kill being escalated, not a new one.
+        //     Only `send_sigterm` calls `recent_kills.push_back`.
+        //     Pinned by `send_sigkill_does_not_push_to_recent_kills`.
+        self.recent_kills.push_back(Utc::now());
 
         // Track this kill, carrying the captured identity for the SIGKILL
         // escalation to verify against.
@@ -522,6 +573,24 @@ impl GovernorExecutor {
         self.pending_kills.insert(pending.pid, pending);
     }
 
+    /// Test-only accessor: push a fake "actuation happened at
+    /// `when`" timestamp into `recent_kills`, simulating a prior
+    /// successful `send_sigterm` delivery. Enables actuation-site
+    /// rate-limit tests to reach the "budget exhausted" state
+    /// without needing real killable target processes (a hermetic
+    /// unit test can't spawn+kill 3+ real children reliably on a
+    /// noisy CI runner).
+    ///
+    /// This is `#[cfg(test)]` so it compiles out of the shipped
+    /// binary — same pattern as `insert_pending_kill_for_test`.
+    /// Production code MUST NOT push into `recent_kills` from
+    /// anywhere except the actuation site (per Candidate E:
+    /// "record only on successful SIGTERM delivery").
+    #[cfg(test)]
+    pub fn record_actuation_for_test(&mut self, when: chrono::DateTime<chrono::Utc>) {
+        self.recent_kills.push_back(when);
+    }
+
     /// Get policy reference.
     pub fn policy(&self) -> &GovernorPolicy {
         &self.policy
@@ -611,19 +680,39 @@ mod tests {
         assert_eq!(executor.pending_kills_count(), 1);
     }
 
+    /// CANDIDATE E — CONVERTED (formerly
+    /// `executor_rate_limits_enforced_kills`, which asserted
+    /// decision-time enforcement). Post-Candidate-E, rate-limit
+    /// enforcement moved from `evaluate()` to the actuation site
+    /// (`Runtime::record_governor_audit`). The executor's
+    /// decision-time RateLimited branch is now ADVISORY — it
+    /// surfaces the state for telemetry/audit narration but does
+    /// NOT suppress downstream actuation.
+    ///
+    /// This test verifies the advisory shape at the executor
+    /// layer: when `recent_kills` is pre-populated to the budget
+    /// cap, `evaluate` returns RateLimited (advisory) for the
+    /// otherwise-eligible candidates. The actual "enforcement is
+    /// preserved" property lives in
+    /// `actuation_site_rate_limit_defers_when_budget_exhausted`
+    /// (runtime tests).
     #[test]
-    fn executor_rate_limits_enforced_kills() {
-        // 10 kill-eligible processes, budget 3 — only 3 get SignalTermSent,
-        // the rest are RateLimited. Matches HANDOFF Module 5 acceptance test.
-        // v1.0.1 — flip default_ai_action back to Kill for THIS test so
-        // the rate-limit semantics stay testable; the safe_default's
-        // top-level Allow is the production posture, and the rate
-        // limiter only fires when an operator opts back into Kill.
+    fn executor_rate_limit_branch_is_advisory_when_budget_full() {
         let mut policy = GovernorPolicy::safe_default();
         policy.default_ai_action = PolicyAction::Kill;
         policy.rate_limit_max_kills = 3;
         policy.rate_limit_window_secs = 60;
         let mut executor = GovernorExecutor::new(policy);
+
+        // Force the budget to full via the test-only accessor
+        // (mimics 3 prior successful actuations).
+        for _ in 0..3 {
+            executor.record_actuation_for_test(chrono::Utc::now());
+        }
+        assert!(
+            executor.rate_limit_would_block(),
+            "sanity: budget full ⇒ actuator would block",
+        );
 
         let mut snapshot = crate::lifecycle::LifecycleSnapshot::new();
         let mut breaches: Vec<ThresholdBreach> = Vec::new();
@@ -637,30 +726,81 @@ mod tests {
                     false,
                 ),
             );
-            // v1.3.2 / DISPATCH 78 — all 10 PIDs are breaching, so
-            // we reach the rate-limit branch. The test is about
-            // the per-window cap; the breach gate is "input" here,
-            // not "subject under test."
             breaches.push(ThresholdBreach {
                 pid,
                 vram_pct: Some(99.0),
                 vram_breached: true,
                 ..ThresholdBreach::default()
-
             });
         }
 
         let decisions = executor.evaluate(&snapshot, &breaches, &crate::governor::threshold_breach::HostBreach::default());
-        let killed = decisions
-            .iter()
-            .filter(|(_, a, _)| *a == KillAction::SignalTermSent)
-            .count();
         let limited = decisions
             .iter()
             .filter(|(_, a, _)| *a == KillAction::RateLimited)
             .count();
-        assert_eq!(killed, 3, "must not exceed rate limit");
-        assert_eq!(limited, 7, "remaining candidates must be rate-limited");
+        // ALL 10 return RateLimited (advisory) because
+        // rate_limit_exceeded reads recent_kills (which we filled
+        // via the test helper). The actuation site is what would
+        // actually defer these — that's tested separately in
+        // runtime::tests::actuation_site_rate_limit_defers_when_budget_exhausted.
+        assert_eq!(
+            limited, 10,
+            "advisory branch: all 10 sustain-eligible candidates surface \
+             RateLimited when the budget is exhausted (for telemetry / \
+             audit narration). Enforcement lives at the actuation site.",
+        );
+    }
+
+    /// Companion (renamed): the "budget is intact when nothing was
+    /// actuated" property. Pre-fix, evaluate() drained the budget
+    /// by decision-side pushes on every SignalTermSent — so 10
+    /// candidates would go 3 SignalTermSent + 7 RateLimited via
+    /// self-drain. Post-fix, no decision-side push, so 10 fresh
+    /// SignalTermSent candidates all reach the actuation site
+    /// with the budget still intact.
+    #[test]
+    fn executor_evaluate_does_not_drain_rate_budget() {
+        let mut policy = GovernorPolicy::safe_default();
+        policy.default_ai_action = PolicyAction::Kill;
+        policy.rate_limit_max_kills = 3;
+        policy.rate_limit_window_secs = 60;
+        let mut executor = GovernorExecutor::new(policy);
+        assert_eq!(executor.kills_remaining_in_window(), 3, "sanity: budget starts full");
+
+        let mut snapshot = crate::lifecycle::LifecycleSnapshot::new();
+        let mut breaches: Vec<ThresholdBreach> = Vec::new();
+        for pid in 300..310u32 {
+            snapshot.processes.insert(
+                pid,
+                make_lifecycle(pid, &format!("w{pid}"), Some(AICategory::Inference), false),
+            );
+            breaches.push(ThresholdBreach {
+                pid,
+                vram_pct: Some(99.0),
+                vram_breached: true,
+                ..ThresholdBreach::default()
+            });
+        }
+
+        let decisions = executor.evaluate(&snapshot, &breaches, &crate::governor::threshold_breach::HostBreach::default());
+        // Post-fix: all 10 return SignalTermSent (evaluate no
+        // longer self-drains). Actuation site is what enforces
+        // the 3-per-window cap when it fires them.
+        assert_eq!(
+            decisions.iter().filter(|(_, a, _)| *a == KillAction::SignalTermSent).count(),
+            10,
+            "post-fix: evaluate() emits SignalTermSent for all 10 eligible \
+             candidates — no decision-side rate-limit drain",
+        );
+        assert_eq!(
+            executor.kills_remaining_in_window(),
+            3,
+            "post-fix: budget UNCHANGED after evaluate() — no decision-\
+             side push. Pre-fix this asserted 0 (three pushes, seven \
+             rate-limited). The actuator (record_governor_audit) is what \
+             pushes into recent_kills post-Candidate-E.",
+        );
     }
 
     #[test]
@@ -1098,24 +1238,33 @@ mod tests {
 
     // ── v1.3.2 / DISPATCH 79 / step-4 — deterministic ordering ────
 
-    /// The dispatch's core invariant: under a rate-limit budget
-    /// smaller than the candidate count, the N PIDs selected for
-    /// `SignalTermSent` are deterministically the N LOWEST PIDs —
-    /// not whatever the HashMap iteration happened to surface.
-    /// Pinned by repeating the SAME snapshot through evaluate()
-    /// multiple times and asserting the selected set is invariant.
+    /// CONVERTED (formerly `rate_limit_subset_is_lowest_pids_
+    /// deterministically`). Q4's core invariant preserved through
+    /// Candidate E: under a rate-limit budget smaller than the
+    /// candidate count, the N PIDs the actuator ends up firing are
+    /// deterministically the N LOWEST PIDs.
+    ///
+    /// Post-Candidate-E the split-of-responsibilities changed:
+    /// evaluate() no longer produces the SignalTermSent / RateLimited
+    /// SUBSETS itself (all sustain-eligible candidates now get
+    /// SignalTermSent — the advisory RateLimited only fires when
+    /// recent_kills is already at the cap). The actuation site
+    /// (`Runtime::record_governor_audit`) does the enforcement by
+    /// walking `state.decisions` in ASCENDING PID order and firing
+    /// send_sigterm until rate_limit_would_block trips.
+    ///
+    /// The executor-level property this test now pins: `state.decisions`
+    /// is in ASC PID order. That, combined with the actuation site's
+    /// in-order iteration + budget-cap, guarantees the N LOWEST PIDs
+    /// are the ones that actually fire. Repeated across N runs to guard
+    /// against HashMap iteration randomness.
     #[test]
-    fn rate_limit_subset_is_lowest_pids_deterministically() {
+    fn evaluate_returns_decisions_in_ascending_pid_order() {
         let mut policy = GovernorPolicy::safe_default();
         policy.default_ai_action = PolicyAction::Kill;
         policy.rate_limit_max_kills = 3;
         policy.rate_limit_window_secs = 60;
 
-        // 10 kill-eligible candidates all breaching the threshold.
-        // With budget=3, only 3 land SignalTermSent; the other 7
-        // are RateLimited. Q4 stopgap: the 3 selected MUST be
-        // PIDs 500, 501, 502 (the lowest), not some HashMap
-        // permutation.
         let pids: Vec<u32> = (500..510).collect();
         let breaches: Vec<ThresholdBreach> = pids
             .iter()
@@ -1124,19 +1273,9 @@ mod tests {
                 vram_pct: Some(99.0),
                 vram_breached: true,
                 ..ThresholdBreach::default()
-
             })
             .collect();
 
-        // Repeat the evaluate() call from a fresh executor 16
-        // times. HashMap iteration is randomised per-process via
-        // SipHash with a per-process key, so within ONE process
-        // we may see consistent (but arbitrary) order. The N
-        // repetitions guard against the case where the test
-        // accidentally pinned an arbitrary order — with the sort
-        // in place, all 16 selections must be identical, AND must
-        // be the lowest 3.
-        let expected: Vec<u32> = pids[..3].to_vec();
         for run in 0..16 {
             let mut snapshot = crate::lifecycle::LifecycleSnapshot::new();
             for pid in &pids {
@@ -1151,18 +1290,32 @@ mod tests {
                 );
             }
             let mut executor = GovernorExecutor::new(policy.clone());
-            let decisions = executor.evaluate(&snapshot, &breaches, &crate::governor::threshold_breach::HostBreach::default());
-            let selected: Vec<u32> = decisions
+            let decisions = executor.evaluate(
+                &snapshot,
+                &breaches,
+                &crate::governor::threshold_breach::HostBreach::default(),
+            );
+            // Post-fix: ALL 10 return SignalTermSent (evaluate is
+            // no longer decision-time-rate-limited). The Q4
+            // deterministic-ordering property lives at the
+            // decision Vec's ordering itself.
+            let decision_pids: Vec<u32> = decisions.iter().map(|(p, _, _)| *p).collect();
+            assert_eq!(decision_pids, pids, "run {run}: decisions in ASC PID order");
+            // Sanity: all 10 got SignalTermSent (advisory rate
+            // limit not fired because recent_kills is empty).
+            let signal_term_count = decisions
                 .iter()
                 .filter(|(_, a, _)| *a == KillAction::SignalTermSent)
-                .map(|(p, _, _)| *p)
-                .collect();
+                .count();
             assert_eq!(
-                selected, expected,
-                "run {run}: rate-limit subset MUST be lowest-PID \
-                 deterministically; got {selected:?}",
+                signal_term_count, 10,
+                "run {run}: post-fix, all eligible candidates get SignalTermSent",
             );
         }
+        // The "N lowest fire under budget" enforcement runs at the
+        // actuation site — pinned by the runtime test
+        // `actuation_site_rate_limit_defers_when_budget_exhausted`
+        // and cross-validated live in the safe-kill demo.
     }
 
     /// The decisions Vec itself is sorted ascending by PID under
@@ -1740,6 +1893,100 @@ mod tests {
             KillAction::Skipped,
             "no breach anywhere ⇒ Skipped; got {:?}",
             decisions[0].1,
+        );
+    }
+
+    /// CANDIDATE E firewall: `recent_kills.push_back` must exist in
+    /// EXACTLY ONE production path — `send_sigterm` after the
+    /// successful `libc::kill(SIGTERM)` call. The pre-fix decision-
+    /// time push in `evaluate()` was removed to close the rate-limit /
+    /// sustain collision; if a future refactor re-adds a decision-
+    /// side push (or accidentally pushes in `send_sigkill` /
+    /// `execute_after_grace`), this test fires as a structural
+    /// tripwire. Test-only helpers (`record_actuation_for_test`) are
+    /// excluded because they're behind `#[cfg(test)]`.
+    #[test]
+    fn recent_kills_push_lives_only_in_send_sigterm() {
+        use std::fs;
+        use std::path::PathBuf;
+
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let src = fs::read_to_string(root.join("src/governor/executor.rs"))
+            .expect("read executor.rs");
+        // Split off the `#[cfg(test)]` mod so we only scan production.
+        let production = match src.find("#[cfg(test)]") {
+            Some(idx) => &src[..idx],
+            None => &src[..],
+        };
+
+        // Use `self.recent_kills.push_back(` — the code invocation
+        // shape — so doc-comments mentioning `recent_kills.push_back`
+        // as prose (as this test's own doc-comment does) don't get
+        // false-counted as extra sites.
+        let push_sites: Vec<_> = production
+            .match_indices("self.recent_kills.push_back(")
+            .collect();
+        assert_eq!(
+            push_sites.len(),
+            1,
+            "post-Candidate-E: EXACTLY ONE production `recent_kills.push_back` \
+             (inside `send_sigterm` after libc::kill(SIGTERM) success). \
+             Found {} sites. If this fires, a decision-side push was \
+             re-introduced (pre-fix bug regression) or a SIGKILL path \
+             double-counted (violates ratified semantics).",
+            push_sites.len(),
+        );
+
+        // Structural check: the ONE push site must live inside the
+        // send_sigterm function body. Find the function start and
+        // ensure the push is after that but before the next
+        // top-level `pub fn` / `fn`.
+        let sigterm_fn_start = production
+            .find("pub fn send_sigterm(")
+            .expect("send_sigterm function must exist in production code");
+        // The push's byte offset must be > sigterm_fn_start.
+        let push_offset = push_sites[0].0;
+        assert!(
+            push_offset > sigterm_fn_start,
+            "the sole `recent_kills.push_back` must live inside `send_sigterm`, \
+             not before it (executor evaluate path or elsewhere). push at {}, \
+             send_sigterm at {}.",
+            push_offset,
+            sigterm_fn_start,
+        );
+
+        // And it MUST NOT live inside `send_sigkill` or
+        // `execute_after_grace` (double-count would violate the
+        // ratified "SIGKILL escalation = same kill, don't recount"
+        // semantic).
+        let sigkill_fn_start = production
+            .find("pub fn send_sigkill(")
+            .expect("send_sigkill exists");
+        let after_grace_fn_start = production
+            .find("pub fn execute_after_grace(")
+            .expect("execute_after_grace exists");
+        // If push_offset is greater than send_sigkill's start, it might
+        // live inside send_sigkill OR execute_after_grace OR after both.
+        // We already know it's inside send_sigterm; send_sigterm appears
+        // before send_sigkill in source order — so push should be
+        // BEFORE sigkill_fn_start. Otherwise the sole push has migrated.
+        assert!(
+            push_offset < sigkill_fn_start,
+            "the sole `recent_kills.push_back` MUST be inside `send_sigterm` \
+             (which appears before `send_sigkill` in source order) — NOT \
+             inside send_sigkill (would double-count SIGKILL escalation of \
+             an already-SIGTERM'd PID). push at {}, sigkill at {}.",
+            push_offset,
+            sigkill_fn_start,
+        );
+        assert!(
+            push_offset < after_grace_fn_start,
+            "the sole `recent_kills.push_back` MUST NOT live in \
+             `execute_after_grace` (walks pending_kills, SIGKILL-escalates \
+             already-SIGTERM'd PIDs — those don't count as fresh kills). \
+             push at {}, execute_after_grace at {}.",
+            push_offset,
+            after_grace_fn_start,
         );
     }
 }

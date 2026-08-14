@@ -8,7 +8,8 @@ One screen for every workload competing for your GPU — ROS 2 nodes, LLM server
 
 ![status](https://img.shields.io/badge/status-beta-orange)
 ![platform](https://img.shields.io/badge/platform-Linux-blue)
-![license](https://img.shields.io/badge/license-TBD-lightgrey)
+![rust](https://img.shields.io/badge/rust-1.88%2B-orange)
+![license](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)
 
 <!-- DEMO GIF HERE — the single most important thing in this README.
      10-second loop of the TUI + a glance of the web kiosk. Record with
@@ -75,20 +76,23 @@ raqib --help
 
 ## Safety in one line
 
-raqib can kill processes, but **out of the box it kills nothing** — it observes. The governor only acts after you deliberately set `auto_actuate = true` *and* `default_ai_action = "Kill"` in your config, and the web API can never arm it. Before arming, run `raqib config check` to see exactly what will and won't be killed. See the [governor guide](https://ctx-012.github.io/Raqib/governor).
+raqib can kill processes, but **out of the box it kills nothing** — it observes. The governor only acts after you deliberately flip both `auto_actuate = true` *and* `default_ai_action = "Kill"` in the config file (the web API can't arm it — seven tripwire tests pin the boundary). The auto-kill path itself is **proven live** (RAM canary + 19-cell signal × threshold matrix all green). Before arming, run `raqib config check` to see exactly what will and won't be killed. See the [governor guide](https://ctx-012.github.io/Raqib/#governor) for the four gates and the pre-arm checklist.
+
+The web dashboard is also **secure-by-default** — `--bind 127.0.0.1` (localhost-only) unless you explicitly opt into `--bind 0.0.0.0` (LAN); doing that without an `auth_token` fires a loud startup WARN.
 
 ---
 
 ## Documentation
 
-Full guides, config reference, examples, and troubleshooting live on the **[documentation site](https://ctx-012.github.io/Raqib/)**:
+Full guides, config reference, examples, and troubleshooting live on the **[documentation site](https://ctx-012.github.io/Raqib/)** — one page, anchor-linked:
 
-- **[Getting started](https://ctx-012.github.io/Raqib/getting-started)** — install, first run, the five views
-- **[Configuration](https://ctx-012.github.io/Raqib/configuration)** — every setting, explained
-- **[The governor](https://ctx-012.github.io/Raqib/governor)** — how the kill switch works, safely
-- **[Experiments](https://ctx-012.github.io/Raqib/experiments)** — hands-on walkthroughs (incl. a safe kill demo)
-- **[Integrations](https://ctx-012.github.io/Raqib/integrations)** — ollama, vLLM, llama.cpp, ROS 2, Gazebo
-- **[Troubleshooting](https://ctx-012.github.io/Raqib/troubleshooting)**
+- **[Installation](https://ctx-012.github.io/Raqib/#install)** and **[first run](https://ctx-012.github.io/Raqib/#first-run)**
+- **[The TUI](https://ctx-012.github.io/Raqib/#tui)** + **[keybindings](https://ctx-012.github.io/Raqib/#tui-keys)**
+- **[The web dashboard](https://ctx-012.github.io/Raqib/#web-modes)** (5 modes) + the **[Settings panel](https://ctx-012.github.io/Raqib/#web-settings)**
+- **[Configuration](https://ctx-012.github.io/Raqib/#config)** — every key with the real defaults
+- **[The governor](https://ctx-012.github.io/Raqib/#governor)** — the four gates, the two kill paths, the pre-arm checklist
+- Hands-on: **[see an LLM appear](https://ctx-012.github.io/Raqib/#exp-llm)** · **[safe kill demo (canary)](https://ctx-012.github.io/Raqib/#exp-kill)** · **[reclaim VRAM from ollama](https://ctx-012.github.io/Raqib/#exp-ollama-kill)**
+- **[REST API](https://ctx-012.github.io/Raqib/#api)** · **[Integrations](https://ctx-012.github.io/Raqib/#integrations)** · **[Troubleshooting](https://ctx-012.github.io/Raqib/#troubleshooting)** · **[FAQ](https://ctx-012.github.io/Raqib/#faq)**
 
 ---
 
@@ -110,4 +114,9 @@ npm --prefix web run test:browser
 
 ## License
 
-*TBD — add before publishing (MIT / Apache-2.0 dual recommended).*
+Dual-licensed under either of:
+
+- [MIT license](LICENSE-MIT)
+- [Apache License 2.0](LICENSE-APACHE)
+
+at your option. Contributions are accepted under the same terms.

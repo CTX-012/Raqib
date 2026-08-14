@@ -43,6 +43,16 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 clap = { version = "4", features = ["derive"] }
 toml = "0.8"
+# v1.3.2 — comment/order-preserving TOML editor. Required by
+# `web::settings::persist_partial_toml`: the plain `toml` crate
+# round-trips through `toml::Table`, which SCRAMBLES the operator's
+# hand-authored file on every Save (comments, blank lines, key order
+# all lost). `toml_edit::DocumentMut` parses the source and lets us
+# surgically edit only the 10 web-writable keys ([thresholds] + one
+# [governor] field), preserving everything else byte-for-byte.
+# Already in Cargo.lock as a transitive dep of `toml`, so declaring
+# it direct is a resolver no-op (same 0.22.x semver line).
+toml_edit = "0.22"
 ratatui = "0.29"
 crossterm = "0.28"
 ctrlc = { version = "3", features = ["termination"] }

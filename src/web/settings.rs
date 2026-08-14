@@ -189,15 +189,43 @@ pub async fn update_settings(
         ));
     }
 
-    // (2) Atomic swap of the shared tunables.
+    // (2) Atomic swap of the shared tunables. This happens BEFORE
+    // the disk write so a reader (next tick loop) never sees a disk
+    // value ahead of the in-memory one. The tick loop reads only
+    // SharedTunables, never the disk, so the persist step below is
+    // durability-only.
     {
         let mut guard = tunables.write().unwrap_or_else(|p| p.into_inner());
         guard.thresholds = proposed;
         guard.kill_sustain_secs = new_kill_sustain;
     }
 
+    // Audit line — every web-triggered settings mutation, with the
+    // ARMED-state flag so `warn` or grep-on-armed can surface live
+    // threshold edits against an armed governor. The armed flag is
+    // load-time (see WebState.auto_actuate_at_load); if the operator
+    // arms via TOML+restart, this line will fire with armed=true and
+    // the operator has an audit trail of every subsequent live
+    // threshold edit.
+    tracing::info!(
+        armed = state.auto_actuate_at_load,
+        vram_critical_pct = ?update.thresholds.vram_critical_pct,
+        vram_attention_pct = ?update.thresholds.vram_attention_pct,
+        ram_critical_pct = ?update.thresholds.ram_critical_pct,
+        ram_attention_pct = ?update.thresholds.ram_attention_pct,
+        thermal_red_c = ?update.thresholds.thermal_red_c,
+        thermal_amber_c = ?update.thresholds.thermal_amber_c,
+        kv_critical_pct = ?update.thresholds.kv_critical_pct,
+        kv_attention_pct = ?update.thresholds.kv_attention_pct,
+        alert_sustain_secs = ?update.thresholds.alert_sustain_secs,
+        kill_sustain_secs = new_kill_sustain,
+        "web: settings updated"
+    );
+
     // (3) Partial TOML update — preserves every field NOT in the
-    // web allowlist (notably auto_actuate, policy, audit history).
+    // web allowlist (notably auto_actuate, policy, audit history)
+    // AND every comment/blank line/key order in the operator's
+    // hand-authored file (via toml_edit).
     let persisted = match state.config_path.as_ref() {
         Some(path) => {
             persist_partial_toml(path, &update).is_ok()
@@ -241,75 +269,131 @@ fn resolve_proposed(update: &SettingsUpdate) -> Result<EffectiveThresholds, Conf
     EffectiveThresholds::resolve(&update.thresholds)
 }
 
-/// Persist the partial update to disk. Reads the existing TOML
-/// as a `toml::Table`, mutates the in-scope keys, writes back.
-/// The `[governor].auto_actuate` line is NEVER touched — the
-/// table-level merge only writes the keys we know about.
+/// Persist the partial update to disk. Reads the existing TOML as
+/// a `toml_edit::DocumentMut`, mutates ONLY the 10 web-writable keys
+/// ([thresholds]'s 9 numeric fields + [governor].kill_sustain_secs),
+/// writes back atomically. The write allowlist is exactly the field
+/// set of [`SettingsUpdate`] — auto_actuate, default_ai_action,
+/// allowlist, blocklist, rate_limit_* are NEVER touched. The
+/// existing pin [`tests::persist_partial_preserves_auto_actuate_and_policy`]
+/// enforces this.
+///
+/// Concurrency:
+///   * In-process — a static `Mutex` serializes the read-modify-
+///     write so two concurrent web POSTs cannot interleave and
+///     produce a torn file.
+///   * On-disk — the new file is written to a sibling tempfile, then
+///     `rename(2)`d over the target. POSIX rename is atomic within a
+///     filesystem, so any reader (the operator's editor, another
+///     process) sees either the whole old file or the whole new one,
+///     never a partial write mid-flight.
+///
+/// Comment / order preservation:
+///   * `toml_edit` is a comment-preserving TOML round-tripper. Blank
+///     lines, comments (leading, trailing, inline), key order, and
+///     table order in the operator's hand-authored file all survive.
+///     Contrast with the prior `toml::Table` implementation, which
+///     scrambled every one of those on every Save.
 fn persist_partial_toml(
     path: &PathBuf,
     update: &SettingsUpdate,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    use toml::{Table, Value};
+    use toml_edit::{DocumentMut, Item, Table, value};
+
+    // In-process serialization guard. Two web clients POSTing at
+    // the same second would otherwise both read the file, mutate
+    // their own copy, and race on the write — the later writer
+    // would clobber the earlier's mutation without seeing it. The
+    // Mutex enforces read-modify-write-happens-under-one-lock.
+    static WRITE_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = WRITE_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
 
     let raw = std::fs::read_to_string(path)?;
-    let mut table: Table = raw.parse()?;
+    let mut doc: DocumentMut = raw.parse()?;
 
     // [thresholds] — overwrite ONLY the keys the update carried.
-    // Missing keys in the update stay as whatever the TOML had.
-    let thresholds_table = table
-        .entry("thresholds")
-        .or_insert_with(|| Value::Table(Table::new()))
-        .as_table_mut()
-        .ok_or("`thresholds` is not a table in the existing config")?;
-    if let Some(v) = update.thresholds.thermal_amber_c {
-        thresholds_table.insert("thermal_amber_c".into(), Value::Float(v));
-    }
-    if let Some(v) = update.thresholds.thermal_red_c {
-        thresholds_table.insert("thermal_red_c".into(), Value::Float(v));
-    }
-    if let Some(v) = update.thresholds.vram_attention_pct {
-        thresholds_table.insert("vram_attention_pct".into(), Value::Float(v));
-    }
-    if let Some(v) = update.thresholds.vram_critical_pct {
-        thresholds_table.insert("vram_critical_pct".into(), Value::Float(v));
-    }
-    if let Some(v) = update.thresholds.ram_attention_pct {
-        thresholds_table.insert("ram_attention_pct".into(), Value::Float(v));
-    }
-    if let Some(v) = update.thresholds.ram_critical_pct {
-        thresholds_table.insert("ram_critical_pct".into(), Value::Float(v));
-    }
-    if let Some(v) = update.thresholds.kv_attention_pct {
-        thresholds_table.insert("kv_attention_pct".into(), Value::Float(v));
-    }
-    if let Some(v) = update.thresholds.kv_critical_pct {
-        thresholds_table.insert("kv_critical_pct".into(), Value::Float(v));
-    }
-    if let Some(v) = update.thresholds.alert_sustain_secs {
-        thresholds_table.insert(
-            "alert_sustain_secs".into(),
-            Value::Integer(v as i64),
-        );
+    // Missing keys stay as whatever the TOML had.
+    {
+        let thresholds_item = doc
+            .entry("thresholds")
+            .or_insert(Item::Table(Table::new()));
+        let thresholds_table = thresholds_item
+            .as_table_mut()
+            .ok_or("`thresholds` is not a table in the existing config")?;
+        // Ensure a newly-created (empty) section renders as
+        // `[thresholds]` rather than being elided.
+        thresholds_table.set_implicit(false);
+        if let Some(v) = update.thresholds.thermal_amber_c {
+            thresholds_table["thermal_amber_c"] = value(v);
+        }
+        if let Some(v) = update.thresholds.thermal_red_c {
+            thresholds_table["thermal_red_c"] = value(v);
+        }
+        if let Some(v) = update.thresholds.vram_attention_pct {
+            thresholds_table["vram_attention_pct"] = value(v);
+        }
+        if let Some(v) = update.thresholds.vram_critical_pct {
+            thresholds_table["vram_critical_pct"] = value(v);
+        }
+        if let Some(v) = update.thresholds.ram_attention_pct {
+            thresholds_table["ram_attention_pct"] = value(v);
+        }
+        if let Some(v) = update.thresholds.ram_critical_pct {
+            thresholds_table["ram_critical_pct"] = value(v);
+        }
+        if let Some(v) = update.thresholds.kv_attention_pct {
+            thresholds_table["kv_attention_pct"] = value(v);
+        }
+        if let Some(v) = update.thresholds.kv_critical_pct {
+            thresholds_table["kv_critical_pct"] = value(v);
+        }
+        if let Some(v) = update.thresholds.alert_sustain_secs {
+            thresholds_table["alert_sustain_secs"] = value(v as i64);
+        }
     }
 
     // [governor].kill_sustain_secs — same partial-update shape.
     // Critically, we do NOT TOUCH `[governor].auto_actuate` here.
-    // If a future contributor adds an auto_actuate write here,
-    // `auto_actuate_persist_preserves_existing_value` fires.
+    // Any future edit that touches auto_actuate on this path would
+    // trip `tests::persist_partial_preserves_auto_actuate_and_policy`
+    // (and the serde-layer boundary at `SettingsUpdate` would have
+    // rejected the request body long before we got here).
     if let Some(v) = update.kill_sustain_secs {
-        let governor_table = table
+        let governor_item = doc
             .entry("governor")
-            .or_insert_with(|| Value::Table(Table::new()))
+            .or_insert(Item::Table(Table::new()));
+        let governor_table = governor_item
             .as_table_mut()
             .ok_or("`governor` is not a table in the existing config")?;
-        governor_table.insert(
-            "kill_sustain_secs".into(),
-            Value::Integer(v as i64),
-        );
+        governor_table.set_implicit(false);
+        governor_table["kill_sustain_secs"] = value(v as i64);
     }
 
-    let serialized = toml::to_string(&table)?;
-    std::fs::write(path, serialized)?;
+    let serialized = doc.to_string();
+
+    // Atomic write: tempfile in the same directory, then rename(2).
+    // Same-filesystem rename is POSIX-atomic. On failure, best-
+    // effort cleanup of the tempfile to avoid stragglers. We stamp
+    // the tempfile name with the pid + a per-call counter so
+    // parallel calls (which the Mutex already serializes, but
+    // defense-in-depth) don't collide on the tempfile itself.
+    let parent = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let file_name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or("config path has no file-name component")?;
+    static TMP_COUNTER: std::sync::atomic::AtomicU64 =
+        std::sync::atomic::AtomicU64::new(0);
+    let n = TMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = parent.join(format!(
+        ".{file_name}.raqib-tmp.{}.{n}",
+        std::process::id()
+    ));
+    std::fs::write(&tmp, serialized)?;
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(Box::new(e));
+    }
     Ok(())
 }
 
@@ -425,6 +509,226 @@ vram_critical_pct = 95.0
         assert_eq!(
             after_table["governor"]["kill_sustain_secs"].as_integer(),
             Some(15),
+        );
+    }
+
+    /// A1 PROOF — the persist path preserves comments, blank
+    /// lines, and key order in the operator's hand-authored TOML.
+    /// The prior `toml::Table` round-trip scrambled all three on
+    /// every Save; the `toml_edit::DocumentMut` rewrite keeps
+    /// them. If this test ever fails, the persist path regressed
+    /// to a non-round-tripping serializer and every operator's
+    /// hand-formatted file is being reformatted on every web Save.
+    #[test]
+    fn persist_partial_toml_preserves_comments_blank_lines_and_key_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("em.toml");
+        let initial = "\
+# Top-of-file operator comment — MUST survive round-trips.
+# This file is hand-edited; don't scramble it.
+
+[governor]
+auto_actuate = true   # KILLER IS ARMED — leave this alone
+kill_sustain_secs = 15
+
+[policy]
+default_ai_action = \"Kill\"
+
+# Thresholds tuned for the RTX 3060 dev host.
+[thresholds]
+vram_critical_pct = 95.0
+ram_critical_pct = 90.0
+";
+        std::fs::write(&path, initial).unwrap();
+
+        let update = SettingsUpdate {
+            thresholds: ThresholdsConfig {
+                vram_critical_pct: Some(80.0),
+                ..Default::default()
+            },
+            kill_sustain_secs: None,
+        };
+        persist_partial_toml(&path, &update).expect("persist must succeed");
+
+        let after = std::fs::read_to_string(&path).unwrap();
+
+        // Comments survive (leading block + inline + section):
+        for expected_comment in [
+            "# Top-of-file operator comment",
+            "# This file is hand-edited",
+            "# KILLER IS ARMED",
+            "# Thresholds tuned for the RTX 3060 dev host.",
+        ] {
+            assert!(
+                after.contains(expected_comment),
+                "comment `{expected_comment}` MUST survive the round-trip. \
+                 If this fails, the persist path regressed to a non-comment-\
+                 preserving serializer. Post-write file:\n{after}"
+            );
+        }
+
+        // Blank-line separator between the top comment block and
+        // `[governor]` survives:
+        let head_split: Vec<_> = after.split("[governor]").collect();
+        assert!(
+            head_split.len() >= 2,
+            "TOML no longer contains a `[governor]` header:\n{after}"
+        );
+        assert!(
+            head_split[0].contains("\n\n"),
+            "blank line between top comment block and `[governor]` MUST \
+             survive. Post-write file:\n{after}"
+        );
+
+        // Section order preserved (`[governor]` before `[policy]`
+        // before `[thresholds]`, as in the source):
+        let gov_pos = after.find("[governor]").unwrap();
+        let pol_pos = after.find("[policy]").unwrap();
+        let thr_pos = after.find("[thresholds]").unwrap();
+        assert!(
+            gov_pos < pol_pos && pol_pos < thr_pos,
+            "section order MUST be preserved (governor, policy, thresholds). \
+             Got positions gov={gov_pos} pol={pol_pos} thr={thr_pos}. File:\n{after}"
+        );
+
+        // Key order INSIDE [governor] preserved (auto_actuate before
+        // kill_sustain_secs, as in the source):
+        let gov_section = &after[gov_pos..pol_pos];
+        let aa_pos = gov_section
+            .find("auto_actuate")
+            .expect("auto_actuate key must be present");
+        let ks_pos = gov_section
+            .find("kill_sustain_secs")
+            .expect("kill_sustain_secs key must be present");
+        assert!(
+            aa_pos < ks_pos,
+            "in-section key order MUST be preserved. Got positions \
+             auto_actuate={aa_pos} kill_sustain_secs={ks_pos} within [governor] \
+             section:\n{gov_section}"
+        );
+
+        // The touched value reflects the update:
+        let parsed: toml::Table = after.parse().unwrap();
+        assert!(
+            (parsed["thresholds"]["vram_critical_pct"]
+                .as_float()
+                .unwrap()
+                - 80.0)
+                .abs()
+                < 0.01,
+            "vram_critical_pct must reflect the POST"
+        );
+        // Untouched values unchanged:
+        assert_eq!(
+            parsed["thresholds"]["ram_critical_pct"].as_float(),
+            Some(90.0),
+            "ram_critical_pct MUST NOT change (POST didn't touch it)"
+        );
+        assert_eq!(
+            parsed["governor"]["auto_actuate"].as_bool(),
+            Some(true),
+            "auto_actuate MUST stay armed through the round-trip"
+        );
+        assert_eq!(
+            parsed["policy"]["default_ai_action"].as_str(),
+            Some("Kill"),
+            "policy verb MUST stay unchanged"
+        );
+    }
+
+    /// A2 PROOF — the in-process WRITE_MUTEX inside
+    /// `persist_partial_toml` serializes concurrent web POSTs so
+    /// two callers cannot produce a torn or invalid TOML. Also
+    /// verifies the atomic tempfile+rename doesn't leave stragglers.
+    ///
+    /// This is not just a paranoia test — before the mutex, two
+    /// simultaneous POSTs would each `read_to_string` the pre-write
+    /// state, apply their own patch, and race on `fs::write`. The
+    /// later writer would silently clobber the earlier's patch with
+    /// only its own change on top of the same base — losing the
+    /// earlier operator's write entirely.
+    #[test]
+    fn persist_partial_toml_concurrent_writes_do_not_corrupt() {
+        use std::sync::Arc;
+        let dir = Arc::new(tempfile::tempdir().unwrap());
+        let path = dir.path().join("em.toml");
+        let initial = "\
+[governor]
+auto_actuate = true
+kill_sustain_secs = 15
+
+[thresholds]
+vram_critical_pct = 95.0
+";
+        std::fs::write(&path, initial).unwrap();
+        let path_arc: Arc<PathBuf> = Arc::new(path.clone());
+
+        // 8 concurrent writers, each writing a distinct
+        // vram_critical_pct in [50.0, 57.0].
+        let handles: Vec<_> = (0..8u32)
+            .map(|i| {
+                let p = path_arc.clone();
+                std::thread::spawn(move || {
+                    let update = SettingsUpdate {
+                        thresholds: ThresholdsConfig {
+                            vram_critical_pct: Some(50.0 + f64::from(i)),
+                            ..Default::default()
+                        },
+                        kill_sustain_secs: None,
+                    };
+                    persist_partial_toml(&*p, &update)
+                        .expect("each concurrent write must succeed");
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().expect("worker panicked");
+        }
+
+        // File must still be valid TOML (no torn write):
+        let after = std::fs::read_to_string(&path).unwrap();
+        let parsed: toml::Table = after.parse().unwrap_or_else(|e| {
+            panic!(
+                "post-concurrent-write file MUST parse as TOML. err={e}\nfile:\n{after}"
+            );
+        });
+
+        // Arming preserved through the churn:
+        assert_eq!(
+            parsed["governor"]["auto_actuate"].as_bool(),
+            Some(true),
+            "auto_actuate MUST NOT drift through concurrent writes. \
+             File:\n{after}"
+        );
+        assert_eq!(
+            parsed["governor"]["kill_sustain_secs"].as_integer(),
+            Some(15),
+            "kill_sustain_secs MUST NOT drift through concurrent writes \
+             (no writer touched it). File:\n{after}"
+        );
+
+        // A winner's value survives — must be one of the 8 we wrote:
+        let v = parsed["thresholds"]["vram_critical_pct"]
+            .as_float()
+            .expect("vram_critical_pct MUST be a number");
+        assert!(
+            (50.0..=57.0).contains(&v),
+            "final vram_critical_pct MUST be one of the concurrent \
+             writes (50.0..=57.0); got {v}. File:\n{after}"
+        );
+
+        // No tempfile stragglers left behind — every raqib-tmp.*
+        // should have been renamed into place.
+        let stragglers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains("raqib-tmp"))
+            .collect();
+        assert!(
+            stragglers.is_empty(),
+            "tempfile stragglers left in config dir after concurrent writes: \
+             {stragglers:?}"
         );
     }
 

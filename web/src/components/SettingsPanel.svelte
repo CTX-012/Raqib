@@ -32,6 +32,17 @@
     let saveOk: string | null = null;
     let expanded = false;
 
+    // A4 SAFETY-UX — when the governor is ARMED, threshold changes
+    // take effect on the next tick (SharedTunables is hot-updated),
+    // meaning a slider dragged 95%→30% can immediately start firing
+    // kills against real processes. The Save button is disabled
+    // until the operator explicitly ticks `armedAck` — this is a
+    // speed-bump against accidental live threshold edits, not a
+    // security control (a scripted client can POST directly). The
+    // backend also logs every POST with an `armed=true|false` field
+    // so the audit trail exists regardless of UI path.
+    let armedAck = false;
+
     // Local form state — bound to inputs. The values mirror
     // SettingsView.thresholds + kill_sustain_secs ONLY; no other
     // field is exposed (boundary).
@@ -42,6 +53,12 @@
         thresholds: {},
         kill_sustain_secs: 10,
     };
+
+    // Save is blocked when the governor is armed and the operator
+    // hasn't acknowledged the live-edit hazard. Disarmed → no gate.
+    $: saveBlocked =
+        saving ||
+        (!!view && view.auto_actuate_readonly && !armedAck);
 
     onMount(async () => {
         await refresh();
@@ -131,6 +148,44 @@
                     </p>
                 </div>
 
+                <!--
+                    A4 SAFETY-UX — armed-state warning banner. Only
+                    renders when the governor is armed (i.e. the
+                    operator has already flipped auto_actuate=true
+                    via the TOML + restart path). The banner + the
+                    checkbox gate on Save are the operator-side
+                    speed-bump against accidentally editing kill-
+                    trigger thresholds live. Backend logging still
+                    catches every POST regardless of what the UI
+                    surfaced — this is UX, not the security control.
+                -->
+                {#if view.auto_actuate_readonly}
+                    <div
+                        class="armed-banner"
+                        role="alert"
+                        data-testid="settings-armed-banner"
+                    >
+                        <div class="armed-title">
+                            <span aria-hidden="true">⚠</span>
+                            Governor is ARMED
+                        </div>
+                        <p class="armed-body">
+                            Threshold changes take effect on the next
+                            tick and may immediately trigger kills against
+                            live processes.
+                        </p>
+                        <label class="armed-ack">
+                            <input
+                                type="checkbox"
+                                bind:checked={armedAck}
+                                data-testid="settings-armed-ack"
+                            />
+                            I understand — apply this change to a
+                            live, armed governor.
+                        </label>
+                    </div>
+                {/if}
+
                 <fieldset class="tunables" disabled={saving}>
                     <legend>Editable thresholds &amp; sustain windows</legend>
 
@@ -193,7 +248,15 @@
                     </label>
 
                     <div class="actions">
-                        <button type="button" on:click={save} disabled={saving}>
+                        <button
+                            type="button"
+                            on:click={save}
+                            disabled={saveBlocked}
+                            data-testid="settings-save"
+                            title={view.auto_actuate_readonly && !armedAck
+                                ? 'Governor is armed — tick the acknowledgement above to enable Save.'
+                                : ''}
+                        >
                             {saving ? 'Saving…' : 'Save'}
                         </button>
                         <button type="button" on:click={refresh} disabled={saving}>
@@ -280,6 +343,40 @@
         padding: 0 0.25rem;
         border-radius: 2px;
     }
+    /* A4 armed-state warning banner. Loud but not screaming —
+       distinguishable from the everyday `.error` red so operators
+       don't ignore it as "another form error." */
+    .armed-banner {
+        margin: 0 0 0.8rem;
+        padding: 0.6rem 0.75rem;
+        border: 2px solid rgb(var(--em-critical));
+        border-radius: 4px;
+        background: rgb(var(--em-critical) / 0.12);
+        color: rgb(var(--em-fg));
+    }
+    .armed-title {
+        font-weight: bold;
+        color: rgb(var(--em-critical));
+        display: flex;
+        gap: 0.4rem;
+        align-items: baseline;
+        font-size: 0.9rem;
+    }
+    .armed-body {
+        margin: 0.35rem 0 0.5rem;
+        font-size: 0.85rem;
+    }
+    .armed-ack {
+        display: flex;
+        gap: 0.4rem;
+        align-items: baseline;
+        font-size: 0.85rem;
+        cursor: pointer;
+    }
+    .armed-ack input {
+        margin: 0;
+    }
+
     .tunables {
         border: none;
         padding: 0;

@@ -83,15 +83,15 @@ pub fn render(f: &mut Frame, area: Rect, theme: &UiTheme) {
             body,
         ),
         Line::from(""),
-        // Sprint-7 Item 4 — surface the no-auth posture on the help
-        // overlay so the operator who just SSH'd in to a shared box
-        // can see why the dashboard is reachable from their laptop.
+        // Surface the bind + auth posture on the help overlay so
+        // the operator who just SSH'd in to a shared box can see
+        // whether the dashboard is reachable from their laptop.
         Line::from(Span::styled(
-            "Web UI: 0.0.0.0:7070 by default · NO AUTH · trusted LAN only",
+            "Web UI: 127.0.0.1:7070 by default · localhost-only · NO AUTH",
             Style::default().fg(theme.attention),
         )),
         Line::styled(
-            "  Restrict with --bind 127.0.0.1 on untrusted networks.",
+            "  Expose to the LAN with --bind 0.0.0.0 (pair with an auth_token).",
             body,
         ),
         Line::from(""),

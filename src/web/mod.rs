@@ -115,11 +115,21 @@ pub struct WebState {
 /// is `None`, the middleware passes every request through (the
 /// `web.allow_no_auth = true` opt-out).
 pub fn router(state: WebState) -> Router {
-    // CORS: locked to "any origin" because the server binds to
-    // localhost-only by default; CORS isn't a security boundary
-    // here, just a convenience for browser tooling. If a future
-    // row exposes the server on a real network interface, this
-    // policy needs tightening.
+    // CORS: `allow_origin(Any)` is a convenience for browser
+    // tooling. The DEFAULT `--bind` is `127.0.0.1` (localhost-only,
+    // set in `src/main.rs`), so any origin reaching the server is
+    // already local — CORS is not the security boundary here.
+    //
+    // If the operator opts into `--bind 0.0.0.0` (or a specific LAN
+    // IP), the dashboard becomes network-reachable and browsers on
+    // any origin can hit `/api/*`. In that case, `allow_origin(Any)`
+    // matters — the security boundary MUST come from `web.auth_token`
+    // (Bearer-gated middleware at `auth::require_token`), not CORS.
+    // The startup logging in `src/main.rs` emits a loud WARN when
+    // bind is non-loopback + `allow_no_auth = true`; that's the
+    // operator-visible surface of this trade-off. Do not tighten the
+    // CORS policy here without pairing it with a similar bind-scope-
+    // aware audit of every /api/* route.
     let cors = CorsLayer::new().allow_origin(Any).allow_methods(Any);
 
     // v1.3.2 / DISPATCH 85 — split into two sub-routers:

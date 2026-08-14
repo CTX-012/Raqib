@@ -19,18 +19,34 @@ fn run_help() -> String {
 }
 
 #[test]
-fn help_documents_bind_flag_with_zero_default() {
+fn help_documents_bind_flag_with_localhost_default() {
     let help = run_help();
     assert!(
         help.contains("--bind"),
         "--bind flag missing from --help output:\n{help}"
     );
-    // The user-facing default for `--bind` must read as `0.0.0.0`
-    // so an operator who runs `--help` sees the LAN-exposure
-    // posture before launching for the first time.
+    // Secure-by-default: the user-facing default for `--bind`
+    // MUST read as `127.0.0.1` so an operator who runs `--help`
+    // sees that the dashboard is localhost-only until they
+    // explicitly opt into LAN exposure (via `--bind 0.0.0.0`).
+    // If this test ever regresses to asserting `0.0.0.0`, the
+    // default was silently loosened to LAN-reachable — a
+    // security posture change that must go through explicit
+    // ratification, not a stealth CLI-default flip.
     assert!(
-        help.contains("0.0.0.0"),
-        "--bind default should read as 0.0.0.0 in --help:\n{help}"
+        help.contains("127.0.0.1"),
+        "--bind default should read as 127.0.0.1 in --help:\n{help}"
+    );
+    // Complementary negative pin: `0.0.0.0` must NOT appear as
+    // the default. It may still appear elsewhere in --help text
+    // (e.g. the flag description mentions it as the opt-in
+    // value), but the `[default: ...]` clause clap emits should
+    // no longer print it. Guard by looking for the clap
+    // convention `default value: 127.0.0.1`.
+    assert!(
+        help.contains("default value: 127.0.0.1")
+            || help.contains("default: 127.0.0.1"),
+        "clap default clause for --bind must name 127.0.0.1; got:\n{help}"
     );
 }
 

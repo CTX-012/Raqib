@@ -93,13 +93,13 @@ struct Cli {
     #[arg(long)]
     no_web: bool,
 
-    /// Sprint-7 — web UI listen address. Defaults to `0.0.0.0` so
-    /// the dashboard is reachable from any host on the same LAN.
-    /// **There is NO authentication in v1.0** — pass
-    /// `--bind 127.0.0.1` to restrict the listener to localhost if
-    /// the host is on an untrusted network. See README "Web UI
-    /// security" for the trusted-LAN assumption.
-    #[arg(long, default_value = "0.0.0.0")]
+    /// Web UI listen address. Defaults to `127.0.0.1` (localhost-
+    /// only, secure-by-default) — pass `--bind 0.0.0.0` (or a
+    /// specific LAN IP) to make the dashboard reachable from other
+    /// hosts. When bound to a non-loopback address, pair with
+    /// `[web].auth_token` — otherwise the API is open to anyone on
+    /// the network (a loud startup WARN fires in that case).
+    #[arg(long, default_value = "127.0.0.1")]
     bind: std::net::IpAddr,
 
     /// Sprint-6 — web UI listen port. Default 7070.
@@ -411,9 +411,11 @@ fn main() -> anyhow::Result<()> {
 /// runtime. Returns the `watch::Sender` so the TUI / headless loop
 /// can publish snapshots into it on every tick.
 ///
-/// Sprint-7 Item 4 — `bind` is the listen address. Defaults to
-/// `0.0.0.0` (any interface, accessible from the LAN); restrict
-/// with `--bind 127.0.0.1` for localhost-only.
+/// `bind` is the listen address. Defaults to `127.0.0.1`
+/// (localhost-only, secure-by-default). Pass `--bind 0.0.0.0` (or
+/// a specific LAN IP) to make the dashboard reachable from other
+/// hosts; a startup WARN fires if that pairing is chosen without
+/// an `[web].auth_token`.
 ///
 /// v1.3.2 / DISPATCH 85 — bearer-token auth on every `/api/*` route.
 /// `web.auth_token` from the config is plumbed onto `WebState`; the
@@ -462,10 +464,14 @@ fn spawn_web_server(
     };
     let addr: std::net::SocketAddr = (bind, port).into();
 
-    // v1.3.2 / DISPATCH 85 — surface the auth posture loudly so the
-    // operator can audit the running mode at startup. We log the
-    // token's PRESENCE + LENGTH, never the bytes. The legacy
-    // "no-auth + non-loopback" warning is preserved and extended.
+    // v1.3.2 / DISPATCH 85 (+ bind-default follow-up) — surface the
+    // auth posture loudly so the operator can audit the running mode
+    // at startup. We log the token's PRESENCE + LENGTH, never the
+    // bytes. The `--bind` default is now `127.0.0.1` (localhost-
+    // only), so any non-loopback bind is an EXPLICIT operator choice
+    // — worth surfacing on its own line whether or not auth is set,
+    // and CRITICAL when combined with no-auth.
+    let bind_is_loopback = bind.is_loopback();
     match (&auth_token, web_cfg.allow_no_auth) {
         (Some(t), _) => {
             tracing::info!(
@@ -476,14 +482,44 @@ fn spawn_web_server(
                  /api/* request.",
                 t.len(),
             );
+            if !bind_is_loopback {
+                tracing::info!(
+                    addr = %addr,
+                    "web UI dashboard is reachable from the NETWORK (bind={bind} \
+                     is non-loopback). Auth is enforced, so this is intentional \
+                     LAN/remote access."
+                );
+            }
+        }
+        (None, true) if !bind_is_loopback => {
+            // The worst combination: dashboard reachable from the
+            // network AND no auth. Deliberate operator choice
+            // (default bind is now 127.0.0.1 + allow_no_auth is
+            // opt-in) but surface it in the loudest form we have
+            // short of refusing to start. The operator may have a
+            // trusted-LAN environment, so we do not hard-refuse.
+            tracing::warn!(
+                addr = %addr,
+                bind = %bind,
+                "web UI on {addr} — DASHBOARD REACHABLE FROM THE NETWORK \
+                 WITH NO AUTH. bind={bind} is non-loopback AND \
+                 web.allow_no_auth = true. Every /api/* route is open to \
+                 anyone who can reach this host. STRONGLY recommend setting \
+                 web.auth_token, or reverting to the default `--bind 127.0.0.1` \
+                 for localhost-only access."
+            );
         }
         (None, true) => {
+            // allow_no_auth on a loopback bind — still open, but
+            // only to local processes on this host. Preserve the
+            // pre-existing warning shape/hint set.
             tracing::warn!(
                 addr = %addr,
                 "web UI on {addr} — NO AUTH (web.allow_no_auth = true). \
                  Every /api/* route is OPEN to anyone who can reach the \
-                 bind address. Restrict with --bind 127.0.0.1 on untrusted \
-                 networks, or set web.auth_token to lock the API."
+                 bind address (currently loopback, so local processes only). \
+                 Set web.auth_token to lock the API, or keep the default \
+                 `--bind 127.0.0.1` on untrusted networks."
             );
         }
         (None, false) => {

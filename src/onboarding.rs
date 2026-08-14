@@ -196,15 +196,17 @@ pub const DEFAULT_CONFIG_TOML: &str = r#"# raqib starter configuration
 # ─────────────────────────────────────────────────────────────────
 [web]
 
-# ⚠ FIRST-RUN DEFAULT: NO AUTHENTICATION.
+# ⚠ FIRST-RUN DEFAULT: NO AUTHENTICATION on a LOCALHOST-only bind.
 #
-# `allow_no_auth = true` lets you open http://localhost:7070/
-# immediately without a token. This is FINE on a laptop / dev box
-# where nothing else can reach the port. It is NOT fine if you
-# bind the listener to a LAN address (--bind 192.168.x.x) or a
-# public interface (--bind 0.0.0.0 on a network you don't
-# control) — anyone who can reach the port gets full read access
-# to your workloads, thermal state, and settings.
+# The `--bind` CLI flag defaults to `127.0.0.1`, so the dashboard
+# is only reachable from processes on THIS host. In that mode
+# `allow_no_auth = true` is FINE — the port is not on the network.
+#
+# If you pass `--bind 0.0.0.0` (or a specific LAN IP) to expose
+# the dashboard to other hosts, `allow_no_auth = true` becomes
+# DANGEROUS: anyone who can reach the port gets full read access
+# to your workloads, thermal state, and settings. A loud startup
+# WARN fires in that case.
 #
 # For LAN / remote use, set an auth_token instead:
 #     allow_no_auth = false

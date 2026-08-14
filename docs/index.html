@@ -87,7 +87,11 @@
       <div class="group">Getting started</div>
       <a href="#install">Installation</a>
       <a href="#first-run">First run</a>
-      <a href="#views">The five views</a>
+      <div class="group">Interfaces</div>
+      <a href="#tui">The TUI</a>
+      <a href="#tui-keys">TUI keybindings</a>
+      <a href="#web-modes">Web dashboard</a>
+      <a href="#web-settings">Settings panel</a>
       <div class="group">Guides</div>
       <a href="#config">Configuration</a>
       <a href="#governor">The governor</a>
@@ -95,7 +99,8 @@
       <div class="group">Hands-on</div>
       <a href="#exp-llm">See an LLM appear</a>
       <a href="#exp-api">The snapshot API</a>
-      <a href="#exp-kill">Safe kill demo</a>
+      <a href="#exp-kill">Safe kill demo (canary)</a>
+      <a href="#exp-ollama-kill">Reclaim VRAM from ollama</a>
       <div class="group">Reference</div>
       <a href="#integrations">Integrations</a>
       <a href="#api">REST API</a>
@@ -107,20 +112,25 @@
   <main class="content" id="top">
 
     <div class="hero">
-      <span class="pill">beta · Linux · Rust + Svelte</span>
+      <span class="pill">v1.3.2 · Linux · Rust + Svelte</span>
       <h1>raqib documentation</h1>
-      <p class="sub">One screen for every workload competing for your GPU — and a governor that can evict the one starving the rest.</p>
+      <p class="sub">One screen for every workload competing for your GPU — and an opt-in governor that can evict the one starving the rest.</p>
     </div>
 
-    <p>raqib watches every process fighting over your GPU — ROS 2 nodes, LLM servers (ollama, vLLM, llama.cpp), agents, embeddings — in a single terminal UI <em>and</em> a web dashboard. Unlike read-only tools, it can also <strong>act</strong>: an opt-in governor that terminates a workload starving the others.</p>
+    <h3>What is raqib?</h3>
+    <p><strong>raqib</strong> is a workload-aware resource monitor for Linux boxes running a mix of AI and robotics workloads that share a single GPU. It surfaces every process fighting over VRAM / RAM / thermal / CPU — ROS 2 nodes, LLM servers (ollama, vLLM, llama.cpp), agents, model downloads — in a single terminal UI <em>and</em> a web dashboard. Unlike read-only tools (<code>nvtop</code>, <code>btop</code>, <code>ollama ps</code>), it can also <strong>act</strong>: an opt-in governor terminates a workload that's starving the others, with an allowlist that always wins and safety gates that fail closed.</p>
 
-    <p>This site is the complete guide. New here? Start with <a href="#install">Installation</a> → <a href="#first-run">First run</a>. Looking for something specific? Jump to <a href="#config">Configuration</a>, <a href="#governor">the governor</a>, or <a href="#api">the REST API</a>.</p>
+    <h3>Who is it for?</h3>
+    <p>Robotics + local-AI developers on a single shared GPU box. If you've watched an LLM inference server or a runaway training job hang your ROS stack, or juggled three terminals to see which of your workloads is eating the VRAM — raqib is written for you.</p>
+
+    <h3>New here?</h3>
+    <p><a href="#install">Installation</a> → <a href="#first-run">First run</a> gets you a live dashboard in three commands. From there, <a href="#tui">The TUI</a> and <a href="#web-modes">The web dashboard</a> cover the two interfaces; <a href="#governor">The governor</a> covers the differentiator; the two <a href="#exp-kill">hands-on kill demos</a> show it working end-to-end on a canary + a real ollama model.</p>
 
     <div class="callout-grid">
-      <div class="card"><h4>🖥️ One pane of glass</h4><p>Every GPU/VRAM/CPU/thermal workload in one view — stop juggling nvtop + btop + ollama ps.</p></div>
-      <div class="card"><h4>🎯 Honest metrics</h4><p>Unmeasurable VRAM shows “—”, never a fake 0. A blank means “unknown,” not “idle.”</p></div>
-      <div class="card"><h4>📊 Live LLM health</h4><p>Reachability + tokens/sec for ollama, vLLM, and llama.cpp, scraped live.</p></div>
-      <div class="card"><h4>🛡️ The governor</h4><p>Can kill a runaway workload — off by default, opt-in, and verifiable before you arm it.</p></div>
+      <div class="card"><h4>🖥️ One pane of glass</h4><p>Every GPU / VRAM / CPU / thermal workload in one view — stop juggling nvtop + btop + ollama ps.</p></div>
+      <div class="card"><h4>🎯 Honest metrics</h4><p>Unmeasurable VRAM shows <code>—</code>, never a fake <code>0</code>. A blank means "unknown," not "idle."</p></div>
+      <div class="card"><h4>📊 Live LLM health</h4><p>Reachability + tokens/sec + KV-cache % for ollama, vLLM, and llama.cpp — scraped live.</p></div>
+      <div class="card"><h4>🛡️ The governor</h4><p>Off by default, can't be armed from the web, four gates before every kill. Proven live + 19-cell test matrix green.</p></div>
     </div>
 
     <!-- ══════════════ INSTALL ══════════════ -->
@@ -193,77 +203,153 @@ WantedBy=multi-user.target</code></pre>
 <pre><code>sudo systemctl daemon-reload &amp;&amp; sudo systemctl enable --now raqib
 sudo systemctl status raqib</code></pre>
 
-    <!-- ══════════════ VIEWS ══════════════ -->
-    <h2 id="views">The five views</h2>
-    <p>raqib ships a full TUI plus five web display modes (switch from the web UI's mode selector):</p>
+    <!-- ══════════════ TUI ══════════════ -->
+    <h2 id="tui">The TUI</h2>
+    <p>What you get when you run <code>raqib</code> (no subcommand, no <code>--no-ui</code>): a full-screen terminal dashboard with these panels, all populated live on the tick loop:</p>
     <table>
-      <tr><th>Mode</th><th>For</th></tr>
-      <tr><td><strong>Dashboard</strong></td><td>the whole system at a glance</td></tr>
-      <tr><td><strong>Focus</strong></td><td>one workload, deep — live sparklines of its resource use</td></tr>
-      <tr><td><strong>Timeline</strong></td><td>chronological incident review — what happened, in order</td></tr>
-      <tr><td><strong>Kiosk</strong></td><td>glance-only wall monitor — big, high-contrast, “is anything on fire?”</td></tr>
-      <tr><td><strong>History</strong></td><td>what happened before you looked — event log + post-mortem curves</td></tr>
+      <tr><th>Panel</th><th>Shows</th></tr>
+      <tr><td><strong>Header</strong></td><td>Version, uptime, tick count, web URL (rendered as <code>localhost</code> when bound to <code>0.0.0.0</code>).</td></tr>
+      <tr><td><strong>Vitals</strong></td><td>RAM used/total + bar, VRAM used/total + bar + device count, GPU temp + power, CPU load average, thermal-zone list (top 10 hottest, colour-coded amber/red).</td></tr>
+      <tr><td><strong>AI Workloads</strong></td><td>Detected LLM / ROS 2 / framework / agent processes grouped by category. Columns: name, PID, category, CPU %, RSS MB, VRAM MB, tokens/sec, KV-cache %, probe status.</td></tr>
+      <tr><td><strong>Top Processes</strong></td><td>Top-N processes by the current sort dimension (<span class="kbd">t</span> cycles: RAM → VRAM → CPU). VRAM column shows <code>—</code> when unattributable, never a fake <code>0</code>.</td></tr>
+      <tr><td><strong>Activity Feed</strong></td><td>Rolling event log — kills, threshold crossings, workload starts / stops. Auto-scrolls.</td></tr>
+      <tr><td><strong>Alerts</strong></td><td>Active alert IDs with sustain-time counters. <span class="kbd">a</span> acknowledges.</td></tr>
     </table>
+
+    <h3 id="tui-keys">TUI keybindings</h3>
+    <p>Verified against <code>src/ui/input.rs</code>. All single-letter keys, no modifiers unless noted.</p>
+    <table>
+      <tr><th>Key</th><th>Action</th></tr>
+      <tr><td><span class="kbd">?</span></td><td>Toggle help overlay (shows this table + the "Web UI: 127.0.0.1:7070" banner).</td></tr>
+      <tr><td><span class="kbd">q</span></td><td>Quit. Also <span class="kbd">Ctrl+C</span>.</td></tr>
+      <tr><td><span class="kbd">Esc</span></td><td>Cascade-escape: close overlay → cancel confirm → clear selection → (nothing).</td></tr>
+      <tr><td><span class="kbd">j</span> / <span class="kbd">↓</span></td><td>Select next process / workload.</td></tr>
+      <tr><td><span class="kbd">K</span> (shift) / <span class="kbd">↑</span></td><td>Select previous.</td></tr>
+      <tr><td><span class="kbd">Enter</span></td><td>Open the detail card for the selected workload / process.</td></tr>
+      <tr><td><span class="kbd">k</span></td><td><strong>Kill selected</strong> — opens the confirm card (<em>requires no arming</em>, primary manual path; see <a href="#governor">The governor</a>). A second <span class="kbd">Enter</span> sends SIGTERM; <span class="kbd">Esc</span> cancels.</td></tr>
+      <tr><td><span class="kbd">t</span></td><td>Cycle top-processes sort: RAM → VRAM → CPU.</td></tr>
+      <tr><td><span class="kbd">a</span></td><td>Acknowledge active alerts (clears them from the panel; audit trail preserved).</td></tr>
+      <tr><td><span class="kbd">h</span></td><td>Toggle history overlay — recent post-mortem curves for killed / vanished processes.</td></tr>
+      <tr><td><span class="kbd">H</span> (shift)</td><td>Toggle detailed history-events log.</td></tr>
+    </table>
+    <blockquote>The TUI is one of three surfaces (TUI + web + <code>--no-ui</code> headless). All three see the same tick loop; changes made in the web Settings panel are visible in the TUI on the next tick, and vice versa. Themes: <code>--theme dark</code> (default), <code>light</code>, or <code>high-contrast</code>.</blockquote>
+
+    <!-- ══════════════ WEB MODES ══════════════ -->
+    <h2 id="web-modes">The web dashboard</h2>
+    <p>Default URL: <code>http://127.0.0.1:7070/</code>. The dashboard is a single-page Svelte app served from the binary — no external assets, no CDN, one open TCP port. It supports five modes; switch via the mode selector in the header, or by URL query for shareable / kiosk-mode deep links:</p>
+    <table>
+      <tr><th>Mode</th><th>URL</th><th>Shows</th></tr>
+      <tr><td><strong>Dashboard</strong></td><td><code>/</code> or <code>/?mode=dashboard</code></td><td>Default full view — Vitals, Workloads, Top Processes, Activity, Alerts, and (collapsible) Settings, all live on a 1 Hz poll of <code>/api/snapshot</code>.</td></tr>
+      <tr><td><strong>Focus</strong></td><td><code>/?mode=focus&amp;pid=&lt;N&gt;</code></td><td>One workload, deep — live sparklines of CPU / RSS / VRAM / tokens-per-sec for the chosen PID. When the PID vanishes, the buffer freezes so you keep the last-known trajectory instead of a blank.</td></tr>
+      <tr><td><strong>Timeline</strong></td><td><code>/?mode=timeline</code></td><td>Chronological incident review — every activity event in reverse-chronological order, with the full postmortem card mounted inline for terminated processes.</td></tr>
+      <tr><td><strong>Kiosk</strong></td><td><code>/?mode=kiosk</code></td><td>Glance-only wall monitor — huge tiles, high contrast, colour-coded to the same thermal / VRAM / RAM thresholds. Designed for a shared TV in the lab.</td></tr>
+      <tr><td><strong>History</strong></td><td><code>/?mode=history</code></td><td>What happened before you looked — the event log + on-demand per-PID trajectory (via <code>/api/history/trajectory/:pid</code>) for anything killed or vanished in the retention window.</td></tr>
+    </table>
+
+    <h3 id="web-settings">The Settings panel (editable + persisted)</h3>
+    <p>The Settings panel (<span class="kbd">Settings ▸</span> in the header) lets you edit the six most-tuned thresholds + <code>kill_sustain_secs</code> live and — critically — <strong>persists them to your <code>raqib.toml</code></strong> with comments, blank lines, and key order preserved. The freshly-shipped polish adds three properties worth understanding:</p>
+    <ul>
+      <li><strong>Formatting-preserving Save.</strong> Uses <code>toml_edit</code> under the hood — your hand-authored comments (e.g. <code># KILLER IS ARMED — leave this alone</code>) survive every round-trip. The plain <code>toml</code>-crate implementation this replaced used to scramble the whole file on every Save.</li>
+      <li><strong>Concurrent-write guard.</strong> Two Save clicks at the same second cannot produce a torn file — an in-process mutex plus atomic <code>rename(2)</code> guarantees the file reader (your editor, another process) sees the whole old file or the whole new one, never a partial write.</li>
+      <li><strong>Armed-state warning.</strong> If the governor is currently armed (<code>auto_actuate = true</code>), a red <strong>⚠ Governor is ARMED</strong> banner appears above the form with a mandatory checkbox: <em>"I understand — apply this change to a live, armed governor."</em> The Save button stays disabled until you tick it. Threshold changes take effect on the very next tick — a slider dragged 95 → 30 can immediately fire kills against real processes — so the checkbox is the deliberate speed-bump.</li>
+    </ul>
+    <p>Every settings POST also produces a <code>tracing::info!</code> audit line with the new values and an <code>armed=&lt;bool&gt;</code> field — grep <code>armed=true</code> in your log for the trail of every live-threshold edit against an armed governor.</p>
+    <p><strong>What the panel does NOT let you edit</strong> (by deliberate design): <code>auto_actuate</code>, <code>default_ai_action</code>, <code>allowlist</code>, <code>blocklist</code>, and the rate-limit fields. Arming the killer is a host action — SSH in, edit the TOML, restart. Seven tripwire tests pin this boundary end-to-end (schema-firewall at serde, structural exclusion at the RuntimeTunables type, partial-persist guard at disk, plus the four governor kill-path gates).</p>
 
     <!-- ══════════════ CONFIG ══════════════ -->
     <h2 id="config">Configuration</h2>
     <p><code>raqib init</code> writes a fully-commented file. Here's every section:</p>
-<pre><code>[web]
-# The web dashboard needs an explicit auth choice — pick ONE:
-allow_no_auth = true         # OK on localhost / trusted LAN, no token needed
-# auth_token = "your-secret" # required for exposed/untrusted networks
+<pre><code># Every value shown here is the actual default. Omit a section /
+# key entirely to inherit it — you only need to write what you're
+# changing.
+
+[web]
+# Fresh install REFUSES to start unless you pick ONE of these:
+allow_no_auth = true         # OK on the default localhost bind — the port is
+                             # only reachable from processes on this host.
+# auth_token = "your-secret" # required for exposed/untrusted networks;
                              # clients send: Authorization: Bearer &lt;token&gt;
 
 [governor]
-# auto_actuate = true is THE ARM. Off by default.
-auto_actuate         = false
-kill_sustain_secs    = 30    # a breach must persist this long before a kill fires
-rate_limit_max_kills = 3     # max kills per 60s window
-sigterm_grace_secs   = 5     # SIGTERM → wait → SIGKILL grace period
+# auto_actuate = true is THE ARM. Off by default. The web API
+# CANNOT flip this — schema-firewalled at the serde deserializer,
+# structurally excluded from RuntimeTunables, and pinned by seven
+# tripwire tests. Arming requires editing this file + restart.
+auto_actuate      = false
+kill_sustain_secs = 10       # a breach must persist this long before a kill fires
 
 [policy]
-default_ai_action = "Allow"  # "Allow" = nothing killable by default
+default_ai_action = "Allow"  # "Allow" = nothing killable by default (safe posture)
                              # "Kill"  = AI/robotics workloads killable when armed
-blocklist = []               # comms that ARE killable  (matched vs /proc/&lt;pid&gt;/comm)
-allowlist = ["ruby", "rviz2", "ros2", "claude", "sshd", "bash", "systemd"]
-                             # comms that are NEVER killed
+allowlist = [                # comms that are NEVER killed (matched vs /proc/&lt;pid&gt;/comm)
+    "systemd", "init", "sshd", "bash", "zsh", "sh",
+    "kworker", "kthreadd",
+]
+blocklist = []               # comms that ARE killable (breach still required)
+sigterm_grace_secs     = 5   # SIGTERM → wait → SIGKILL grace period
+rate_limit_max_kills   = 3   # at most N automated kills…
+rate_limit_window_secs = 60  # …per M-second window
 
 [thresholds]
+# All eight fall back to ux_contract constants when omitted.
 vram_attention_pct = 85.0    # attention level (must be ≤ critical)
 vram_critical_pct  = 95.0    # breach level — feeds the governor
-ram_attention_pct  = 85.0
+ram_attention_pct  = 90.0
 ram_critical_pct   = 95.0
-thermal_amber_c    = 80.0
-thermal_red_c      = 90.0    # thermal breach can make MANY processes eligible at once</code></pre>
+kv_attention_pct   = 80.0    # LLM KV-cache usage (vLLM / llama.cpp)
+kv_critical_pct    = 95.0
+thermal_amber_c    = 85.0
+thermal_red_c      = 95.0    # thermal breach can make MANY processes eligible at once
+alert_sustain_secs = 5       # must be ≤ kill_sustain_secs (validator enforces)</code></pre>
 
-    <blockquote class="warn"><strong>⚠️ The “ruby” gotcha.</strong> The allowlist/blocklist match <code>/proc/&lt;pid&gt;/comm</code>, <em>not</em> raqib's display name. <strong>Gazebo runs as <code>ruby</code></strong> (it's Ruby-launched) — so to protect Gazebo, allowlist <code>ruby</code>, not <code>Gazebo</code>. <code>rviz2</code>'s comm matches its name, so <code>rviz2</code> works directly. Rule of thumb: allowlist the name you'd see in <code>ps -o comm=</code>, not the friendly name raqib shows.</blockquote>
+    <blockquote class="warn"><strong>⚠️ The “ruby” gotcha (allowlist matches comm, not display name).</strong> The allowlist / blocklist match <code>/proc/&lt;pid&gt;/comm</code> — a Linux kernel field capped at <strong>15 bytes</strong>. Two consequences:
+      <ul>
+        <li><strong>Gazebo runs as <code>ruby</code></strong> (it's launched via Ruby). To protect Gazebo, allowlist <code>ruby</code>, not <code>Gazebo</code>.</li>
+        <li><strong>Long names get truncated.</strong> A binary named <code>protected_canary</code> shows up as <code>protected_canar</code> (15 chars). Allowlist the truncated form.</li>
+      </ul>
+      Rule of thumb: allowlist the name you see in <code>ps -o comm= -p &lt;pid&gt;</code>, not the friendly name raqib shows in the workloads table.
+    </blockquote>
+
+    <blockquote><strong>Note on the default allowlist.</strong> The list above is what <code>raqib init</code> writes — <em>system</em> processes only (shells + init). It protects the box, not your workloads. If you plan to arm the governor, extend the allowlist with the comms of every workload you never want killed (e.g. <code>ruby, rviz2, ros2, claude, ollama</code>). Verify the final policy with <code>raqib config check</code> before flipping <code>auto_actuate = true</code>.</blockquote>
 
     <!-- ══════════════ GOVERNOR ══════════════ -->
     <h2 id="governor">The governor</h2>
-    <p>raqib can kill processes. This is its most powerful feature and the one to understand clearly.</p>
-    <p><strong>Out of the box, raqib kills nothing.</strong> It observes. The governor stays disabled until <em>you</em> make two deliberate choices:</p>
-<pre><code>[governor]
-auto_actuate = true            # (1) allow the governor to actually act
+    <p>raqib can autonomously terminate a process that's starving the rest of the box. This is its most powerful feature and the one to understand clearly. It works, it's proven — RAM live-kill against a real canary + a 19-cell signal×threshold matrix (RAM / VRAM / thermal × 60 / 70 / 80 % thresholds) all green — and it stays <strong>off</strong> until you deliberately turn it on.</p>
 
-[policy]
-default_ai_action = "Kill"     # (2) make workloads eligible to be killed</code></pre>
-    <p>Both. On purpose. And <strong>the web API cannot arm the governor</strong> — that's config-only, by design, so nothing remote can turn on the killer.</p>
+    <h3>Safety posture (the defaults you inherit)</h3>
+    <ul>
+      <li><strong>Off by default</strong> — <code>auto_actuate = false</code>. Fresh install kills nothing on its own.</li>
+      <li><strong>Nothing killable by default</strong> — <code>default_ai_action = "Allow"</code>. Even if armed, unlisted workloads are safe.</li>
+      <li><strong>The web API cannot arm the governor</strong> — seven tripwire tests pin this end-to-end (serde <code>deny_unknown_fields</code>, structural exclusion from <code>RuntimeTunables</code>, partial-persist boundary, two-gate actuation, single-site kill-recording). Arming is a host action.</li>
+      <li><strong>Localhost-only by default</strong> — <code>--bind 127.0.0.1</code>. LAN exposure is explicit opt-in (<code>--bind 0.0.0.0</code>) + a loud startup WARN when unpaired with an <code>auth_token</code>.</li>
+    </ul>
+
+    <h3>The four gates every automated kill passes through</h3>
+    <p>When the governor is armed and a breach is detected, the actuation path runs these gates <em>in order</em>. Any one that rejects → no kill, no exception:</p>
+    <ol>
+      <li><strong>Allowlist</strong> — comm in <code>policy.allowlist</code>? → protected, always. (Allowlist always wins, ahead of any breach severity or policy verb.)</li>
+      <li><strong>Breach or blocklist</strong> — process must either be on <code>policy.blocklist</code> OR classified as an AI workload with <code>default_ai_action = "Kill"</code> AND actually breaching a threshold (VRAM / RAM / host-thermal).</li>
+      <li><strong>Sustain</strong> — the breach must persist for <code>governor.kill_sustain_secs</code> continuous seconds (default <strong>10 s</strong>). A one-tick spike is never enough.</li>
+      <li><strong>Rate-limit at actuation</strong> — at most <code>rate_limit_max_kills</code> kills per <code>rate_limit_window_secs</code> (default <strong>3 / 60 s</strong>). The counter increments <em>at the moment SIGTERM is delivered</em>, not at decision time — so a sustained breach on a rate-full window defers rather than dropping the intent. Deferred kills fire when the window ages out.</li>
+    </ol>
+    <p>The final delivery is SIGTERM → wait <code>sigterm_grace_secs</code> (default 5 s) → SIGKILL if the process didn't exit. A PID-reuse guard (<code>pidfd_open</code> + <code>/proc/&lt;pid&gt;/stat</code> starttime) prevents the SIGKILL escalation from hitting an unrelated new process that happened to reuse the PID.</p>
 
     <h3>The two kill paths</h3>
     <table>
       <tr><th>Path</th><th>Requires arming?</th><th>How</th></tr>
-      <tr><td><strong>Manual kill</strong></td><td>No</td><td>Select a workload in the TUI → confirm the <span class="kbd">kill_confirm</span> card → raqib sends SIGTERM. The primary kill path.</td></tr>
-      <tr><td><strong>Automatic kill</strong></td><td>Yes</td><td>When armed, the governor terminates a workload that breaches a threshold and stays over it for <code>kill_sustain_secs</code>.</td></tr>
+      <tr><td><strong>Manual kill</strong></td><td>No</td><td>Select a workload in the TUI → press <span class="kbd">k</span> → confirm the kill card (a second <span class="kbd">Enter</span> sends SIGTERM; <span class="kbd">Esc</span> cancels). This works regardless of <code>auto_actuate</code>.</td></tr>
+      <tr><td><strong>Automatic kill</strong></td><td>Yes — both <code>auto_actuate = true</code> AND <code>default_ai_action = "Kill"</code> (or a matching blocklist entry).</td><td>Detected on the tick loop; passes the four gates above; fires SIGTERM; audit row written with <code>KillSource::Automated</code>.</td></tr>
     </table>
 
-    <h3>Before you arm it</h3>
+    <h3>Before you arm it — the checklist</h3>
     <ol>
-      <li><strong>Verify the policy first</strong> with <code>raqib config check</code> — it prints the exact allowlist/blocklist and shows <span class="ok">KILLER IS ARMED</span> / <span class="warnc">DISARMED</span>. Confirm your real workloads are protected <em>before</em> the killer goes live.</li>
-      <li><strong>Set an <code>allowlist</code></strong> naming every workload you never want touched (using comms — see the ruby gotcha). The default protects only system processes.</li>
-      <li><strong>Give <code>thermal_red_c</code> real headroom</strong> above your normal temperature — a thermal breach can make many processes eligible at once.</li>
-      <li><strong>Start conservative</strong> — low <code>rate_limit_max_kills</code>, generous <code>kill_sustain_secs</code>, so you can watch it behave before trusting it.</li>
+      <li><strong>Extend the allowlist</strong> to name every workload you never want touched (comms, not display names — see the ruby gotcha). The default only covers shells + init.</li>
+      <li><strong>Run <code>raqib config check</code></strong> — it prints the resolved policy, including the full allowlist / blocklist, and shows <span class="ok">KILLER IS ARMED</span> / <span class="warnc">DISARMED</span>. Confirm your real workloads are protected before you flip the arm bit.</li>
+      <li><strong>Give thermal red real headroom</strong> above your normal peak temperature. A thermal breach can make many processes eligible at once.</li>
+      <li><strong>Start conservative</strong> — low <code>rate_limit_max_kills</code>, generous <code>kill_sustain_secs</code>. Watch it behave against a canary before trusting it against real workloads.</li>
+      <li><strong>Only then</strong> — flip <code>auto_actuate = true</code>, re-run <code>config check</code>, restart raqib.</li>
     </ol>
-    <blockquote>Current kill-selection is conservative-but-simple (a fixed rule, not “the biggest offender”). Smarter selection is on the roadmap. The safe posture: <strong>observe by default; arm only with an allowlist in place and verified via <code>config check</code>.</strong></blockquote>
+    <blockquote>The safe posture: <strong>observe by default; arm only with an allowlist in place, thresholds tuned to your hardware, and verified via <code>config check</code>.</strong> A kill tool should fail by not-killing.</blockquote>
 
     <!-- ══════════════ CONFIG CHECK ══════════════ -->
     <h2 id="configcheck">raqib config check</h2>
@@ -273,7 +359,7 @@ raqib config check — /home/you/.config/raqib/raqib.toml  (discovered)
 ────────────────────────────────────────────────────────────────
 [governor]
   auto_actuate      = false      ← KILLER IS DISARMED
-  kill_sustain_secs = 30
+  kill_sustain_secs = 10
 [policy]
   default_ai_action     = "Allow"
   allowlist (…): bash, claude, ros2, ruby, rviz2, sshd, systemd, …
@@ -346,6 +432,75 @@ watch -n2 'pgrep -a ram_canary || echo "canary killed"; pgrep -x bash &gt;/dev/n
 pkill -INT raqib; rm -f /tmp/ram_canary</code></pre>
     <p>The point: raqib kills the thing you told it to, and nothing else. <code>config check</code> (steps 2 &amp; 4) is what lets you <em>prove</em> that before the killer runs.</p>
 
+    <h3 id="exp-ollama-kill">Hands-on: reclaim VRAM from a runaway ollama model</h3>
+    <p>The real-workload version of the demo above. A pinned ollama model server that's holding VRAM you need for something else — safely evict it and only it, leave the ollama daemon and every other workload untouched. Same discipline: <strong>verify disarmed → arm last → watch → disarm</strong>.</p>
+<pre><code># 1. Identify the exact comm of the model server (max 15 chars, /proc/&lt;pid&gt;/comm).
+#    ollama-runner is what actually holds the VRAM; `ollama` itself is the CLI.
+ps -eo pid,comm,cmd | grep -iE "ollama" | grep -v grep
+
+# 2. Write a scoped test config — ONLY the ollama-runner comm is killable,
+#    ollama daemon + all other AI work protected. Threshold set BETWEEN the
+#    model's steady-state VRAM (say 55%) and everything else (say ~5-10%).
+cat &gt; /tmp/raqib-ollama-demo.toml &lt;&lt;'TOML'
+[web]
+allow_no_auth = true
+
+[governor]
+auto_actuate      = false            # STILL OFF — we verify first
+kill_sustain_secs = 15               # slack so a token generation burst doesn't fire
+
+[policy]
+default_ai_action = "Allow"          # unlisted AI processes are safe
+allowlist = [
+    "systemd", "init", "sshd", "bash", "zsh", "sh",
+    "ollama",                        # keep the ollama daemon alive
+    "ros2", "ruby", "rviz2", "claude", "raqib",
+]
+blocklist = ["ollama-runner"]        # ← ONLY this specific comm is killable
+sigterm_grace_secs     = 5           # give the runner a chance to flush cleanly
+rate_limit_max_kills   = 1           # one kill is all we need for this demo
+rate_limit_window_secs = 60
+
+[thresholds]
+vram_critical_pct = 50.0             # runner at ~55% VRAM will breach; daemon won't
+vram_attention_pct = 45.0
+thermal_red_c     = 120.0            # thermal fenced OUT of this demo
+ram_critical_pct  = 95.0
+TOML
+
+# 3. VERIFY disarmed — confirm blocklist=[ollama-runner], real work protected:
+raqib config check --path /tmp/raqib-ollama-demo.toml
+
+# 4. Warm the model so its runner is holding VRAM:
+ollama run llama3.2 "hello" &amp;&amp; ollama ps       # confirm the runner is loaded
+nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv
+
+# 5. ARM: flip auto_actuate=true in the file, re-verify, then launch raqib
+#    on a scratch port so the demo is isolated from any raqib you already run:
+sed -i 's/auto_actuate      = false/auto_actuate      = true/' /tmp/raqib-ollama-demo.toml
+raqib config check --path /tmp/raqib-ollama-demo.toml            # MUST show KILLER IS ARMED
+nohup raqib --no-ui --config /tmp/raqib-ollama-demo.toml \
+      --bind 127.0.0.1 --port 7071 &gt; /tmp/ollama-kd.log 2&gt;&amp;1 &amp; disown
+
+# 6. Watch — the runner should die within ~15-20 s (sustain), the daemon
+#    stays up, ollama pull/serve etc. still work:
+for i in $(seq 1 15); do
+  runner=$(pgrep -x ollama-runner &gt;/dev/null &amp;&amp; echo alive || echo GONE)
+  daemon=$(pgrep -x ollama        &gt;/dev/null &amp;&amp; echo alive || echo gone)
+  printf "t=%02ds  ollama-runner=%s  ollama-daemon=%s\n" $((i*2)) "$runner" "$daemon"
+  sleep 2
+done
+
+# 7. The proof: audit line in the log
+grep -E "firing SIGTERM|Automated|ollama-runner" /tmp/ollama-kd.log | tail -5
+curl -s http://127.0.0.1:7071/api/history | jq '.events[]? | select((.name // "") | test("ollama"))'
+
+# 8. DISARM + cleanup:
+sed -i 's/auto_actuate      = true/auto_actuate      = false/' /tmp/raqib-ollama-demo.toml
+pkill -f "raqib --no-ui --config /tmp/raqib-ollama-demo.toml"
+# ollama daemon still up — model can be reloaded on next `ollama run`</code></pre>
+    <blockquote class="warn"><strong>Read before running.</strong> Step 5 arms the killer. The <code>config check</code> at step 3 is your promise to yourself that only <code>ollama-runner</code> is a candidate. Confirm that output before step 5. If your ollama runner comm is different (some builds spawn it as <code>ollama_llama_ser</code> — 15-char truncation), copy the exact string from step 1 into <code>blocklist</code>.</blockquote>
+
     <!-- ══════════════ INTEGRATIONS ══════════════ -->
     <h2 id="integrations">Integrations</h2>
     <p>raqib recognizes these out of the box:</p>
@@ -363,55 +518,76 @@ pkill -INT raqib; rm -f /tmp/ram_canary</code></pre>
 
     <!-- ══════════════ API ══════════════ -->
     <h2 id="api">REST API</h2>
-    <p>Served on the web port (default 7070). Unauthenticated on localhost by default; requires <code>Authorization: Bearer &lt;token&gt;</code> if <code>auth_token</code> is set.</p>
+    <p>Served on the web port (default 7070). All <code>/api/*</code> routes are auth-gated: if <code>web.auth_token</code> is set, clients MUST send <code>Authorization: Bearer &lt;token&gt;</code>; if <code>web.allow_no_auth = true</code>, the middleware passes every request through (a loud startup WARN fires when this is combined with a non-loopback bind).</p>
     <table>
-      <tr><th>Endpoint</th><th>Returns</th></tr>
-      <tr><td><code>GET /api/health</code></td><td>liveness</td></tr>
-      <tr><td><code>GET /api/snapshot</code></td><td>full system snapshot — workloads, vitals, top processes, alerts</td></tr>
-      <tr><td><code>GET /api/stream</code></td><td>WebSocket — same shape as snapshot, pushed live</td></tr>
-      <tr><td><code>GET /api/settings</code></td><td>resolved thresholds, governor state, config path</td></tr>
-      <tr><td><code>GET /api/history</code></td><td>recorded event log</td></tr>
+      <tr><th>Method + endpoint</th><th>Returns / accepts</th></tr>
+      <tr><td><code>GET /api/health</code></td><td>Liveness. Empty 200 when the tick loop is running.</td></tr>
+      <tr><td><code>GET /api/snapshot</code></td><td>Full system snapshot — vitals, workloads, top_processes, activity, alerts, recommendations. Frontend polls this on 1 Hz.</td></tr>
+      <tr><td><code>GET /api/stream</code></td><td>WebSocket — same shape as snapshot, pushed on tick. Retained for backward-compat; the first-party dashboard no longer subscribes.</td></tr>
+      <tr><td><code>GET /api/settings</code></td><td>Resolved thresholds + <code>kill_sustain_secs</code>, plus read-only <code>auto_actuate_readonly</code> / <code>default_ai_action_readonly</code>, plus <code>config_path</code>.</td></tr>
+      <tr><td><code>POST /api/settings</code></td><td>Write partial thresholds + <code>kill_sustain_secs</code>. <code>serde(deny_unknown_fields)</code> — any attempt to POST <code>auto_actuate</code> or <code>default_ai_action</code> returns 400. On success: in-memory <code>SharedTunables</code> updated immediately (next tick picks it up), TOML persisted with comments / order preserved (via <code>toml_edit</code>). Response includes <code>persisted: bool</code>.</td></tr>
+      <tr><td><code>GET /api/history</code></td><td>Snapshot of the event log + the dead-PID index (postmortem cell).</td></tr>
+      <tr><td><code>GET /api/history/trajectory/:pid</code></td><td>Per-PID trajectory — the last N samples for the given PID. Powers the Focus / Timeline modes' post-mortem sparklines.</td></tr>
     </table>
-    <p>Key snapshot fields per workload: <code>name</code>, <code>category</code>, <code>cpu_pct</code>, <code>rss_mb</code>, <code>vram_mb</code> (null if unattributable), <code>tokens_per_sec</code>, <code>kv_cache_peak_pct</code>, <code>probe_status</code>, <code>status</code>.</p>
+    <p>Key snapshot fields per workload: <code>name</code>, <code>category</code>, <code>cpu_pct</code>, <code>rss_mb</code>, <code>vram_mb</code> (<code>null</code> if unattributable — <em>never</em> a fake <code>0</code>), <code>tokens_per_sec</code>, <code>kv_cache_peak_pct</code>, <code>probe_status</code>, <code>status</code>. Wire schema lives in the vendored <code>ux_contract</code> crate.</p>
+    <p>Static routes (<code>GET /</code> and <code>GET /assets/*</code>) are ungated so the browser can load the SPA shell to render a token prompt even when the API is locked. CORS is <code>allow_origin(Any)</code> — safe under the default localhost bind (only local origins reach the port); when you opt into <code>--bind 0.0.0.0</code>, <code>auth_token</code> is what carries the security boundary, not CORS.</p>
 
     <!-- ══════════════ TROUBLESHOOTING ══════════════ -->
     <h2 id="troubleshooting">Troubleshooting</h2>
 
     <h3>raqib gets “Stopped” / suspended when I background it</h3>
-    <p>The TUI grabs the terminal. Use <code>--no-ui</code> for background/service runs: <code>nohup raqib --no-ui … &amp; disown</code>.</p>
+    <p>The TUI grabs the terminal. Use <code>--no-ui</code> for background / service runs: <code>nohup raqib --no-ui … &amp; disown</code>. The web dashboard still runs.</p>
+
+    <h3>Fresh install refuses to start</h3>
+    <p>The web-auth validator won't start unless you make an explicit choice — either set <code>[web].auth_token = "…"</code> OR flip <code>[web].allow_no_auth = true</code>. Run <code>raqib init</code>; the starter file writes <code>allow_no_auth = true</code> (safe on the default localhost bind) and heavily comments the trade-off.</p>
 
     <h3>An LLM server is detected but tokens/sec is blank</h3>
-    <p>For llama.cpp, start <code>llama-server</code> with <code>--metrics</code> (Prometheus endpoint is off by default). For any server, throughput only populates during / just after generation — an idle server reads blank.</p>
+    <p>For llama.cpp, start <code>llama-server</code> with <code>--metrics</code> (or export <code>LLAMA_ARG_ENDPOINT_METRICS=1</code>) — the Prometheus endpoint is off by default. For any server, throughput only populates during / just after generation — an idle server reads blank, which is honest, not broken.</p>
 
     <h3>My workload isn't protected even though I allowlisted it</h3>
-    <p>The allowlist matches <code>/proc/&lt;pid&gt;/comm</code>, not the display name. Check the real name with <code>ps -o comm= -p &lt;pid&gt;</code> (e.g. Gazebo is <code>ruby</code>) and allowlist that.</p>
+    <p>The allowlist matches <code>/proc/&lt;pid&gt;/comm</code> — 15-byte capped. Check the real name with <code>ps -o comm= -p &lt;pid&gt;</code> (e.g. Gazebo is <code>ruby</code>; <code>protected_canary</code> truncates to <code>protected_canar</code>) and allowlist THAT.</p>
 
     <h3>All my workloads show “—” for VRAM</h3>
-    <p>If your GPU processes run in containers, the host driver often can't attribute per-process VRAM. raqib honestly reports “—” rather than a fake 0. Device-total VRAM still works.</p>
+    <p>If your GPU processes run in containers, or the NVIDIA kernel module is unloaded on this host, per-process VRAM attribution isn't available. raqib honestly reports <code>—</code> rather than a fake <code>0</code> (a giant "0 % VRAM" on a wall monitor reads as "GPU idle" — a lie). Device-total VRAM still works.</p>
+
+    <h3>The web dashboard is blank / can't be reached from another machine</h3>
+    <p>Since the bind-default change, <code>raqib</code> listens only on <code>127.0.0.1</code>. To reach it from another host, launch with <code>--bind 0.0.0.0</code>, and <em>always</em> pair that with a token: set <code>[web].auth_token</code> before flipping the bind — otherwise a loud startup WARN fires and every <code>/api/*</code> route is open to the LAN. (The dashboard itself works fine — the browser just needs to be on the same box or use SSH port-forwarding: <code>ssh -L 7070:localhost:7070 host</code>.)</p>
+
+    <h3>I edited the config from the web but my comments got scrambled</h3>
+    <p>Fixed in the Tier A polish — Save now uses <code>toml_edit</code>, which preserves comments, blank lines, and key order across every round-trip. If you're on an older build, restart with the current release. Confirm your version: <code>raqib --version</code>.</p>
+
+    <h3>The Save button is disabled and I can't figure out why</h3>
+    <p>If the governor is armed (<code>auto_actuate = true</code>), the Settings panel shows a red <strong>⚠ Governor is ARMED</strong> banner with a mandatory acknowledgement checkbox — Save stays disabled until you tick it. Deliberate speed-bump: threshold changes take effect on the very next tick, so a slider drag on a live governor can immediately fire kills.</p>
 
     <h3>I rebuilt but I'm still seeing old behavior</h3>
-    <p>Restart the running raqib — you're likely still on the old binary. <code>pkill raqib</code> then relaunch. <code>raqib --version</code> confirms which build is running.</p>
+    <p>Restart the running raqib — you're likely still on the old binary. <code>pkill raqib</code>, wait a second, then relaunch. <code>raqib --version</code> confirms which build is running (also visible in the TUI header + the web dashboard header).</p>
 
     <h3>config check is valid but the running instance ignores it</h3>
-    <p>Confirm the running instance loaded that file: <code>curl -s localhost:7070/api/settings | jq .config_path</code>. If it points elsewhere (or you edited the file), restart raqib.</p>
+    <p>Confirm the running instance loaded that file: <code>curl -s localhost:7070/api/settings | jq .config_path</code>. If it points elsewhere (or you edited the file after startup), restart raqib. Only threshold + <code>kill_sustain_secs</code> hot-update on the tick loop; every other field requires restart.</p>
 
     <!-- ══════════════ FAQ ══════════════ -->
     <h2 id="faq">FAQ</h2>
 
     <h3>Is it safe to run on my production box?</h3>
-    <p>Monitoring is passive and read-only. The governor is <strong>off by default</strong> and can't be armed remotely. As long as you don't set <code>auto_actuate = true</code>, raqib will never kill anything on its own — and even the manual kill requires an explicit TUI confirmation.</p>
+    <p>Monitoring is passive and read-only — always safe. The governor is <strong>off by default</strong> and cannot be armed remotely (schema-firewalled at the serde deserializer, structurally excluded from the RuntimeTunables type, seven tripwire tests pinning the boundary end-to-end). As long as you don't set <code>auto_actuate = true</code> in a TOML the running instance actually loaded, raqib will never kill anything on its own — and even the manual kill (<span class="kbd">k</span> in the TUI) requires an explicit confirm card and Enter.</p>
+
+    <h3>Has the auto-kill actually been proven to work?</h3>
+    <p>Yes. RAM live-fire against a real canary (governor evicted it via <code>KillSource::Automated</code>, real workloads survived, exactly one kill) plus a 19-cell signal × threshold matrix (RAM / VRAM / thermal × 60 / 70 / 80 %) all green in the release test suite (1381 total tests, 0 failed). The fix that made it work — moving rate-limit accounting from decision-time to actuation-time so sustained kills can fire — landed as commit <code>c7a3bc0</code>.</p>
 
     <h3>Does it work without an NVIDIA GPU?</h3>
-    <p>Yes — you lose the NVML VRAM/thermal/power metrics, but process, CPU, and memory monitoring still work. AMD/Intel metrics beyond the basics are on the roadmap.</p>
+    <p>Yes — you lose the NVML VRAM / thermal / power metrics, but process, CPU, memory monitoring, RAM thresholds, and the host-thermal signals (via <code>/sys/class/thermal</code>) all still work, along with LLM detection + tokens/sec scraping. AMD / Intel GPU metrics beyond the basics are on the roadmap.</p>
 
     <h3>What's “rcl link” detection?</h3>
-    <p>ROS 2 nodes link the <code>rcl</code> (ROS client library). raqib checks a process's loaded libraries to identify genuine ROS 2 graph participants, rather than guessing from names.</p>
+    <p>ROS 2 nodes link the <code>rcl</code> (ROS client library). raqib checks a process's loaded libraries via <code>/proc/&lt;pid&gt;/maps</code> to identify genuine ROS 2 graph participants, rather than guessing from cmdline strings. That's how it distinguishes an actual ROS node from a script that just happens to have "ros2" in its name.</p>
+
+    <h3>What Linux distributions are supported?</h3>
+    <p>Tested on Ubuntu 22.04 and 24.04. raqib depends on <code>/proc</code>, <code>/sys/class/thermal</code>, and (optionally) NVML — every modern Linux distribution provides those. It has NOT been tested on macOS / Windows / *BSD and will not build there without work (NVML wrapper + procfs assumptions).</p>
 
     <h3>Why does it say “edge_monitor” anywhere?</h3>
-    <p>raqib was previously named edge_monitor. Some internal identifiers (the library crate, the Prometheus metric prefix <code>edge_monitor_*</code>) keep the old name for compatibility; the binary, config, and everything user-facing are <code>raqib</code>.</p>
+    <p>raqib was previously named edge_monitor. Some internal identifiers (the library crate, the Prometheus metric prefix <code>edge_monitor_*</code>, one lingering path in <code>raqib init --help</code>) keep the old name for compatibility; the binary, the user-visible config paths, and everything user-facing are <code>raqib</code>.</p>
 
     <hr>
-    <p style="color: var(--muted); font-size: 0.9em;">raqib — the watchful one. <a href="https://github.com/CTX-012/Raqib">Source on GitHub</a>. Built with Rust + Svelte.</p>
+    <p style="color: var(--muted); font-size: 0.9em;">raqib v1.3.2 — the watchful one. Rust 1.88+, Linux (tested on Ubuntu 22.04 / 24.04). <a href="https://github.com/CTX-012/Raqib">Source on GitHub</a>. Built with Rust + Svelte.</p>
 
   </main>
 </div>

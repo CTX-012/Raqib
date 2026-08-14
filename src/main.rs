@@ -154,18 +154,19 @@ enum Commands {
         command: Vec<String>,
     },
     /// Write a safe-default starter config to
-    /// `~/.config/edge_monitor/edge_monitor.toml` (or an explicit
-    /// `--path`) and exit. Refuses to overwrite an existing file
-    /// unless `--force` is given.
+    /// `~/.config/raqib/raqib.toml` (or an explicit `--path`) and
+    /// exit. Refuses to overwrite an existing file unless `--force`
+    /// is given.
     Init {
         /// Overwrite an existing config file. Off by default so
         /// repeated `init` invocations preserve operator edits.
         #[arg(long)]
         force: bool,
         /// Alternative target path. When omitted, writes to the
-        /// XDG standard location — which is the same place the
-        /// config-discovery fallback chain looks second, so the
-        /// next `edge_monitor` invocation picks it up automatically.
+        /// XDG standard location (`~/.config/raqib/raqib.toml`) —
+        /// which is the same place the config-discovery fallback
+        /// chain looks second, so the next `raqib` invocation picks
+        /// it up automatically.
         #[arg(long, value_name = "PATH")]
         path: Option<PathBuf>,
     },

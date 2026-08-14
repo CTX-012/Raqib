@@ -57,3 +57,4 @@ scratch_web.log
 /q.py
 /yolo_loop.py
 install_docs*.sh
+.elevenlabs_key

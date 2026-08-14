@@ -11,13 +11,9 @@ One screen for every workload competing for your GPU — ROS 2 nodes, LLM server
 ![rust](https://img.shields.io/badge/rust-1.88%2B-orange)
 ![license](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)
 
-<!-- DEMO GIF HERE — the single most important thing in this README.
-     10-second loop of the TUI + a glance of the web kiosk. Record with
-     asciinema+agg or a screen recorder -> docs/demo.gif -->
+![raqib demo — live TUI monitoring the workload mix on one GPU box](docs/demo.gif)
 
-*demo GIF goes here*
-
-**[Full documentation](https://ctx-012.github.io/Raqib/)**
+**[Full documentation](https://ctx-012.github.io/Raqib/)** · [Screenshots](#screenshots) · [Media guardrails](docs/MEDIA.md)
 
 </div>
 
@@ -93,6 +89,28 @@ Full guides, config reference, examples, and troubleshooting live on the **[docu
 - **[The governor](https://ctx-012.github.io/Raqib/#governor)** — the four gates, the two kill paths, the pre-arm checklist
 - Hands-on: **[see an LLM appear](https://ctx-012.github.io/Raqib/#exp-llm)** · **[safe kill demo (canary)](https://ctx-012.github.io/Raqib/#exp-kill)** · **[reclaim VRAM from ollama](https://ctx-012.github.io/Raqib/#exp-ollama-kill)**
 - **[REST API](https://ctx-012.github.io/Raqib/#api)** · **[Integrations](https://ctx-012.github.io/Raqib/#integrations)** · **[Troubleshooting](https://ctx-012.github.io/Raqib/#troubleshooting)** · **[FAQ](https://ctx-012.github.io/Raqib/#faq)**
+
+---
+
+## Screenshots
+
+<a name="screenshots"></a>
+
+Live captures from the dev box on the current `main` branch. Every image is
+governed by [`docs/MEDIA.md`](docs/MEDIA.md), which tracks exactly what each
+one can and cannot be captioned with.
+
+| | |
+|---|---|
+| ![TUI showing the live workload mix](docs/media/tui-workloads.png) | The **TUI** — vitals, workloads sorted by category (LLM / Agent / Vision / ROS 2), top processes, activity feed. One screen for everything competing for the GPU. |
+| ![Web dashboard at localhost:7070](docs/media/web-dashboard.png) | The **web dashboard** at `localhost:7070` — the same live data in the browser. Read state, tune thresholds, persist to your TOML. |
+| ![Activity feed panel showing recent events](docs/media/activity-log.png) | The **activity feed** — kill audit trail, workload starts/stops, and threshold events land here. |
+
+The demo GIF at the top of this README is a 6-second loop of the same TUI
+running against the real workload mix — no kill happens in it. The auto-kill
+sequence lives in the [governor guide](https://ctx-012.github.io/Raqib/#governor)
+and, once the reshoot lands, in the video described in
+[`docs/VIDEO_PLAN.md`](docs/VIDEO_PLAN.md).
 
 ---
 

@@ -1,0 +1,27 @@
+1
+00:00:00,000 --> 00:00:04,000
+Something on this box just took 44% of your VRAM.
+
+2
+00:00:04,000 --> 00:00:16,000
+Thirty-five workloads on one GPU — LLMs, agents, ROS 2. nvtop tells you it happened, five terminals deep.
+
+3
+00:00:16,000 --> 00:00:20,000
+raqib — one pane of glass for everything fighting over your GPU.
+
+4
+00:00:20,000 --> 00:00:37,000
+Sorts them by what they are. Idle models hold no VRAM — raqib says so instead of guessing. An em dash where the number is unknowable, never a fake 0.
+
+5
+00:00:37,000 --> 00:00:49,000
+The governor sent one SIGTERM — on its own — and logged exactly why. Nothing else was touched.
+
+6
+00:00:49,000 --> 00:00:58,000
+Four gates before anything dies. Off by default. The web API can never arm it.
+
+7
+00:00:58,000 --> 00:01:04,000
+Open source. Linux. Beta. It watches by default. Killing is your call.

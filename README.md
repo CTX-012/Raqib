@@ -13,7 +13,9 @@ One screen for every workload competing for your GPU — ROS 2 nodes, LLM server
 
 ![raqib demo — live TUI monitoring the workload mix on one GPU box](docs/demo.gif)
 
-**[Full documentation](https://ctx-012.github.io/Raqib/)** · [Screenshots](#screenshots) · [Media guardrails](docs/MEDIA.md)
+**▶ Watch the full 64-second demo:** [narrated MP4](docs/raqib-demo.mp4) · [silent + captions](docs/raqib-demo-silent.mp4) · [SRT captions](docs/raqib-demo.srt)
+
+**[Full documentation](https://ctx-012.github.io/Raqib/)** · [Screenshots](#screenshots) · [Media guardrails](docs/MEDIA.md) · [Video plan](docs/VIDEO_PLAN.md)
 
 </div>
 
@@ -107,10 +109,11 @@ one can and cannot be captioned with.
 | ![Activity feed panel showing recent events](docs/media/activity-log.png) | The **activity feed** — kill audit trail, workload starts/stops, and threshold events land here. |
 
 The demo GIF at the top of this README is a 6-second loop of the same TUI
-running against the real workload mix — no kill happens in it. The auto-kill
-sequence lives in the [governor guide](https://ctx-012.github.io/Raqib/#governor)
-and, once the reshoot lands, in the video described in
-[`docs/VIDEO_PLAN.md`](docs/VIDEO_PLAN.md).
+running against the real workload mix — no kill happens in it. The 64-second
+[narrated demo](docs/raqib-demo.mp4) walks the whole arc; scene 5 (the auto-kill
+moment) currently uses an animated still + audit-log reconstruction, per the
+fallback in [`docs/VIDEO_PLAN.md` §9](docs/VIDEO_PLAN.md) — the real footage
+lands once the reshoot does.
 
 ---
 

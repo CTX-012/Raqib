@@ -62,16 +62,37 @@ Why each one:
   the build clean on a first-time box.
 - **git / curl / ca-certificates** — for cloning the repo and installing Rust.
 
-### 2. Rust toolchain (rustup — distro packages are too old)
+### 2. Rust toolchain (rustup — installs rustc + cargo + rustup itself)
+
+The official cross-distro installer. One command downloads the `rustup`
+toolchain manager, which then installs the current **stable** channel
+of Rust (rustc + cargo + std) into `~/.cargo/` — no root, no apt.
 
 ```bash
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-source "$HOME/.cargo/env"
-rustc --version   # must be 1.88 or newer
+# Download + run the official rustup installer (non-interactive, default profile)
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile default
+
+# Make cargo/rustc available in THIS shell (rustup adds them to your ~/.bashrc for future shells)
+. "$HOME/.cargo/env"
+
+# Verify — both commands must print 1.88.x or newer
+rustc --version
+cargo --version
 ```
 
+What the installer put on disk:
+
+- `~/.cargo/bin/rustc` — the compiler
+- `~/.cargo/bin/cargo` — the build tool + package manager (fetches every crate raqib depends on)
+- `~/.cargo/bin/rustup` — the toolchain manager (use `rustup update` later to upgrade)
+- `~/.cargo/` and `~/.rustup/` — everything cached under your home; no root, no `/usr/local/` writes
+
 raqib uses `edition = "2024"` and let-chains — needs **Rust 1.88+**. Ubuntu's
-apt-packaged rustc lags by 6–18 months; use rustup.
+apt-packaged rustc lags by 6-18 months (Ubuntu 22.04 ships 1.75, Ubuntu 24.04
+ships 1.77 — both fail to build raqib). Do not `apt install rustc`.
+
+**Restart your terminal** or `. "$HOME/.cargo/env"` in any shell that was
+open before you ran rustup, otherwise `cargo build` won't find `cargo`.
 
 ### 3. (Optional) NVIDIA GPU metrics
 
@@ -90,20 +111,44 @@ sudo reboot                         # required after a fresh driver install
 nvidia-smi                          # verify after the reboot
 ```
 
-### 4. Clone + build raqib
+### 4. Verify all prerequisites (one paste)
+
+Before you clone, sanity-check that every tool is on `PATH` with the right version:
 
 ```bash
+apt list --installed 2>/dev/null | grep -E '^(build-essential|pkg-config|libssl-dev|git|curl|ca-certificates)/' | wc -l   # expect: 6
+rustc --version    # expect: rustc 1.88.x or newer
+cargo --version    # expect: cargo 1.88.x or newer
+git --version      # any recent
+curl --version | head -1
+nvidia-smi -L 2>/dev/null || echo "(no NVIDIA GPU — that's fine, raqib still runs)"
+```
+
+If any of those miss or show the wrong version, fix that step before continuing.
+
+### 5. Clone + build raqib
+
+```bash
+# Clone the repo — Cargo will fetch every Rust dep automatically on first build
 git clone https://github.com/CTX-012/Raqib.git raqib
 cd raqib
-cargo build --release               # ~2-4 min on a modern box, first build
+
+# Build the release binary — Cargo downloads ~150 crates on first build
+# (cached under ~/.cargo/registry/ for the next time). Takes ~2-4 min on a
+# modern box. Watch it — no user input needed.
+cargo build --release
+
+# Install to a directory on PATH so you can call `raqib` from anywhere
 sudo install -m755 target/release/raqib /usr/local/bin/raqib
-raqib --version                     # confirms the binary is on PATH
+
+# Confirm the binary works and the version matches Cargo.toml
+raqib --version    # expect: raqib 1.3.2
 ```
 
 The web dashboard's built bundle (`web/dist/`) is committed, so
 `cargo build --release` works standalone — **no Node.js required for end users.**
 
-### 5. First run
+### 6. First run
 
 ```bash
 raqib init                          # writes a safe-by-default config to ~/.config/raqib/raqib.toml

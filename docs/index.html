@@ -69,6 +69,58 @@
   .card h4 { margin: 0 0 6px; font-size: 1em; }
   .card p { margin: 0; color: var(--muted); font-size: 0.9em; }
   hr { border: none; border-top: 1px solid var(--border); margin: 2.5em 0; }
+
+  /* v1.3.3 — See-it-in-action section */
+  .demo-hero {
+    margin: 2.5em 0;
+    padding: 24px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: linear-gradient(180deg, var(--panel) 0%, var(--code-bg) 100%);
+  }
+  .demo-hero video {
+    width: 100%;
+    max-width: 100%;
+    display: block;
+    border-radius: 8px;
+    background: #000;
+    box-shadow: 0 12px 40px rgba(0,0,0,0.55);
+  }
+  .demo-hero .demo-meta {
+    display: flex; flex-wrap: wrap; gap: 12px; margin-top: 14px;
+    color: var(--muted); font-size: 0.9em;
+  }
+  .demo-hero .demo-meta a {
+    padding: 4px 12px; border: 1px solid var(--border); border-radius: 999px;
+  }
+  .demo-hero .demo-hint {
+    color: var(--muted); font-size: 0.88em; margin: 12px 0 0;
+  }
+  .gallery {
+    display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin: 1.5em 0;
+  }
+  .gallery figure { margin: 0; }
+  .gallery img {
+    width: 100%; display: block; border-radius: 6px;
+    border: 1px solid var(--border); background: #000;
+  }
+  .gallery figcaption {
+    color: var(--muted); font-size: 0.82em; margin-top: 6px; line-height: 1.4;
+  }
+  .cta-row {
+    display: flex; gap: 12px; flex-wrap: wrap; margin: 1.5em 0;
+  }
+  .cta-row a {
+    padding: 10px 18px; border: 1px solid var(--accent); border-radius: 6px;
+    font-weight: 600;
+  }
+  .cta-row a.primary {
+    background: var(--accent); color: var(--bg);
+  }
+  .cta-row a.primary:hover { background: #7fb1ff; text-decoration: none; }
+  @media (max-width: 820px) {
+    .gallery { grid-template-columns: 1fr; }
+  }
   @media (max-width: 820px) {
     .sidebar { display: none; }
     .content { padding: 24px; }
@@ -84,6 +136,7 @@
     <div class="tag">the watcher for your GPU box</div>
     <nav>
       <a href="#top">Overview</a>
+      <a href="#see">See it in action</a>
       <div class="group">Getting started</div>
       <a href="#install">Installation</a>
       <a href="#first-run">First run</a>
@@ -131,6 +184,57 @@
       <div class="card"><h4>🎯 Honest metrics</h4><p>Unmeasurable VRAM shows <code>—</code>, never a fake <code>0</code>. A blank means "unknown," not "idle."</p></div>
       <div class="card"><h4>📊 Live LLM health</h4><p>Reachability + tokens/sec + KV-cache % for ollama, vLLM, and llama.cpp — scraped live.</p></div>
       <div class="card"><h4>🛡️ The governor</h4><p>Off by default, can't be armed from the web, four gates before every kill. Proven live + 19-cell test matrix green.</p></div>
+    </div>
+
+    <!-- ══════════════ SEE IT IN ACTION ══════════════ -->
+    <h2 id="see">See it in action</h2>
+
+    <p>The 64-second narrated tour walks the same arc as this guide — the workload mix, the monitoring view, the governor firing on its own (with an on-screen "reconstruction from audit log" label until the live-fire reshoot lands), and the four safety gates.</p>
+
+    <div class="demo-hero">
+      <video src="raqib-demo.mp4"
+             controls muted loop playsinline preload="metadata"
+             poster="media/tui-workloads.png"
+             width="1280">
+        Your browser can't play the embedded video.
+        <a href="raqib-demo.mp4">Download the 64-second narrated demo (3.2 MB, MP4)</a>.
+      </video>
+      <p class="demo-hint"><strong>▶ Play the video</strong> — narrated (Piper offline TTS), captions burned in, 1920×1080. Autoplay is muted per browser policy; click to unmute if you want the VO.</p>
+      <div class="demo-meta">
+        <span>64 s · 3.2 MB · H.264 + AAC</span>
+        <a href="raqib-demo-silent.mp4">Silent + captions</a>
+        <a href="raqib-demo.srt">SRT captions</a>
+        <a href="demo.gif">6-second GIF loop</a>
+        <a href="VIDEO_PLAN.md">Video plan (§9 reshoot notes)</a>
+      </div>
+    </div>
+
+    <h3 id="see-gif">6-second monitoring loop (README hero)</h3>
+    <p>A silent GIF loop of the live TUI. This is what shows up at the top of the GitHub README — no click required, plays instantly, no kill happens in it (that story lands in the video above and the <a href="#exp-ollama-kill">ollama recipe</a>).</p>
+    <p><img src="demo.gif" alt="raqib live TUI monitoring the workload mix on one GPU box" style="max-width:100%; border-radius: 6px; border: 1px solid var(--border);"></p>
+
+    <h3 id="see-gallery">Screenshots</h3>
+    <p>Live captures from the dev box on the current <code>main</code> branch. Every image is governed by <a href="MEDIA.md"><code>docs/MEDIA.md</code></a>'s claim table — nothing here is captioned with a feature it doesn't visibly show.</p>
+    <div class="gallery">
+      <figure>
+        <img src="media/tui-workloads.png" alt="raqib TUI showing the live workload mix">
+        <figcaption><strong>The TUI</strong> — vitals, workloads sorted by category (LLM / Agent / Vision / ROS 2), top processes, activity feed. One screen for everything competing for the GPU.</figcaption>
+      </figure>
+      <figure>
+        <img src="media/web-dashboard.png" alt="raqib web dashboard at localhost:7070">
+        <figcaption><strong>The web dashboard</strong> at <code>localhost:7070</code> — the same live data in the browser. Read state, tune thresholds, persist to your TOML.</figcaption>
+      </figure>
+      <figure>
+        <img src="media/activity-log.png" alt="raqib activity feed panel showing recent events">
+        <figcaption><strong>The activity feed</strong> — kill audit trail, workload starts / stops, threshold events land here.</figcaption>
+      </figure>
+    </div>
+
+    <div class="cta-row">
+      <a href="#install" class="primary">Install raqib</a>
+      <a href="#first-run">First run</a>
+      <a href="#governor">The governor</a>
+      <a href="https://github.com/CTX-012/Raqib">Source on GitHub</a>
     </div>
 
     <!-- ══════════════ INSTALL ══════════════ -->

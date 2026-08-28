@@ -41,37 +41,119 @@ Tools like `nvtop`, `btop`, and `ollama ps` show you *that* it happened — all 
 
 ## Quick start
 
+Fresh Ubuntu 22.04 or 24.04 box → running raqib in about five minutes. Every
+line below is a real command; nothing hand-waved.
+
+### 1. System packages (apt)
+
 ```bash
-# prerequisites: build-essential, pkg-config, libssl-dev, git,
-#                Rust 1.88+ (install via rustup — distro packages are usually too old)
-git clone https://github.com/CTX-012/Raqib.git raqib
-cd raqib
-
-# build the raqib binary (web dashboard assets are pre-built + committed)
-cargo build --release
-sudo install -m755 target/release/raqib /usr/local/bin/raqib
-
-# first run
-raqib init      # writes a safe-by-default config to ~/.config/raqib/raqib.toml
-raqib           # TUI + web dashboard on http://localhost:7070
+sudo apt update
+sudo apt install -y \
+  build-essential pkg-config libssl-dev \
+  git curl ca-certificates
 ```
 
-The web dashboard's built bundle (`web/dist/`) is committed to the repo, so
-`cargo build --release` works standalone — no Node.js required for end users.
-Contributors who modify anything under `web/src/` need Node.js 20+ and must
-regenerate the bundle with `npm --prefix web ci && npm --prefix web run build`
-before committing; CI enforces that the committed `web/dist/` matches a fresh
-build.
+Why each one:
 
-Monitoring is on; the governor is off. Open `http://localhost:7070` for the web view.
+- **build-essential** — C compiler + linker for the native bits of some crates.
+- **pkg-config** — how Cargo discovers system libraries.
+- **libssl-dev** — a few transitive deps still expect OpenSSL headers at build time.
+  raqib itself uses rustls (no OpenSSL at runtime), but the dev headers keep
+  the build clean on a first-time box.
+- **git / curl / ca-certificates** — for cloning the repo and installing Rust.
 
-**Common commands:**
+### 2. Rust toolchain (rustup — distro packages are too old)
 
 ```bash
-raqib --no-ui        # web only (use for background/service runs)
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+source "$HOME/.cargo/env"
+rustc --version   # must be 1.88 or newer
+```
+
+raqib uses `edition = "2024"` and let-chains — needs **Rust 1.88+**. Ubuntu's
+apt-packaged rustc lags by 6–18 months; use rustup.
+
+### 3. (Optional) NVIDIA GPU metrics
+
+Skip this on an integrated-GPU or non-NVIDIA box — raqib still works, you just
+lose NVML VRAM / thermal / power.
+
+```bash
+nvidia-smi   # if this prints your GPU, NVML is already present — done.
+```
+
+If `nvidia-smi` is missing:
+
+```bash
+sudo ubuntu-drivers install         # picks the recommended driver
+sudo reboot                         # required after a fresh driver install
+nvidia-smi                          # verify after the reboot
+```
+
+### 4. Clone + build raqib
+
+```bash
+git clone https://github.com/CTX-012/Raqib.git raqib
+cd raqib
+cargo build --release               # ~2-4 min on a modern box, first build
+sudo install -m755 target/release/raqib /usr/local/bin/raqib
+raqib --version                     # confirms the binary is on PATH
+```
+
+The web dashboard's built bundle (`web/dist/`) is committed, so
+`cargo build --release` works standalone — **no Node.js required for end users.**
+
+### 5. First run
+
+```bash
+raqib init                          # writes a safe-by-default config to ~/.config/raqib/raqib.toml
+raqib                               # TUI + web dashboard on http://127.0.0.1:7070
+```
+
+Monitoring is on; the governor is off. Press <kbd>?</kbd> for keybindings,
+<kbd>q</kbd> to quit. Open `http://127.0.0.1:7070` in a browser for the web
+view.
+
+### Common commands
+
+```bash
+raqib --no-ui        # web only (use for background / service runs)
 raqib --no-web       # TUI only
-raqib config check   # validate config + print the loaded policy
-raqib --help
+raqib config check   # validate config + print the loaded policy (pre-arm gate)
+raqib --help         # all flags
+```
+
+### Contributor extras (only if you're editing web/src/)
+
+End users don't need Node.js. Contributors modifying anything under `web/src/`
+do — Node 20+ and npm — to regenerate the committed bundle. CI enforces that
+`web/dist/` matches a fresh build:
+
+```bash
+# Node 20 via NodeSource (Ubuntu):
+curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+sudo apt install -y nodejs
+npm --prefix web ci
+npm --prefix web run build          # regenerates web/dist/
+npm --prefix web run test:browser   # 221 render assertions
+```
+
+### Update raqib
+
+```bash
+cd raqib
+git pull
+cargo build --release
+sudo install -m755 target/release/raqib /usr/local/bin/raqib
+raqib --version
+```
+
+### Uninstall
+
+```bash
+sudo rm /usr/local/bin/raqib
+rm -rf ~/.config/raqib               # optional — removes your config too
+# clone directory + ~/.cargo can be removed too if you're not using Rust elsewhere
 ```
 
 ---

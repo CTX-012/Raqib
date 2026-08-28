@@ -11,9 +11,13 @@ One screen for every workload competing for your GPU — ROS 2 nodes, LLM server
 ![rust](https://img.shields.io/badge/rust-1.88%2B-orange)
 ![license](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)
 
+<video src="https://github.com/CTX-012/Raqib/raw/main/docs/raqib-demo.mp4" controls muted loop playsinline poster="https://raw.githubusercontent.com/CTX-012/Raqib/main/docs/media/tui-workloads.png" width="720">
+Your browser can't play the embedded video. <a href="docs/raqib-demo.mp4">Download the 64-second narrated demo (3.2 MB, MP4)</a>.
+</video>
+
 ![raqib demo — live TUI monitoring the workload mix on one GPU box](docs/demo.gif)
 
-**▶ Watch the full 64-second demo:** [narrated MP4](docs/raqib-demo.mp4) · [silent + captions](docs/raqib-demo-silent.mp4) · [SRT captions](docs/raqib-demo.srt)
+**Also:** [silent + captions MP4](docs/raqib-demo-silent.mp4) · [SRT captions](docs/raqib-demo.srt) · [6s hero GIF above](docs/demo.gif)
 
 **[Full documentation](https://ctx-012.github.io/Raqib/)** · [Screenshots](#screenshots) · [Media guardrails](docs/MEDIA.md) · [Video plan](docs/VIDEO_PLAN.md)
 
